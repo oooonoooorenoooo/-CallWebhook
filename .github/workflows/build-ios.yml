@@ -1,0 +1,36 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build unsigned app
+        run: |
+          xcodebuild -project CallWebhook.xcodeproj \
+            -scheme CallWebhook \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+      - name: Create IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/CallWebhook.app Payload/
+          zip -r CallWebhook-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CallWebhook-unsigned
+          path: CallWebhook-unsigned.ipa

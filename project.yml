@@ -5,7 +5,7 @@ targets:
   CallWebhook:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "26.0"
     sources:
       - CallWebhook
     settings:
@@ -13,6 +13,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook
+        CODE_SIGN_ENTITLEMENTS: CallWebhook/CallWebhook.entitlements
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_IDENTITY: ""

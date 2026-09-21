@@ -3,106 +3,172 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
-    @State private var showToken = false
 
-    private let rows = [
-        ["1", "2", "3"],
-        ["4", "5", "6"],
-        ["7", "8", "9"],
-        ["*", "0", "#"]
-    ]
+    var body: some View {
+        TabView {
+            CallsView()
+                .tabItem { Label("Anrufe", systemImage: "clock.fill") }
+
+            ContactsView()
+                .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
+
+            DialPadView(dialer: dialer)
+                .tabItem { Label("Zifferblatt", systemImage: "circle.grid.3x3.fill") }
+
+            ExtrasView()
+                .tabItem { Label("Extras", systemImage: "ellipsis.circle.fill") }
+        }
+        .tint(.blue)
+    }
+}
+
+private struct CallsView: View {
+    @EnvironmentObject var monitor: CallMonitor
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
-                    Image(systemName: monitor.active ? "phone.fill" : "phone")
-                        .font(.system(size: 44))
-                    Text(monitor.active ? "Telefon aktiv" : "Kein Telefonat")
-                        .font(.title2.bold())
+            Group {
+                if monitor.log.isEmpty {
+                    ContentUnavailableView("Keine Anrufe", systemImage: "phone", description: Text("Die Anrufhistorie erscheint hier."))
+                } else {
+                    List(monitor.log, id: \.self) { entry in
+                        Label(entry, systemImage: "phone")
+                            .font(.callout)
+                    }
+                }
+            }
+            .navigationTitle("Anrufe")
+        }
+    }
+}
 
-                    TextField("Telefonnummer", text: $dialer.number)
-                        .keyboardType(.phonePad)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.title2.monospacedDigit())
-                        .padding(.horizontal)
+private struct ContactsView: View {
+    var body: some View {
+        NavigationStack {
+            ContentUnavailableView(
+                "Kontakte",
+                systemImage: "person.crop.circle",
+                description: Text("Die iPhone-Kontakte werden hier eingebunden.")
+            )
+            .navigationTitle("Kontakte")
+        }
+    }
+}
 
-                    ForEach(rows, id: \.self) { row in
-                        HStack(spacing: 24) {
-                            ForEach(row, id: \.self) { digit in
-                                Button(digit) { dialer.append(digit) }
-                                    .font(.title.bold())
-                                    .frame(width: 64, height: 52)
-                                    .buttonStyle(.bordered)
+private struct DialPadView: View {
+    @ObservedObject var dialer: DialerModel
+    private let rows = [["1","2","3"],["4","5","6"],["7","8","9"],["*","0","#"]]
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 18) {
+                Spacer()
+
+                Text(dialer.number.isEmpty ? " " : dialer.number)
+                    .font(.system(size: 34, weight: .regular, design: .rounded))
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                    .frame(height: 44)
+
+                ForEach(rows, id: \.self) { row in
+                    HStack(spacing: 26) {
+                        ForEach(row, id: \.self) { digit in
+                            Button {
+                                dialer.append(digit)
+                            } label: {
+                                Text(digit)
+                                    .font(.system(size: 30, weight: .medium, design: .rounded))
+                                    .frame(width: 72, height: 72)
+                                    .background(.thinMaterial, in: Circle())
                             }
+                            .buttonStyle(.plain)
                         }
                     }
+                }
 
-                    HStack(spacing: 24) {
-                        Button {
-                            dialer.call()
-                        } label: {
-                            Image(systemName: "phone.fill")
-                                .font(.title2)
-                                .frame(width: 64, height: 44)
-                        }
-                        .buttonStyle(.borderedProminent)
+                HStack(spacing: 42) {
+                    Color.clear.frame(width: 72, height: 72)
 
-                        Button {
-                            dialer.deleteLast()
-                        } label: {
-                            Image(systemName: "delete.left")
-                                .font(.title2)
-                                .frame(width: 64, height: 44)
-                        }
-                        .buttonStyle(.bordered)
+                    Button {
+                        dialer.call()
+                    } label: {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 30, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 72, height: 72)
+                            .background(.green, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        dialer.deleteLast()
+                    } label: {
+                        Image(systemName: "delete.left")
+                            .font(.title2)
+                            .frame(width: 72, height: 72)
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(dialer.number.isEmpty ? 0 : 1)
+                }
+
+                Text(dialer.status)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(height: 20)
+
+                Spacer()
+            }
+            .padding(.horizontal)
+            .navigationTitle("Zifferblatt")
+        }
+    }
+}
+
+private struct ExtrasView: View {
+    @EnvironmentObject var monitor: CallMonitor
+    @State private var showToken = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Home Assistant") {
+                    LabeledContent("Telefonstatus", value: monitor.haState)
+
+                    Button("HA-Status aktualisieren") {
+                        monitor.refreshHAState()
                     }
 
-                    Text(dialer.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Divider()
-
-                    HStack {
-                        Circle()
-                            .frame(width: 12, height: 12)
-                            .opacity((monitor.haState == "ON" || monitor.haState == "OFF") ? 1 : 0.35)
-                        Text("Home Assistant: \(monitor.haState)")
-                            .font(.headline)
+                    Button("Aktuellen Telefonstatus senden") {
+                        monitor.sendCurrentState()
                     }
+                }
 
-                    HStack {
-                        Button("HA aktualisieren") { monitor.refreshHAState() }
-                            .buttonStyle(.bordered)
-                        Button("Status senden") { monitor.sendCurrentState() }
-                            .buttonStyle(.bordered)
-                    }
-
-                    DisclosureGroup("Home-Assistant-Token", isExpanded: $showToken) {
-                        SecureField("Long-Lived Access Token", text: $monitor.haToken)
+                Section("Verbindung") {
+                    DisclosureGroup("Long-Lived Access Token", isExpanded: $showToken) {
+                        SecureField("Token", text: $monitor.haToken)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .textContentType(.password)
-                            .padding(.vertical, 8)
+
                         Button("Token speichern & testen") {
                             monitor.refreshHAState()
                             showToken = false
                         }
                     }
-                    .padding(.horizontal)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(monitor.log.prefix(12), id: \.self) { entry in
-                            Text(entry).font(.caption2.monospaced())
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal)
                 }
-                .padding(.vertical)
+
+                Section("Diagnose") {
+                    LabeledContent("CallKit", value: monitor.active ? "Telefon aktiv" : "Bereit")
+                    Text(monitor.lastEvent)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(monitor.log.prefix(8), id: \.self) { entry in
+                        Text(entry)
+                            .font(.caption.monospaced())
+                    }
+                }
             }
-            .navigationTitle("CallWebhook Dialer")
+            .navigationTitle("Extras")
         }
     }
 }

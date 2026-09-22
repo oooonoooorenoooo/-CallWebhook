@@ -13,6 +13,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         CODE_SIGN_ENTITLEMENTS: CallWebhook/CallWebhook.entitlements
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO

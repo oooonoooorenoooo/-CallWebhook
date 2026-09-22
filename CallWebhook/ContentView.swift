@@ -26,20 +26,35 @@ struct ContentView: View {
 
 private struct CallsView: View {
     @EnvironmentObject var monitor: CallMonitor
+    @State private var selection = 0
 
     var body: some View {
         NavigationStack {
-            Group {
-                if monitor.log.isEmpty {
-                    ContentUnavailableView("Keine Anrufe", systemImage: "phone", description: Text("Die Anrufhistorie erscheint hier."))
+            VStack(spacing: 0) {
+                Picker("Ansicht", selection: $selection) {
+                    Text("Anrufe").tag(0)
+                    Text("HA-Status").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+
+                if selection == 0 {
+                    ContentUnavailableView(
+                        "Keine Anrufe",
+                        systemImage: "phone",
+                        description: Text("Die Anrufhistorie erscheint hier.")
+                    )
                 } else {
                     List(monitor.log, id: \.self) { entry in
-                        Label(entry, systemImage: "phone")
+                        Label(entry, systemImage: "house.fill")
                             .font(.callout)
                     }
+                    .listStyle(.plain)
                 }
             }
             .navigationTitle("Anrufe")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }

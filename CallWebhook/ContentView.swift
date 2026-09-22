@@ -35,6 +35,10 @@ private struct CallsView: View {
         case phoneNumber = "Telefonnummer"
         case contact = "Kontakt"
         case date = "Datum"
+        case incoming = "Eingehend"
+        case outgoing = "Ausgehend"
+        case missed = "Verpasst"
+        case voicemail = "Voicemail"
 
         var id: Self { self }
     }

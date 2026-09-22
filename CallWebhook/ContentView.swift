@@ -231,6 +231,11 @@ private struct ExtrasView: View {
     @AppStorage("callFilterMode") private var callFilterMode = "Blacklist"
     @AppStorage("blacklistEntries") private var blacklistEntries = ""
     @AppStorage("whitelistEntries") private var whitelistEntries = ""
+    @AppStorage("phoneBlockEnabled") private var phoneBlockEnabled = false
+    @AppStorage("phoneBlockMinVotes") private var phoneBlockMinVotes = 4
+    @AppStorage("externalListURL") private var externalListURL = ""
+    @AppStorage("externalListName") private var externalListName = ""
+    @AppStorage("externalListEnabled") private var externalListEnabled = false
     @State private var showMobile = true
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
@@ -279,6 +284,37 @@ private struct ExtrasView: View {
                 }
 
                 DisclosureGroup("Anruffilter", isExpanded: $showCallFilter) {
+                    Section {
+                        Toggle("PhoneBlock Community", isOn: $phoneBlockEnabled)
+
+                        if phoneBlockEnabled {
+                            Stepper("Mindestmeldungen: \(phoneBlockMinVotes)", value: $phoneBlockMinVotes, in: 1...20)
+                            Text("Vorkonfigurierte Community-Quelle. Die persönliche Whitelist hat später immer Vorrang.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        Text("Community-Listen")
+                    }
+
+                    Section {
+                        TextField("Listenname", text: $externalListName)
+                        TextField("HTTPS-URL (TXT / CSV / JSON)", text: $externalListURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                        Toggle("Externe Liste aktiv", isOn: $externalListEnabled)
+                            .disabled(externalListURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        Button("Liste jetzt laden") {
+                            // Netzwerkimport und Parser werden als eigener Dienst angebunden.
+                        }
+                        .disabled(!externalListEnabled || externalListURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    } header: {
+                        Text("Eigene Listenquelle")
+                    }
+
+                    Section {
                     Picker("Modus", selection: $callFilterMode) {
                         Text("Blacklist").tag("Blacklist")
                         Text("Whitelist").tag("Whitelist")
@@ -308,6 +344,9 @@ private struct ExtrasView: View {
                          : "Im Whitelist-Modus sollen später nur freigegebene Einträge durchgestellt werden.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    } header: {
+                        Text("Eigene Einträge")
+                    }
                 }
             }
             .navigationTitle("Extras")

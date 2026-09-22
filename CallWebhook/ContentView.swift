@@ -152,19 +152,13 @@ private struct DialPadView: View {
                     }
                 }
 
-                HStack(spacing: 42) {
-                    Color.clear.frame(width: 72, height: 72)
-
-                    Button {
-                        dialer.call()
-                    } label: {
-                        Image(systemName: "phone.fill")
-                            .font(.system(size: 30, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 72, height: 72)
-                            .background(.green, in: Circle())
+                HStack(spacing: 28) {
+                    if !secondaryPhoneNumber.isEmpty {
+                        callButton(line: 1)
+                        callButton(line: 2)
+                    } else {
+                        callButton(line: nil)
                     }
-                    .buttonStyle(.plain)
 
                     Button {
                         dialer.deleteLast()
@@ -187,6 +181,35 @@ private struct DialPadView: View {
             .padding(.horizontal)
             .navigationTitle("Zifferblatt")
         }
+    }
+
+    @ViewBuilder
+    private func callButton(line: Int?) -> some View {
+        Button {
+            dialer.call()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.green)
+                    .frame(width: 72, height: 72)
+
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                if let line {
+                    Text("\(line)")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: 20, height: 20)
+                        .background(.black.opacity(0.55), in: Circle())
+                        .offset(x: 24, y: -24)
+                }
+            }
+            .frame(width: 72, height: 72)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(line == nil ? "Anrufen" : "Mit Leitung \(line!) anrufen")
     }
 }
 

@@ -215,7 +215,8 @@ private struct DialPadView: View {
 
 private struct ExtrasView: View {
     @EnvironmentObject var monitor: CallMonitor
-    @FocusState private var phoneFieldFocused: Bool
+    private enum PhoneField: Hashable { case primary, secondary }
+    @FocusState private var focusedPhoneField: PhoneField?
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
     @State private var showToken = false
@@ -226,10 +227,10 @@ private struct ExtrasView: View {
                 Section("Mobilfunk / Dual-SIM") {
                     TextField("Primäre Rufnummer", text: $primaryPhoneNumber)
                         .keyboardType(.phonePad)
-                        .focused($phoneFieldFocused)
+                        .focused($focusedPhoneField, equals: .primary)
                     TextField("Zweite Rufnummer", text: $secondaryPhoneNumber)
                         .keyboardType(.phonePad)
-                        .focused($phoneFieldFocused)
+                        .focused($focusedPhoneField, equals: .secondary)
                     Text("Die Nummern werden lokal gespeichert. Die Leitungsauswahl beim Anruf übernimmt iOS bzw. die Mobilfunk-Dialer-Schnittstelle.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -277,11 +278,10 @@ private struct ExtrasView: View {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Fertig") {
-                        phoneFieldFocused = false
+                        focusedPhoneField = nil
                     }
                 }
             }
-            .onChange(of: primaryPhoneNumber) { _, _ in }
         }
     }
 }

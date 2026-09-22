@@ -31,16 +31,16 @@ private struct CallsView: View {
     @State private var selection = 0
     @State private var searchText = ""
     @State private var filter = CallHistoryFilter.all
+    @State private var showIncoming = true
+    @State private var showOutgoing = true
+    @State private var showMissed = true
+    @State private var showVoicemail = true
 
     private enum CallHistoryFilter: String, CaseIterable, Identifiable {
         case all = "Alle"
         case phoneNumber = "Telefonnummer"
         case contact = "Kontakt"
         case date = "Datum"
-        case incoming = "Eingehend"
-        case outgoing = "Ausgehend"
-        case missed = "Verpasst"
-        case voicemail = "Voicemail"
 
         var id: Self { self }
     }
@@ -58,6 +58,14 @@ private struct CallsView: View {
 
                 if selection == 0 {
                     VStack(spacing: 8) {
+                        HStack(spacing: 7) {
+                            typeFilterButton("Eingehend", systemImage: "phone.arrow.down.left", isOn: $showIncoming)
+                            typeFilterButton("Ausgehend", systemImage: "phone.arrow.up.right", isOn: $showOutgoing)
+                            typeFilterButton("Verpasst", systemImage: "phone.down", isOn: $showMissed)
+                            typeFilterButton("Voicemail", systemImage: "recordingtape", isOn: $showVoicemail)
+                        }
+                        .padding(.horizontal)
+
                         Picker("Filter", selection: $filter) {
                             ForEach(CallHistoryFilter.allCases) { item in
                                 Text(item.rawValue).tag(item)
@@ -91,6 +99,26 @@ private struct CallsView: View {
             .navigationTitle("Anrufe")
             .navigationBarTitleDisplayMode(.inline)
         }
+    }
+
+    private func typeFilterButton(_ title: String, systemImage: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.caption)
+                Text(title)
+                    .font(.system(size: 9, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .foregroundStyle(isOn.wrappedValue ? Color.white : Color.secondary)
+            .background(isOn.wrappedValue ? Color.blue : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -166,6 +194,9 @@ private struct DialPadView: View {
                     .disabled(dialer.number.isEmpty)
                     .opacity(dialer.number.isEmpty ? 0.35 : 1)
                     .accessibilityLabel("Letzte Ziffer löschen")
+                    .onLongPressGesture(minimumDuration: 0.6) {
+                        dialer.number = ""
+                    }
                 }
 
                 ForEach(rows, id: \.self) { row in

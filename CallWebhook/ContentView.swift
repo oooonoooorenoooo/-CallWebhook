@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
+    @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
 
@@ -12,7 +14,7 @@ struct ContentView: View {
             ContactsView()
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
 
-            DialPadView(dialer: dialer)
+            DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber)
                 .tabItem { Label("Zifferblatt", systemImage: "circle.grid.3x3.fill") }
 
             ExtrasView()
@@ -57,11 +59,27 @@ private struct ContactsView: View {
 
 private struct DialPadView: View {
     @ObservedObject var dialer: DialerModel
+    let primaryPhoneNumber: String
+    let secondaryPhoneNumber: String
     private let rows = [["1","2","3"],["4","5","6"],["7","8","9"],["*","0","#"]]
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 18) {
+                VStack(spacing: 3) {
+                    if !primaryPhoneNumber.isEmpty {
+                        Text(primaryPhoneNumber)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !secondaryPhoneNumber.isEmpty {
+                        Text(secondaryPhoneNumber)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(height: 38)
+
                 Spacer()
 
                 Text(dialer.number.isEmpty ? " " : dialer.number)
@@ -126,11 +144,23 @@ private struct DialPadView: View {
 
 private struct ExtrasView: View {
     @EnvironmentObject var monitor: CallMonitor
+    @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
+    @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
     @State private var showToken = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Mobilfunk / Dual-SIM") {
+                    TextField("Primäre Rufnummer", text: $primaryPhoneNumber)
+                        .keyboardType(.phonePad)
+                    TextField("Zweite Rufnummer", text: $secondaryPhoneNumber)
+                        .keyboardType(.phonePad)
+                    Text("Die Nummern werden lokal gespeichert. Die Leitungsauswahl beim Anruf übernimmt iOS bzw. die Mobilfunk-Dialer-Schnittstelle.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Home Assistant") {
                     LabeledContent("Telefonstatus", value: monitor.haState)
 

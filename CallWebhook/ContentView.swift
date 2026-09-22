@@ -15,6 +15,7 @@ struct ContentView: View {
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
 
             DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber)
+                .environmentObject(monitor)
                 .tabItem { Label("Zifferblatt", systemImage: "circle.grid.3x3.fill") }
 
             ExtrasView()
@@ -106,6 +107,7 @@ private struct ContactsView: View {
 }
 
 private struct DialPadView: View {
+    @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     let primaryPhoneNumber: String
     let secondaryPhoneNumber: String
@@ -152,23 +154,15 @@ private struct DialPadView: View {
                     }
                 }
 
-                HStack(spacing: 28) {
+                HStack(spacing: 22) {
                     if !secondaryPhoneNumber.isEmpty {
                         callButton(line: 1)
+                        endCallButton
                         callButton(line: 2)
                     } else {
                         callButton(line: nil)
+                        endCallButton
                     }
-
-                    Button {
-                        dialer.deleteLast()
-                    } label: {
-                        Image(systemName: "delete.left")
-                            .font(.title2)
-                            .frame(width: 72, height: 72)
-                    }
-                    .buttonStyle(.plain)
-                    .opacity(dialer.number.isEmpty ? 0 : 1)
                 }
 
                 Text(dialer.status)
@@ -181,6 +175,21 @@ private struct DialPadView: View {
             .padding(.horizontal)
             .navigationTitle("Zifferblatt")
         }
+    }
+
+    private var endCallButton: some View {
+        Button {
+            // Die echte Beenden-Aktion wird mit der Default-Dialer-Steuerung verbunden.
+        } label: {
+            Image(systemName: "phone.down.fill")
+                .font(.system(size: 27, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 72, height: 72)
+                .background(monitor.active ? Color.red : Color.gray.opacity(0.45), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!monitor.active)
+        .accessibilityLabel("Anruf beenden")
     }
 
     @ViewBuilder

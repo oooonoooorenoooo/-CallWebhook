@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -118,25 +119,54 @@ private struct DialPadView: View {
             VStack(spacing: 18) {
                 VStack(spacing: 3) {
                     if !primaryPhoneNumber.isEmpty {
-                        Text(primaryPhoneNumber)
+                        Text("SIM 1  \(primaryPhoneNumber)")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     if !secondaryPhoneNumber.isEmpty {
-                        Text(secondaryPhoneNumber)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                        Text("SIM 2  \(secondaryPhoneNumber)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .frame(height: 38)
 
                 Spacer()
 
-                Text(dialer.number.isEmpty ? " " : dialer.number)
-                    .font(.system(size: 34, weight: .regular, design: .rounded))
-                    .minimumScaleFactor(0.6)
-                    .lineLimit(1)
-                    .frame(height: 44)
+                HStack(spacing: 12) {
+                    Button {
+                        if let value = UIPasteboard.general.string?
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                           !value.isEmpty {
+                            dialer.number = value
+                        }
+                    } label: {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.title3)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Aus Zwischenablage einfügen")
+
+                    Text(dialer.number.isEmpty ? " " : dialer.number)
+                        .font(.system(size: 34, weight: .regular, design: .rounded))
+                        .minimumScaleFactor(0.6)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+
+                    Button {
+                        dialer.deleteLast()
+                    } label: {
+                        Image(systemName: "delete.left")
+                            .font(.title3)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(dialer.number.isEmpty)
+                    .opacity(dialer.number.isEmpty ? 0.35 : 1)
+                    .accessibilityLabel("Letzte Ziffer löschen")
+                }
 
                 ForEach(rows, id: \.self) { row in
                     HStack(spacing: 26) {
@@ -257,9 +287,16 @@ private struct ExtrasView: View {
                     TextField("Primäre Rufnummer", text: $primaryPhoneNumber)
                         .keyboardType(.phonePad)
                         .focused($focusedPhoneField, equals: .primary)
+                        .submitLabel(.done)
                     TextField("Zweite Rufnummer", text: $secondaryPhoneNumber)
                         .keyboardType(.phonePad)
                         .focused($focusedPhoneField, equals: .secondary)
+                        .submitLabel(.done)
+
+                    Button("Tastatur schließen") {
+                        focusedPhoneField = nil
+                    }
+                    .disabled(focusedPhoneField == nil)
                 }
 
                 DisclosureGroup("Home Assistant", isExpanded: $showHomeAssistant) {
@@ -357,6 +394,10 @@ private struct ExtrasView: View {
                         focusedPhoneField = nil
                     }
                 }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .onTapGesture {
+                focusedPhoneField = nil
             }
         }
     }

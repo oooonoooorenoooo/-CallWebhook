@@ -298,7 +298,7 @@ private struct ExtrasView: View {
     @AppStorage("externalListURL") private var externalListURL = ""
     @AppStorage("externalListName") private var externalListName = ""
     @AppStorage("externalListEnabled") private var externalListEnabled = false
-    @State private var showMobile = true
+    @State private var showMobile = false
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
     @State private var newBlacklistEntry = ""
@@ -341,6 +341,12 @@ private struct ExtrasView: View {
                     Button("Aktuellen Telefonstatus senden") {
                         monitor.sendCurrentState()
                     }
+
+                    Text("Long-Lived Access Token")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Hier den Long-Lived Access Token aus Home Assistant einfügen.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
                     SecureField("Long-Lived Access Token", text: $monitor.haToken)
                         .textInputAutocapitalization(.never)

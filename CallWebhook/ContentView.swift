@@ -228,24 +228,36 @@ private struct ExtrasView: View {
     @FocusState private var focusedPhoneField: PhoneField?
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
-    @State private var showToken = false
+    @AppStorage("callFilterMode") private var callFilterMode = "Blacklist"
+    @AppStorage("blacklistEntries") private var blacklistEntries = ""
+    @AppStorage("whitelistEntries") private var whitelistEntries = ""
+    @State private var showMobile = true
+    @State private var showHomeAssistant = false
+    @State private var showCallFilter = false
+    @State private var newBlacklistEntry = ""
+    @State private var newWhitelistEntry = ""
+
+    private var blacklist: [String] {
+        blacklistEntries.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
+
+    private var whitelist: [String] {
+        whitelistEntries.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Mobilfunk / Dual-SIM") {
+                DisclosureGroup("Mobilfunk / Dual-SIM", isExpanded: $showMobile) {
                     TextField("Primäre Rufnummer", text: $primaryPhoneNumber)
                         .keyboardType(.phonePad)
                         .focused($focusedPhoneField, equals: .primary)
                     TextField("Zweite Rufnummer", text: $secondaryPhoneNumber)
                         .keyboardType(.phonePad)
                         .focused($focusedPhoneField, equals: .secondary)
-                    Text("Die Nummern werden lokal gespeichert. Die Leitungsauswahl beim Anruf übernimmt iOS bzw. die Mobilfunk-Dialer-Schnittstelle.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
-                Section("Home Assistant") {
+                DisclosureGroup("Home Assistant", isExpanded: $showHomeAssistant) {
                     LabeledContent("Telefonstatus", value: monitor.haState)
 
                     Button("HA-Status aktualisieren") {
@@ -255,31 +267,47 @@ private struct ExtrasView: View {
                     Button("Aktuellen Telefonstatus senden") {
                         monitor.sendCurrentState()
                     }
-                }
 
-                Section("Verbindung") {
-                    DisclosureGroup("Long-Lived Access Token", isExpanded: $showToken) {
-                        SecureField("Token", text: $monitor.haToken)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .textContentType(.password)
+                    SecureField("Long-Lived Access Token", text: $monitor.haToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.password)
 
-                        Button("Token speichern & testen") {
-                            monitor.refreshHAState()
-                            showToken = false
-                        }
+                    Button("Token speichern & testen") {
+                        monitor.refreshHAState()
                     }
                 }
 
-                Section("Diagnose") {
-                    LabeledContent("CallKit", value: monitor.active ? "Telefon aktiv" : "Bereit")
-                    Text(monitor.lastEvent)
+                DisclosureGroup("Anruffilter", isExpanded: $showCallFilter) {
+                    Picker("Modus", selection: $callFilterMode) {
+                        Text("Blacklist").tag("Blacklist")
+                        Text("Whitelist").tag("Whitelist")
+                    }
+                    .pickerStyle(.segmented)
+
+                    if callFilterMode == "Blacklist" {
+                        filterEditor(
+                            title: "Blacklist",
+                            placeholder: "Nummer oder Eintrag hinzufügen",
+                            newEntry: $newBlacklistEntry,
+                            entries: blacklist,
+                            storage: $blacklistEntries
+                        )
+                    } else {
+                        filterEditor(
+                            title: "Whitelist",
+                            placeholder: "Nummer oder Eintrag hinzufügen",
+                            newEntry: $newWhitelistEntry,
+                            entries: whitelist,
+                            storage: $whitelistEntries
+                        )
+                    }
+
+                    Text(callFilterMode == "Blacklist"
+                         ? "Einträge dieser Liste sollen später automatisch abgewiesen bzw. blockiert werden."
+                         : "Im Whitelist-Modus sollen später nur freigegebene Einträge durchgestellt werden.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    ForEach(monitor.log.prefix(8), id: \.self) { entry in
-                        Text(entry)
-                            .font(.caption.monospaced())
-                    }
                 }
             }
             .navigationTitle("Extras")
@@ -289,6 +317,55 @@ private struct ExtrasView: View {
                     Button("Fertig") {
                         focusedPhoneField = nil
                     }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func filterEditor(
+        title: String,
+        placeholder: String,
+        newEntry: Binding<String>,
+        entries: [String],
+        storage: Binding<String>
+    ) -> some View {
+        HStack {
+            TextField(placeholder, text: newEntry)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+
+            Button {
+                let value = newEntry.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty else { return }
+                var values = entries
+                if !values.contains(value) {
+                    values.append(value)
+                    storage.wrappedValue = values.joined(separator: "\n")
+                }
+                newEntry.wrappedValue = ""
+            } label: {
+                Image(systemName: "plus.circle.fill")
+            }
+            .buttonStyle(.plain)
+        }
+
+        if entries.isEmpty {
+            Text("Keine Einträge")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(entries, id: \.self) { entry in
+                HStack {
+                    Text(entry)
+                    Spacer()
+                    Button(role: .destructive) {
+                        storage.wrappedValue = entries
+                            .filter { $0 != entry }
+                            .joined(separator: "\n")
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }

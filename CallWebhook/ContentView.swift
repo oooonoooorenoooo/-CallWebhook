@@ -27,6 +27,17 @@ struct ContentView: View {
 private struct CallsView: View {
     @EnvironmentObject var monitor: CallMonitor
     @State private var selection = 0
+    @State private var searchText = ""
+    @State private var filter = CallHistoryFilter.all
+
+    private enum CallHistoryFilter: String, CaseIterable, Identifiable {
+        case all = "Alle"
+        case phoneNumber = "Telefonnummer"
+        case contact = "Kontakt"
+        case date = "Datum"
+
+        var id: Self { self }
+    }
 
     var body: some View {
         NavigationStack {
@@ -40,10 +51,28 @@ private struct CallsView: View {
                 .padding(.vertical, 8)
 
                 if selection == 0 {
-                    ContentUnavailableView(
-                        "Keine Anrufe",
-                        systemImage: "phone",
-                        description: Text("Die Anrufhistorie erscheint hier.")
+                    VStack(spacing: 8) {
+                        Picker("Filter", selection: $filter) {
+                            ForEach(CallHistoryFilter.allCases) { item in
+                                Text(item.rawValue).tag(item)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.horizontal)
+
+                        ContentUnavailableView(
+                            searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer",
+                            systemImage: "phone",
+                            description: Text(searchText.isEmpty
+                                ? "Die Anrufhistorie erscheint hier."
+                                : "Kein Anruf entspricht dem aktuellen Filter.")
+                        )
+                    }
+                    .searchable(
+                        text: $searchText,
+                        placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: filter == .all ? "Nummer, Kontakt oder Datum" : filter.rawValue
                     )
                 } else {
                     List(monitor.log, id: \.self) { entry in

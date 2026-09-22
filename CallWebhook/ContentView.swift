@@ -342,13 +342,7 @@ private struct ExtrasView: View {
                         monitor.sendCurrentState()
                     }
 
-                    Text("Long-Lived Access Token")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Hier den Long-Lived Access Token aus Home Assistant einfügen.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    SecureField("Long-Lived Access Token", text: $monitor.haToken)
+                    SecureField("Long-Lived Access Token von Home Assistant eintragen", text: $monitor.haToken)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textContentType(.password)

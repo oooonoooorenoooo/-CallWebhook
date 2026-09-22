@@ -183,20 +183,21 @@ private struct DialPadView: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 44)
 
-                    Button {
-                        dialer.deleteLast()
-                    } label: {
-                        Image(systemName: "delete.left")
-                            .font(.title3)
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(dialer.number.isEmpty)
-                    .opacity(dialer.number.isEmpty ? 0.35 : 1)
-                    .accessibilityLabel("Letzte Ziffer löschen")
-                    .onLongPressGesture(minimumDuration: 0.6) {
-                        dialer.number = ""
-                    }
+                    Image(systemName: "delete.left")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                        .foregroundStyle(dialer.number.isEmpty ? Color.secondary : Color.primary)
+                        .opacity(dialer.number.isEmpty ? 0.35 : 1)
+                        .onTapGesture {
+                            guard !dialer.number.isEmpty else { return }
+                            dialer.deleteLast()
+                        }
+                        .onLongPressGesture(minimumDuration: 0.6, maximumDistance: 30) {
+                            guard !dialer.number.isEmpty else { return }
+                            dialer.number = ""
+                        }
+                        .accessibilityLabel("Letzte Ziffer löschen; lange drücken zum Leeren")
                 }
 
                 ForEach(rows, id: \.self) { row in

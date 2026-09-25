@@ -60,6 +60,9 @@ private struct CallsView: View {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
                                     Text(directionText(call)).font(.caption).foregroundStyle(.secondary)
+                                    Text("Status: \(String(describing: call.status))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 VStack(alignment: .trailing, spacing: 3) {

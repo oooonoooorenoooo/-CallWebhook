@@ -63,7 +63,7 @@ jobs:
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/CallWebhook.app"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          codesign -d --entitlements :- "$APP_PATH" 2>&1 | grep -q "com.apple.developer.calling-app"
+          codesign -d --entitlements :- "$APP_PATH" 2>&1 | grep -q "com.apple.developer.dialing-app"
 
       - name: Create IPA
         run: |

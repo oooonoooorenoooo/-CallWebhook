@@ -1,7 +1,6 @@
 import Foundation
 import CallKit
 import Combine
-import UIKit
 
 @MainActor
 final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
@@ -26,67 +25,14 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     private let fritzEntityID = "sensor.fritz_box_5690_pro_anrufmonitor_telefonbuch"
     private let onURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_on_4d7a21")!
     private let offURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_off_8c3f62")!
-    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     override init() {
         super.init()
         haToken = UserDefaults.standard.string(forKey: "haToken") ?? ""
         observer.setDelegate(self, queue: .main)
         append("CXCallObserver aktiv")
-        NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
         evaluateAndSend(force: true)
         if !haToken.isEmpty { refreshHAState() }
-    }
-
-    @objc private func didEnterBackground() {
-        startBackgroundDiagnostic()
-    }
-
-    @objc private func willEnterForeground() {
-        updateBackgroundRemaining()
-        append("App wieder im Vordergrund")
-    }
-
-    private func startBackgroundDiagnostic() {
-        endBackgroundDiagnostic()
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "CallWebhookDiagnostic") { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.backgroundStatus = "Laufzeit abgelaufen"
-                self.backgroundRemaining = "0 s"
-                self.backgroundLastEvent = "iOS beendet Background-Laufzeit"
-                self.append("Background-Laufzeit abgelaufen")
-                self.endBackgroundDiagnostic()
-            }
-        }
-        guard backgroundTask != .invalid else {
-            backgroundStatus = "Konnte nicht gestartet werden"
-            backgroundRemaining = "—"
-            append("Background-Task konnte nicht gestartet werden")
-            return
-        }
-        backgroundStatus = "Aktiv"
-        backgroundLastEvent = "Background-Task gestartet"
-        append("Background-Task gestartet")
-        updateBackgroundRemaining()
-    }
-
-    private func updateBackgroundRemaining() {
-        guard backgroundTask != .invalid else { return }
-        let remaining = UIApplication.shared.backgroundTimeRemaining
-        if remaining.isFinite {
-            backgroundRemaining = "\(max(0, Int(remaining))) s"
-        } else {
-            backgroundRemaining = "unbegrenzt"
-        }
-    }
-
-    private func endBackgroundDiagnostic() {
-        if backgroundTask != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTask)
-            backgroundTask = .invalid
-        }
     }
 
     nonisolated func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {

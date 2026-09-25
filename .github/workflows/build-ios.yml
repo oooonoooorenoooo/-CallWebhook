@@ -1,4 +1,5 @@
 name: Build signed IPA and TestFlight
+# TestFlight retry after distribution certificate secret update
 
 on:
   workflow_dispatch:

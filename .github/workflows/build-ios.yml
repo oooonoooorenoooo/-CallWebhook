@@ -59,11 +59,45 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
             build
 
-      - name: Verify signature and entitlement
+      - name: Verify signature and Default Dialer entitlement
         run: |
+          set -euo pipefail
           APP_PATH="build/Build/Products/Release-iphoneos/CallWebhook.app"
+          PROFILE_PATH="$APP_PATH/embedded.mobileprovision"
+          APP_ENTITLEMENTS="$RUNNER_TEMP/app-entitlements.plist"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          codesign -d --entitlements :- "$APP_PATH" 2>&1 | grep -q "com.apple.developer.dialing-app"
+          codesign -d --entitlements "$APP_ENTITLEMENTS" "$APP_PATH"
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+
+          echo "===== SIGNED APP ENTITLEMENTS ====="
+          plutil -p "$APP_ENTITLEMENTS"
+          echo "===== EMBEDDED PROFILE ENTITLEMENTS ====="
+          plutil -extract Entitlements xml1 -o - "$PROFILE_PLIST" | plutil -p -
+
+          APP_DIALER="$(plutil -extract com.apple.developer.dialing-app raw "$APP_ENTITLEMENTS" 2>/dev/null || true)"
+          PROFILE_DIALER="$(plutil -extract Entitlements.com.apple.developer.dialing-app raw "$PROFILE_PLIST" 2>/dev/null || true)"
+          APP_IDENTIFIER="$(plutil -extract application-identifier raw "$APP_ENTITLEMENTS" 2>/dev/null || true)"
+          PROFILE_IDENTIFIER="$(plutil -extract Entitlements.application-identifier raw "$PROFILE_PLIST" 2>/dev/null || true)"
+          BUNDLE_IDENTIFIER="$(plutil -extract CFBundleIdentifier raw "$APP_PATH/Info.plist")"
+
+          echo "===== DEFAULT DIALER DIAGNOSTICS ====="
+          echo "Bundle identifier: $BUNDLE_IDENTIFIER"
+          echo "Signed app dialing-app: $APP_DIALER"
+          echo "Profile dialing-app: $PROFILE_DIALER"
+          echo "Signed app application-identifier: $APP_IDENTIFIER"
+          echo "Profile application-identifier: $PROFILE_IDENTIFIER"
+
+          test "$APP_DIALER" = "true"
+          test "$PROFILE_DIALER" = "true"
+          test "$APP_IDENTIFIER" = "$PROFILE_IDENTIFIER"
+          case "$APP_IDENTIFIER" in
+            *."$BUNDLE_IDENTIFIER") ;;
+            *) echo "application-identifier does not match bundle identifier"; exit 1 ;;
+          esac
+
+          echo "DEFAULT_DIALER_SIGNING_OK=true"
 
       - name: Create IPA
         run: |

@@ -10,7 +10,7 @@ targets:
       - CallWebhook
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook
+        PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook.U98PKCA4W7
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook
         INFOPLIST_KEY_NSContactsUsageDescription: CallWebhook benötigt Zugriff auf deine Kontakte, um Namen und Kontaktbilder im Telefonbuch anzuzeigen.

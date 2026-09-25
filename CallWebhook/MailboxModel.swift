@@ -27,21 +27,29 @@ final class MailboxModel: ObservableObject {
 
     private let baseURL = "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa"
 
+    private var token: String {
+        UserDefaults.standard.string(forKey: "haToken")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
     func refresh() async {
         isLoading = true
         defer { isLoading = false }
 
-        guard let url = URL(string: "\(baseURL)/local/callwebhook/mailbox.json") else {
+        guard !token.isEmpty else {
+            messages = []
+            errorMessage = "Home-Assistant-Token fehlt"
+            return
+        }
+
+        guard let url = URL(string: "\(baseURL)/api/callwebhook/mailbox") else {
             errorMessage = "Ungültige Mailbox-URL"
             return
         }
 
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        if let token = UserDefaults.standard.string(forKey: "haToken"),
-           !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            request.setValue("Bearer \(token.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
-        }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -57,10 +65,27 @@ final class MailboxModel: ObservableObject {
         }
     }
 
-    func audioURL(for message: MailboxMessage) -> URL? {
-        if message.audio.hasPrefix("http") {
-            return URL(string: message.audio)
+    func loadAudio(for message: MailboxMessage) async throws -> Data {
+        guard !token.isEmpty else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])
         }
-        return URL(string: "\(baseURL)\(message.audio)")
+        guard !message.audio.isEmpty else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: 404, userInfo: [NSLocalizedDescriptionKey: "Aufnahme nicht verfügbar"])
+        }
+        let address = message.audio.hasPrefix("http") ? message.audio : "\(baseURL)\(message.audio)"
+        guard let url = URL(string: address) else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ungültige Audio-URL"])
+        }
+
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Audio HTTP \(code)"])
+        }
+        return data
     }
 }

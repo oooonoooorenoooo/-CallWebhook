@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import Contacts
+import LiveCommunicationKit
 
 struct ContentView: View {
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -32,22 +33,9 @@ struct ContentView: View {
 
 private struct CallsView: View {
     @EnvironmentObject var monitor: CallMonitor
+    @StateObject private var history = CallHistoryModel()
     @State private var selection = 0
     @State private var searchText = ""
-    @State private var filter = CallHistoryFilter.all
-    @State private var showIncoming = true
-    @State private var showOutgoing = true
-    @State private var showMissed = true
-    @State private var showVoicemail = true
-
-    private enum CallHistoryFilter: String, CaseIterable, Identifiable {
-        case all = "Alle"
-        case phoneNumber = "Telefonnummer"
-        case contact = "Kontakt"
-        case date = "Datum"
-
-        var id: Self { self }
-    }
 
     var body: some View {
         NavigationStack {
@@ -57,72 +45,62 @@ private struct CallsView: View {
                     Text("HA-Status").tag(1)
                 }
                 .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding()
 
                 if selection == 0 {
-                    VStack(spacing: 8) {
-                        HStack(spacing: 7) {
-                            typeFilterButton("Eingehend", systemImage: "phone.arrow.down.left", isOn: $showIncoming)
-                            typeFilterButton("Ausgehend", systemImage: "phone.arrow.up.right", isOn: $showOutgoing)
-                            typeFilterButton("Verpasst", systemImage: "phone.down", isOn: $showMissed)
-                            typeFilterButton("Voicemail", systemImage: "recordingtape", isOn: $showVoicemail)
-                        }
-                        .padding(.horizontal)
-
-                        Picker("Filter", selection: $filter) {
-                            ForEach(CallHistoryFilter.allCases) { item in
-                                Text(item.rawValue).tag(item)
+                    if let error = history.errorMessage {
+                        ContentUnavailableView("Anrufliste nicht verfügbar", systemImage: "exclamationmark.triangle", description: Text(error))
+                    } else if filteredCalls.isEmpty {
+                        ContentUnavailableView(searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer", systemImage: "phone", description: Text("Die Mobilfunk-Anrufhistorie erscheint hier."))
+                    } else {
+                        List(filteredCalls) { call in
+                            HStack(spacing: 12) {
+                                Image(systemName: directionIcon(call))
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
+                                    Text(directionText(call)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 3) {
+                                    Text(call.date, style: .date).font(.caption)
+                                    Text(call.date, style: .time).font(.caption2).foregroundStyle(.secondary)
+                                    if call.duration > 0 {
+                                        Text("\(Int(call.duration) / 60):\(String(format: "%02d", Int(call.duration) % 60))")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                         }
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.horizontal)
-
-                        ContentUnavailableView(
-                            searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer",
-                            systemImage: "phone",
-                            description: Text(searchText.isEmpty
-                                ? "Die Anrufhistorie erscheint hier."
-                                : "Kein Anruf entspricht dem aktuellen Filter.")
-                        )
+                        .listStyle(.plain)
+                        .refreshable { await history.refresh() }
                     }
-                    .searchable(
-                        text: $searchText,
-                        placement: .navigationBarDrawer(displayMode: .always),
-                        prompt: filter == .all ? "Nummer, Kontakt oder Datum" : filter.rawValue
-                    )
                 } else {
                     List(monitor.log, id: \.self) { entry in
-                        Label(entry, systemImage: "house.fill")
-                            .font(.callout)
+                        Label(entry, systemImage: "house.fill").font(.callout)
                     }
                     .listStyle(.plain)
                 }
             }
             .navigationTitle("Anrufe")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Telefonnummer")
+            .task { await history.refresh() }
         }
     }
 
-    private func typeFilterButton(_ title: String, systemImage: String, isOn: Binding<Bool>) -> some View {
-        Button {
-            isOn.wrappedValue.toggle()
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: systemImage)
-                    .font(.caption)
-                Text(title)
-                    .font(.system(size: 9, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .foregroundStyle(isOn.wrappedValue ? Color.white : Color.secondary)
-            .background(isOn.wrappedValue ? Color.blue : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 9))
+    private var filteredCalls: [ConversationHistoryManager.RecentConversation] {
+        history.conversations.filter {
+            searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText)
         }
-        .buttonStyle(.plain)
+    }
+
+    private func directionText(_ call: ConversationHistoryManager.RecentConversation) -> String {
+        String(describing: call.direction).lowercased().contains("incoming") ? "Eingehend" : "Ausgehend"
+    }
+
+    private func directionIcon(_ call: ConversationHistoryManager.RecentConversation) -> String {
+        String(describing: call.direction).lowercased().contains("incoming") ? "phone.arrow.down.left" : "phone.arrow.up.right"
     }
 }
 

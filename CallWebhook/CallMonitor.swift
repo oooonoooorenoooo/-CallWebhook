@@ -1,6 +1,7 @@
 import Foundation
 import CallKit
 import Combine
+import UIKit
 
 @MainActor
 final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
@@ -9,6 +10,9 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     @Published private(set) var log: [String] = []
     @Published private(set) var haState = "Token fehlt"
     @Published private(set) var fritzCallState = "Token fehlt"
+    @Published private(set) var backgroundStatus = "Nicht gestartet"
+    @Published private(set) var backgroundRemaining = "—"
+    @Published private(set) var backgroundLastEvent = "—"
     @Published var haTriggerMode = UserDefaults.standard.string(forKey: "haTriggerMode") ?? "connected" {
         didSet { UserDefaults.standard.set(haTriggerMode, forKey: "haTriggerMode") }
     }
@@ -22,14 +26,73 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     private let fritzEntityID = "sensor.fritz_box_5690_pro_anrufmonitor_telefonbuch"
     private let onURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_on_4d7a21")!
     private let offURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_off_8c3f62")!
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundTimer: Timer?
 
     override init() {
         super.init()
         haToken = UserDefaults.standard.string(forKey: "haToken") ?? ""
         observer.setDelegate(self, queue: .main)
         append("CXCallObserver aktiv")
+        NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
         evaluateAndSend(force: true)
         if !haToken.isEmpty { refreshHAState() }
+    }
+
+    @objc private func didEnterBackground() {
+        startBackgroundDiagnostic()
+    }
+
+    @objc private func willEnterForeground() {
+        updateBackgroundRemaining()
+        append("App wieder im Vordergrund")
+    }
+
+    private func startBackgroundDiagnostic() {
+        endBackgroundDiagnostic()
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "CallWebhookDiagnostic") { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.backgroundStatus = "Laufzeit abgelaufen"
+                self.backgroundRemaining = "0 s"
+                self.backgroundLastEvent = "iOS beendet Background-Laufzeit"
+                self.append("Background-Laufzeit abgelaufen")
+                self.endBackgroundDiagnostic()
+            }
+        }
+        guard backgroundTask != .invalid else {
+            backgroundStatus = "Konnte nicht gestartet werden"
+            backgroundRemaining = "—"
+            append("Background-Task konnte nicht gestartet werden")
+            return
+        }
+        backgroundStatus = "Aktiv"
+        backgroundLastEvent = "Background-Task gestartet"
+        append("Background-Task gestartet")
+        updateBackgroundRemaining()
+        backgroundTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateBackgroundRemaining() }
+        }
+    }
+
+    private func updateBackgroundRemaining() {
+        guard backgroundTask != .invalid else { return }
+        let remaining = UIApplication.shared.backgroundTimeRemaining
+        if remaining.isFinite {
+            backgroundRemaining = "\(max(0, Int(remaining))) s"
+        } else {
+            backgroundRemaining = "unbegrenzt"
+        }
+    }
+
+    private func endBackgroundDiagnostic() {
+        backgroundTimer?.invalidate()
+        backgroundTimer = nil
+        if backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
     }
 
     nonisolated func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
@@ -42,20 +105,17 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
             } else {
                 state = call.isOutgoing ? "ausgehend" : "eingehend/klingelt"
             }
+            self.backgroundLastEvent = "CallKit: \(state)"
             self.append("CallKit: \(state)")
             self.evaluateAndSend(call: call)
         }
     }
 
-    func sendCurrentState() {
-        evaluateAndSend(force: true)
-    }
+    func sendCurrentState() { evaluateAndSend(force: true) }
 
     func refreshHAState() {
         guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            haState = "Token fehlt"
-            fritzCallState = "Token fehlt"
-            return
+            haState = "Token fehlt"; fritzCallState = "Token fehlt"; return
         }
         guard let url = URL(string: "\(baseURL)/api/states/\(entityID)") else { return }
         var request = URLRequest(url: url)
@@ -66,28 +126,18 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
             let code = (response as? HTTPURLResponse)?.statusCode
             Task { @MainActor in
                 guard let self else { return }
-                if let error {
-                    self.haState = "nicht erreichbar"
-                    self.append("HA-Abfrage Fehler: \(error.localizedDescription)")
-                    return
+                if let error { self.haState = "nicht erreichbar"; self.append("HA-Abfrage Fehler: \(error.localizedDescription)"); return }
+                guard code == 200, let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let state = object["state"] as? String else {
+                    self.haState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"; self.append("HA-Abfrage: \(self.haState)"); return
                 }
-                guard code == 200, let data,
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let state = object["state"] as? String else {
-                    self.haState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"
-                    self.append("HA-Abfrage: \(self.haState)")
-                    return
-                }
-                self.haState = state.uppercased()
-                self.append("HA-Status: \(self.haState)")
+                self.haState = state.uppercased(); self.append("HA-Status: \(self.haState)")
             }
         }.resume()
         refreshFritzCallState()
     }
 
     private func refreshFritzCallState() {
-        guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let url = URL(string: "\(baseURL)/api/states/\(fritzEntityID)") else { return }
+        guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let url = URL(string: "\(baseURL)/api/states/\(fritzEntityID)") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(haToken.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
@@ -96,15 +146,9 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
             let code = (response as? HTTPURLResponse)?.statusCode
             Task { @MainActor in
                 guard let self else { return }
-                if error != nil {
-                    self.fritzCallState = "nicht erreichbar"
-                    return
-                }
-                guard code == 200, let data,
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let state = object["state"] as? String else {
-                    self.fritzCallState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"
-                    return
+                if error != nil { self.fritzCallState = "nicht erreichbar"; return }
+                guard code == 200, let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let state = object["state"] as? String else {
+                    self.fritzCallState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"; return
                 }
                 switch state {
                 case "idle": self.fritzCallState = "Bereit"
@@ -118,12 +162,7 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     }
 
     private func evaluateAndSend(force: Bool = false, call: CXCall? = nil) {
-        let nowActive: Bool
-        if haTriggerMode == "ringing" {
-            nowActive = observer.calls.contains { !$0.hasEnded }
-        } else {
-            nowActive = observer.calls.contains { !$0.hasEnded && $0.hasConnected }
-        }
+        let nowActive = haTriggerMode == "ringing" ? observer.calls.contains { !$0.hasEnded } : observer.calls.contains { !$0.hasEnded && $0.hasConnected }
         guard force || nowActive != active else { return }
         active = nowActive
         lastEvent = nowActive ? (haTriggerMode == "ringing" ? "Telefon aktiv" : "Gespräch verbunden") : "Kein Telefonat"
@@ -140,12 +179,13 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
+                    self.backgroundLastEvent = "\(label) Fehler"
                     self.append("\(label) Fehler: \(error.localizedDescription)")
                 } else {
+                    self.backgroundLastEvent = "\(label) HTTP \(code.map(String.init) ?? "?")"
                     self.append("\(label) Webhook gesendet (HTTP \(code.map(String.init) ?? "?"))")
                     if let code, (200...299).contains(code) {
-                        try? await Task.sleep(for: .milliseconds(500))
-                        self.refreshHAState()
+                        try? await Task.sleep(for: .milliseconds(500)); self.refreshHAState()
                     }
                 }
             }

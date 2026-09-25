@@ -585,6 +585,15 @@ private struct ExtrasView: View {
                     LabeledContent("iPhone Telefonstatus", value: monitor.haState)
                     LabeledContent("FRITZ!Box Anrufmonitor", value: monitor.fritzCallState)
 
+                    Section("Background-Diagnose") {
+                        LabeledContent("Background", value: monitor.backgroundStatus)
+                        LabeledContent("Restlaufzeit", value: monitor.backgroundRemaining)
+                        LabeledContent("Letztes Ereignis", value: monitor.backgroundLastEvent)
+                        Text("Die Diagnose startet automatisch, sobald CallWebhook in den Hintergrund wechselt. Zum Testen iPhone sperren und CallWebhook zwischendurch nicht erneut öffnen.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Picker("HA-Schalter aktivieren bei", selection: $monitor.haTriggerMode) {
                         Text("Klingeln").tag("ringing")
                         Text("Gespräch verbunden").tag("connected")

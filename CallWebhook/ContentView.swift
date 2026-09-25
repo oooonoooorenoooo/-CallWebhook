@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import Contacts
 import LiveCommunicationKit
+import AVKit
 
 struct ContentView: View {
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -213,48 +214,131 @@ private struct ContactsView: View {
 
 private struct MailboxView: View {
     @ObservedObject var dialer: DialerModel
+    @StateObject private var mailbox = MailboxModel()
     @AppStorage("mailboxNumber") private var mailboxNumber = ""
+    @State private var playingMessage: MailboxMessage?
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Button {
-                        dialer.call(mailboxNumber)
-                    } label: {
-                        Label("Mailbox anrufen", systemImage: "phone.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .disabled(mailboxNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                    if mailboxNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("Die Mailbox-Rufnummer kannst du unter Extras eintragen.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        LabeledContent("Mailbox", value: mailboxNumber)
-                    }
-
-                    Text(dialer.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } header: {
-                    Text("Anbieter-Mailbox")
-                }
-
-                Section {
+            Group {
+                if mailbox.isLoading && mailbox.messages.isEmpty {
+                    ProgressView("Mailbox wird geladen …")
+                } else if let error = mailbox.errorMessage, mailbox.messages.isEmpty {
                     ContentUnavailableView(
-                        "Keine auslesbaren Nachrichten",
-                        systemImage: "recordingtape",
-                        description: Text("Apple stellt Drittanbieter-Wähl-Apps derzeit keine Voicemail-Nachrichten oder Transkriptionen über die öffentliche Anrufhistorie bereit.")
+                        "Mailbox nicht erreichbar",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(error)
                     )
-                } header: {
-                    Text("Nachrichten")
+                } else if mailbox.messages.isEmpty {
+                    ContentUnavailableView(
+                        "Keine Nachrichten",
+                        systemImage: "recordingtape",
+                        description: Text("Auf dem CallWebhook-Anrufbeantworter befinden sich keine Nachrichten.")
+                    )
+                } else {
+                    List(mailbox.messages) { message in
+                        Button {
+                            playingMessage = message
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: message.isNew ? "recordingtape.circle.fill" : "recordingtape.circle")
+                                    .font(.title2)
+                                    .foregroundStyle(message.isNew ? .blue : .secondary)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(message.name.isEmpty ? (message.number.isEmpty ? "Unbekannt" : message.number) : message.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    if !message.name.isEmpty && !message.number.isEmpty {
+                                        Text(message.number)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Text(message.date)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+
+                                VStack(alignment: .trailing, spacing: 5) {
+                                    Text(message.duration)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Image(systemName: "play.circle.fill")
+                                        .font(.title2)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.plain)
+                    .refreshable { await mailbox.refresh() }
                 }
             }
             .navigationTitle("Mailbox")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        Task { await mailbox.refresh() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+
+                    if !mailboxNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button {
+                            dialer.call(mailboxNumber)
+                        } label: {
+                            Image(systemName: "phone.fill")
+                        }
+                    }
+                }
+            }
+            .task { await mailbox.refresh() }
+            .sheet(item: $playingMessage) { message in
+                NavigationStack {
+                    if let url = mailbox.audioURL(for: message) {
+                        VoicemailPlayerView(url: url)
+                            .navigationTitle(message.name.isEmpty ? message.number : message.name)
+                            .navigationBarTitleDisplayMode(.inline)
+                    } else {
+                        ContentUnavailableView("Aufnahme nicht verfügbar", systemImage: "waveform.slash")
+                    }
+                }
+                .presentationDetents([.medium])
+            }
         }
+    }
+}
+
+private struct VoicemailPlayerView: View {
+    let url: URL
+    @State private var player: AVPlayer
+
+    init(url: URL) {
+        self.url = url
+        _player = State(initialValue: AVPlayer(url: url))
+    }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 72))
+                .foregroundStyle(.blue)
+            VideoPlayer(player: player)
+                .frame(height: 80)
+            Button {
+                player.seek(to: .zero)
+                player.play()
+            } label: {
+                Label("Von vorn abspielen", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding()
+        .onAppear { player.play() }
+        .onDisappear { player.pause() }
     }
 }
 

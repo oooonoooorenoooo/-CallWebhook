@@ -138,6 +138,33 @@ private struct ContactsView: View {
     }
 }
 
+
+private struct MailboxView: View {
+    @State private var pendingDelete = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ContentUnavailableView(
+                        "Keine Nachrichten",
+                        systemImage: "recordingtape",
+                        description: Text("Mailbox-Nachrichten erscheinen hier.")
+                    )
+                }
+            }
+            .navigationTitle("Mailbox")
+            .navigationBarTitleDisplayMode(.inline)
+            .confirmationDialog("Mailbox-Nachricht löschen?", isPresented: $pendingDelete, titleVisibility: .visible) {
+                Button("Löschen", role: .destructive) { }
+                Button("Abbrechen", role: .cancel) { }
+            } message: {
+                Text("Die Nachricht wird dauerhaft gelöscht.")
+            }
+        }
+    }
+}
+
 private struct DialPadView: View {
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel

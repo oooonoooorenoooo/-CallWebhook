@@ -15,7 +15,11 @@ final class DialerModel: ObservableObject {
     }
 
     func call() {
-        let value = number.trimmingCharacters(in: .whitespacesAndNewlines)
+        call(number)
+    }
+
+    func call(_ phoneNumber: String) {
+        let value = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         status = "Anruf wird gestartet …"
         Task {

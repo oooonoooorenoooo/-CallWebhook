@@ -476,7 +476,8 @@ private struct ExtrasView: View {
                 }
 
                 DisclosureGroup("Home Assistant", isExpanded: $showHomeAssistant) {
-                    LabeledContent("Telefonstatus", value: monitor.haState)
+                    LabeledContent("iPhone Telefonstatus", value: monitor.haState)
+                    LabeledContent("FRITZ!Box Anrufmonitor", value: monitor.fritzCallState)
 
                     Picker("HA-Schalter aktivieren bei", selection: $monitor.haTriggerMode) {
                         Text("Klingeln").tag("ringing")

@@ -298,13 +298,9 @@ private struct MailboxView: View {
             .task { await mailbox.refresh() }
             .sheet(item: $playingMessage) { message in
                 NavigationStack {
-                    if let url = mailbox.audioURL(for: message) {
-                        VoicemailPlayerView(url: url)
-                            .navigationTitle(message.name.isEmpty ? message.number : message.name)
-                            .navigationBarTitleDisplayMode(.inline)
-                    } else {
-                        ContentUnavailableView("Aufnahme nicht verfügbar", systemImage: "waveform.slash")
-                    }
+                    VoicemailPlayerView(mailbox: mailbox, message: message)
+                        .navigationTitle(message.name.isEmpty ? message.number : message.name)
+                        .navigationBarTitleDisplayMode(.inline)
                 }
                 .presentationDetents([.medium])
             }
@@ -313,32 +309,58 @@ private struct MailboxView: View {
 }
 
 private struct VoicemailPlayerView: View {
-    let url: URL
-    @State private var player: AVPlayer
-
-    init(url: URL) {
-        self.url = url
-        _player = State(initialValue: AVPlayer(url: url))
-    }
+    @ObservedObject var mailbox: MailboxModel
+    let message: MailboxMessage
+    @State private var player: AVPlayer?
+    @State private var isLoading = true
+    @State private var errorMessage: String?
 
     var body: some View {
         VStack(spacing: 24) {
             Image(systemName: "waveform.circle.fill")
                 .font(.system(size: 72))
                 .foregroundStyle(.blue)
-            VideoPlayer(player: player)
-                .frame(height: 80)
-            Button {
-                player.seek(to: .zero)
-                player.play()
-            } label: {
-                Label("Von vorn abspielen", systemImage: "play.fill")
+
+            if isLoading {
+                ProgressView("Aufnahme wird geladen …")
+            } else if let errorMessage {
+                ContentUnavailableView(
+                    "Aufnahme nicht verfügbar",
+                    systemImage: "waveform.slash",
+                    description: Text(errorMessage)
+                )
+            } else if let player {
+                VideoPlayer(player: player)
+                    .frame(height: 80)
+
+                Button {
+                    player.seek(to: .zero)
+                    player.play()
+                } label: {
+                    Label("Von vorn abspielen", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
         .padding()
-        .onAppear { player.play() }
-        .onDisappear { player.pause() }
+        .task {
+            do {
+                let data = try await mailbox.loadAudio(for: message)
+                let fileURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("callwebhook_\(message.tam)_\(message.index).wav")
+                try data.write(to: fileURL, options: .atomic)
+                let newPlayer = AVPlayer(url: fileURL)
+                player = newPlayer
+                isLoading = false
+                newPlayer.play()
+            } catch {
+                errorMessage = error.localizedDescription
+                isLoading = false
+            }
+        }
+        .onDisappear {
+            player?.pause()
+        }
     }
 }
 

@@ -197,12 +197,35 @@ private struct ContactsView: View {
             CNContactOrganizationNameKey as CNKeyDescriptor,
             CNContactThumbnailImageDataKey as CNKeyDescriptor
         ]
-        store.requestAccess(for: .contacts) { granted, _ in
-            guard granted else { return }
+        func fetchContacts() {
             let request = CNContactFetchRequest(keysToFetch: keys)
             var loaded: [CNContact] = []
-            try? store.enumerateContacts(with: request) { contact, _ in loaded.append(contact) }
-            DispatchQueue.main.async { contacts = loaded }
+            do {
+                try store.enumerateContacts(with: request) { contact, _ in
+                    loaded.append(contact)
+                }
+                DispatchQueue.main.async {
+                    contacts = loaded
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    contacts = []
+                }
+            }
+        }
+
+        switch CNContactStore.authorizationStatus(for: .contacts) {
+        case .authorized, .limited:
+            fetchContacts()
+        case .notDetermined:
+            store.requestAccess(for: .contacts) { granted, _ in
+                guard granted else { return }
+                fetchContacts()
+            }
+        case .denied, .restricted:
+            contacts = []
+        @unknown default:
+            contacts = []
         }
     }
 }

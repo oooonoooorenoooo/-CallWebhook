@@ -8,6 +8,7 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     @Published private(set) var lastEvent = "App gestartet"
     @Published private(set) var log: [String] = []
     @Published private(set) var haState = "Token fehlt"
+    @Published private(set) var fritzCallState = "Token fehlt"
     @Published var haTriggerMode = UserDefaults.standard.string(forKey: "haTriggerMode") ?? "connected" {
         didSet { UserDefaults.standard.set(haTriggerMode, forKey: "haTriggerMode") }
     }
@@ -18,6 +19,7 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     private let observer = CXCallObserver()
     private let baseURL = "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa"
     private let entityID = "input_boolean.iphone_call_active"
+    private let fritzEntityID = "sensor.fritz_box_5690_pro_anrufmonitor_telefonbuch"
     private let onURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_on_4d7a21")!
     private let offURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_off_8c3f62")!
 
@@ -52,6 +54,7 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     func refreshHAState() {
         guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             haState = "Token fehlt"
+            fritzCallState = "Token fehlt"
             return
         }
         guard let url = URL(string: "\(baseURL)/api/states/\(entityID)") else { return }
@@ -77,6 +80,39 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
                 }
                 self.haState = state.uppercased()
                 self.append("HA-Status: \(self.haState)")
+            }
+        }.resume()
+        refreshFritzCallState()
+    }
+
+    private func refreshFritzCallState() {
+        guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let url = URL(string: "\(baseURL)/api/states/\(fritzEntityID)") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(haToken.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            let code = (response as? HTTPURLResponse)?.statusCode
+            Task { @MainActor in
+                guard let self else { return }
+                if error != nil {
+                    self.fritzCallState = "nicht erreichbar"
+                    return
+                }
+                guard code == 200, let data,
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let state = object["state"] as? String else {
+                    self.fritzCallState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"
+                    return
+                }
+                switch state {
+                case "idle": self.fritzCallState = "Bereit"
+                case "ringing": self.fritzCallState = "Klingelt"
+                case "dialing": self.fritzCallState = "Wählt"
+                case "talking": self.fritzCallState = "Gespräch verbunden"
+                default: self.fritzCallState = state
+                }
             }
         }.resume()
     }

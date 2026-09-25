@@ -35,6 +35,11 @@ jobs:
           PROFILE_UUID="$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+      - name: Prepare AppIcon filename
+        run: |
+          if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
+            mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
+          fi
       - name: Generate project
         run: xcodegen generate
       - name: Build development IPA
@@ -83,6 +88,11 @@ jobs:
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+      - name: Prepare AppIcon filename
+        run: |
+          if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
+            mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
+          fi
       - name: Generate project
         run: xcodegen generate
       - name: Archive for App Store Connect

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Contacts
 
 struct ContentView: View {
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -126,14 +127,82 @@ private struct CallsView: View {
 }
 
 private struct ContactsView: View {
+    private enum ContactArea: String, CaseIterable {
+        case privateContacts = "Privat"
+        case business = "Beruflich"
+    }
+
+    private enum ContactSort: String, CaseIterable {
+        case firstName = "Vorname"
+        case lastName = "Nachname"
+        case company = "Unternehmen"
+    }
+
+    @State private var area = ContactArea.privateContacts
+    @State private var contacts: [CNContact] = []
+    @AppStorage("contactSort") private var sortValue = ContactSort.firstName.rawValue
+
     var body: some View {
         NavigationStack {
-            ContentUnavailableView(
-                "Kontakte",
-                systemImage: "person.crop.circle",
-                description: Text("Die iPhone-Kontakte werden hier eingebunden.")
-            )
+            VStack(spacing: 0) {
+                Picker("Kontaktliste", selection: $area) {
+                    ForEach(ContactArea.allCases, id: \.self) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding()
+
+                Picker("Sortierung", selection: $sortValue) {
+                    ForEach(ContactSort.allCases, id: \.self) { option in
+                        Text(option.rawValue).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.horizontal)
+
+                List(contacts, id: \.identifier) { contact in
+                    HStack(spacing: 12) {
+                        Group {
+                            if let data = contact.thumbnailImageData, let image = UIImage(data: data) {
+                                Image(uiImage: image).resizable().scaledToFill()
+                            } else {
+                                Image(systemName: "person.crop.circle.fill").resizable()
+                            }
+                        }
+                        .frame(width: 44, height: 44)
+                        .clipShape(Circle())
+
+                        VStack(alignment: .leading) {
+                            Text(CNContactFormatter.string(from: contact, style: .fullName) ?? contact.organizationName)
+                            if !contact.organizationName.isEmpty {
+                                Text(contact.organizationName).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
             .navigationTitle("Kontakte")
+            .navigationBarTitleDisplayMode(.inline)
+            .task { loadContacts() }
+        }
+    }
+
+    private func loadContacts() {
+        let store = CNContactStore()
+        let keys: [CNKeyDescriptor] = [
+            CNContactGivenNameKey as CNKeyDescriptor,
+            CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactOrganizationNameKey as CNKeyDescriptor,
+            CNContactThumbnailImageDataKey as CNKeyDescriptor
+        ]
+        store.requestAccess(for: .contacts) { granted, _ in
+            guard granted else { return }
+            let request = CNContactFetchRequest(keysToFetch: keys)
+            var loaded: [CNContact] = []
+            try? store.enumerateContacts(with: request) { contact, _ in loaded.append(contact) }
+            DispatchQueue.main.async { contacts = loaded }
         }
     }
 }

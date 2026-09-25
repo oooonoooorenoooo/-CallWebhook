@@ -433,6 +433,16 @@ private struct ExtrasView: View {
                 DisclosureGroup("Home Assistant", isExpanded: $showHomeAssistant) {
                     LabeledContent("Telefonstatus", value: monitor.haState)
 
+                    Picker("HA-Schalter aktivieren bei", selection: $monitor.haTriggerMode) {
+                        Text("Klingeln").tag("ringing")
+                        Text("Gespräch verbunden").tag("connected")
+                    }
+                    .pickerStyle(.menu)
+
+                    Text(monitor.haTriggerMode == "ringing" ? "Der HA-Schalter wird bereits beim Klingeln bzw. Start eines ausgehenden Anrufs aktiviert." : "Der HA-Schalter wird erst aktiviert, wenn das Gespräch tatsächlich verbunden ist.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Button("HA-Status aktualisieren") {
                         monitor.refreshHAState()
                     }

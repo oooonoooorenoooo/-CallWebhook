@@ -17,7 +17,7 @@ struct ContentView: View {
             CallsView()
                 .tabItem { Label("Anrufe", systemImage: "clock.fill") }
 
-            MailboxView()
+            MailboxView(dialer: dialer)
                 .tabItem { Label("Mailbox", systemImage: "recordingtape") }
 
             DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber)
@@ -212,27 +212,48 @@ private struct ContactsView: View {
 
 
 private struct MailboxView: View {
-    @State private var pendingDelete = false
+    @ObservedObject var dialer: DialerModel
+    @AppStorage("mailboxNumber") private var mailboxNumber = ""
 
     var body: some View {
         NavigationStack {
-            List {
+            Form {
+                Section {
+                    Button {
+                        dialer.call(mailboxNumber)
+                    } label: {
+                        Label("Mailbox anrufen", systemImage: "phone.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(mailboxNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if mailboxNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Die Mailbox-Rufnummer kannst du unter Extras eintragen.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LabeledContent("Mailbox", value: mailboxNumber)
+                    }
+
+                    Text(dialer.status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Anbieter-Mailbox")
+                }
+
                 Section {
                     ContentUnavailableView(
-                        "Keine Nachrichten",
+                        "Keine auslesbaren Nachrichten",
                         systemImage: "recordingtape",
-                        description: Text("Mailbox-Nachrichten erscheinen hier.")
+                        description: Text("Apple stellt Drittanbieter-Wähl-Apps derzeit keine Voicemail-Nachrichten oder Transkriptionen über die öffentliche Anrufhistorie bereit.")
                     )
+                } header: {
+                    Text("Nachrichten")
                 }
             }
             .navigationTitle("Mailbox")
             .navigationBarTitleDisplayMode(.inline)
-            .confirmationDialog("Mailbox-Nachricht löschen?", isPresented: $pendingDelete, titleVisibility: .visible) {
-                Button("Löschen", role: .destructive) { }
-                Button("Abbrechen", role: .cancel) { }
-            } message: {
-                Text("Die Nachricht wird dauerhaft gelöscht.")
-            }
         }
     }
 }
@@ -400,9 +421,11 @@ private struct ExtrasView: View {
     @AppStorage("externalListURL") private var externalListURL = ""
     @AppStorage("externalListName") private var externalListName = ""
     @AppStorage("externalListEnabled") private var externalListEnabled = false
+    @AppStorage("mailboxNumber") private var mailboxNumber = ""
     @State private var showMobile = false
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
+    @State private var showMailbox = false
     @State private var newBlacklistEntry = ""
     @State private var newWhitelistEntry = ""
 
@@ -431,6 +454,25 @@ private struct ExtrasView: View {
                         focusedPhoneField = nil
                     }
                     .disabled(focusedPhoneField == nil)
+                }
+
+                DisclosureGroup("Mailbox", isExpanded: $showMailbox) {
+                    TextField("Mailbox-Rufnummer", text: $mailboxNumber)
+                        .keyboardType(.phonePad)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    HStack {
+                        Button("Telekom 3311") { mailboxNumber = "3311" }
+                        Spacer()
+                        Button("Vodafone 5500") { mailboxNumber = "5500" }
+                        Spacer()
+                        Button("O2 333") { mailboxNumber = "333" }
+                    }
+
+                    Text("Die Nummer wird lokal gespeichert. Im Mailbox-Reiter kann sie anschließend direkt über Mobilfunk angerufen werden.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 DisclosureGroup("Home Assistant", isExpanded: $showHomeAssistant) {

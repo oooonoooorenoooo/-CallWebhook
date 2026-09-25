@@ -19,6 +19,3 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone:
           - UIInterfaceOrientationPortrait
         CODE_SIGN_ENTITLEMENTS: CallWebhook/CallWebhook.entitlements
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGNING_REQUIRED: NO
-        CODE_SIGN_IDENTITY: ""

@@ -1,4 +1,4 @@
-name: Build signed IPA
+name: Build signed IPA and TestFlight
 
 on:
   workflow_dispatch:
@@ -6,15 +6,13 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
+  development:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-
       - name: Install XcodeGen
         run: brew install xcodegen
-
-      - name: Install signing certificate and provisioning profile
+      - name: Install development signing
         env:
           IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
@@ -24,82 +22,119 @@ jobs:
           PROFILE_PATH="$RUNNER_TEMP/CallWebhook.mobileprovision"
           KEYCHAIN_PATH="$RUNNER_TEMP/CallWebhook-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-
           echo "$IOS_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
           echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
-
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import "$CERTIFICATE_PATH" -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
-
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILE_UUID="$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
-
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
-
-      - name: Generate Xcode project
+      - name: Generate project
         run: xcodegen generate
-
-      - name: Build signed app
+      - name: Build development IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          xcodebuild -project CallWebhook.xcodeproj \
-            -scheme CallWebhook \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Development" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            build
-
-      - name: Verify signature and Default Dialer entitlement
-        run: |
-          set -euo pipefail
+          xcodebuild -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -derivedDataPath build DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Development" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" build
           APP_PATH="build/Build/Products/Release-iphoneos/CallWebhook.app"
-          APP_ENTITLEMENTS="$RUNNER_TEMP/app-entitlements.plist"
-          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
-
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          codesign -d --entitlements :- "$APP_PATH" > "$APP_ENTITLEMENTS" 2>/dev/null
-          security cms -D -i "$APP_PATH/embedded.mobileprovision" > "$PROFILE_PLIST"
-
-          APP_DIALER="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.dialing-app' "$APP_ENTITLEMENTS")"
-          PROFILE_DIALER="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.dialing-app' "$PROFILE_PLIST")"
-          APP_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$APP_ENTITLEMENTS")"
-          PROFILE_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST")"
-          BUNDLE_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")"
-          EXPECTED_IDENTIFIER="${APPLE_TEAM_ID:-U98PKCA4W7}.$BUNDLE_IDENTIFIER"
-
-          echo "Bundle identifier: $BUNDLE_IDENTIFIER"
-          echo "Expected application-identifier: $EXPECTED_IDENTIFIER"
-          echo "Signed app application-identifier: $APP_IDENTIFIER"
-          echo "Profile application-identifier: $PROFILE_IDENTIFIER"
-          echo "Signed app dialing-app: $APP_DIALER"
-          echo "Profile dialing-app: $PROFILE_DIALER"
-
-          test "$BUNDLE_IDENTIFIER" = "de.reno.CallWebhook.U98PKCA4W7"
-          test "$APP_IDENTIFIER" = "U98PKCA4W7.de.reno.CallWebhook.U98PKCA4W7"
-          test "$PROFILE_IDENTIFIER" = "$APP_IDENTIFIER"
-          test "$APP_DIALER" = "true"
-          test "$PROFILE_DIALER" = "true"
-
-          echo "DEFAULT_DIALER_SIGNING_OK=true"
-
-      - name: Create IPA
-        run: |
           rm -rf Payload
-          mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/CallWebhook.app Payload/
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
           zip -r CallWebhook-signed.ipa Payload
-
       - uses: actions/upload-artifact@v4
         with:
           name: CallWebhook-signed
           path: CallWebhook-signed.ipa
+
+  testflight:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Install distribution signing
+        env:
+          CERT_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.IOS_DISTRIBUTION_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/CallWebhook-distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/CallWebhookTF.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/CallWebhook-distribution.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "$CERT_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_UUID="$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)"
+          PROFILE_NAME="$(security cms -D -i "$PROFILE_PATH" | plutil -extract Name raw -)"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+      - name: Generate project
+        run: xcodegen generate
+      - name: Archive for App Store Connect
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcodebuild archive -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CURRENT_PROJECT_VERSION="${{ github.run_number }}"
+      - name: Verify archived Default Dialer entitlement
+        run: |
+          APP_PATH="$RUNNER_TEMP/CallWebhook.xcarchive/Products/Applications/CallWebhook.app"
+          APP_ENTITLEMENTS="$RUNNER_TEMP/archive-entitlements.plist"
+          PROFILE_PLIST="$RUNNER_TEMP/archive-profile.plist"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH" > "$APP_ENTITLEMENTS" 2>/dev/null
+          security cms -D -i "$APP_PATH/embedded.mobileprovision" > "$PROFILE_PLIST"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.dialing-app' "$APP_ENTITLEMENTS")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.dialing-app' "$PROFILE_PLIST")" = "true"
+          echo "TESTFLIGHT_DEFAULT_DIALER_SIGNING_OK=true"
+      - name: Export App Store IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>method</key><string>app-store-connect</string>
+          <key>teamID</key><string>$APPLE_TEAM_ID</string>
+          <key>signingStyle</key><string>manual</string>
+          <key>signingCertificate</key><string>Apple Distribution</string>
+          <key>provisioningProfiles</key><dict>
+          <key>de.reno.CallWebhook.U98PKCA4W7</key><string>$PROFILE_NAME</string>
+          </dict>
+          <key>uploadSymbols</key><true/>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" -exportPath "$RUNNER_TEMP/export" -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+          cp "$RUNNER_TEMP/export/CallWebhook.ipa" CallWebhook-TestFlight.ipa
+      - name: Prepare App Store Connect API key
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          mkdir -p "$HOME/private_keys"
+          printf '%s' "$ASC_PRIVATE_KEY" > "$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          chmod 600 "$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8"
+      - name: Upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app -f CallWebhook-TestFlight.ipa -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CallWebhook-TestFlight
+          path: CallWebhook-TestFlight.ipa

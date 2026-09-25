@@ -27,7 +27,6 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     private let onURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_on_4d7a21")!
     private let offURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_off_8c3f62")!
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-    private var backgroundTimer: Timer?
 
     override init() {
         super.init()
@@ -71,9 +70,6 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
         backgroundLastEvent = "Background-Task gestartet"
         append("Background-Task gestartet")
         updateBackgroundRemaining()
-        backgroundTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateBackgroundRemaining() }
-        }
     }
 
     private func updateBackgroundRemaining() {
@@ -87,8 +83,6 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     }
 
     private func endBackgroundDiagnostic() {
-        backgroundTimer?.invalidate()
-        backgroundTimer = nil
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid

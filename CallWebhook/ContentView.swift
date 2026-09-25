@@ -9,11 +9,14 @@ struct ContentView: View {
 
     var body: some View {
         TabView {
+            ContactsView()
+                .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
+
             CallsView()
                 .tabItem { Label("Anrufe", systemImage: "clock.fill") }
 
-            ContactsView()
-                .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
+            MailboxView()
+                .tabItem { Label("Mailbox", systemImage: "recordingtape") }
 
             DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber)
                 .environmentObject(monitor)

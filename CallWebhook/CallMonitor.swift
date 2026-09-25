@@ -8,6 +8,9 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     @Published private(set) var lastEvent = "App gestartet"
     @Published private(set) var log: [String] = []
     @Published private(set) var haState = "Token fehlt"
+    @Published var haTriggerMode = UserDefaults.standard.string(forKey: "haTriggerMode") ?? "connected" {
+        didSet { UserDefaults.standard.set(haTriggerMode, forKey: "haTriggerMode") }
+    }
     @Published var haToken = "" {
         didSet { UserDefaults.standard.set(haToken, forKey: "haToken") }
     }
@@ -38,7 +41,7 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
                 state = call.isOutgoing ? "ausgehend" : "eingehend/klingelt"
             }
             self.append("CallKit: \(state)")
-            self.evaluateAndSend()
+            self.evaluateAndSend(call: call)
         }
     }
 
@@ -78,11 +81,16 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
         }.resume()
     }
 
-    private func evaluateAndSend(force: Bool = false) {
-        let nowActive = observer.calls.contains { !$0.hasEnded }
+    private func evaluateAndSend(force: Bool = false, call: CXCall? = nil) {
+        let nowActive: Bool
+        if haTriggerMode == "ringing" {
+            nowActive = observer.calls.contains { !$0.hasEnded }
+        } else {
+            nowActive = observer.calls.contains { !$0.hasEnded && $0.hasConnected }
+        }
         guard force || nowActive != active else { return }
         active = nowActive
-        lastEvent = nowActive ? "Telefon aktiv" : "Kein Telefonat"
+        lastEvent = nowActive ? (haTriggerMode == "ringing" ? "Telefon aktiv" : "Gespräch verbunden") : "Kein Telefonat"
         post(nowActive ? onURL : offURL, label: nowActive ? "ON" : "OFF")
     }
 

@@ -1,6 +1,10 @@
 name: CallWebhook
 options:
   bundleIdPrefix: de.reno
+packages:
+  LinphoneSDK:
+    url: https://gitlab.linphone.org/BC/public/linphone-sdk-swift-ios.git
+    branch: stable
 targets:
   CallWebhook:
     type: application
@@ -9,6 +13,9 @@ targets:
     supportedDestinations: [iOS]
     sources:
       - CallWebhook
+    dependencies:
+      - package: LinphoneSDK
+        product: linphonesw
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook.U98PKCA4W7
@@ -25,4 +32,5 @@ targets:
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone:
           - UIInterfaceOrientationPortrait
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/Frameworks @loader_path/Frameworks
         CODE_SIGN_ENTITLEMENTS: CallWebhook/CallWebhook.entitlements

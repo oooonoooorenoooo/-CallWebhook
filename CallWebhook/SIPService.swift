@@ -30,21 +30,21 @@ final class SIPService: ObservableObject {
 
         let newCore = try Factory.Instance.createCore(configPath: "", factoryConfigPath: "", systemContext: nil)
         let auth = try Factory.Instance.createAuthInfo(
-            username: username,
+            username: resolvedUsername,
             userid: nil,
-            passwd: password,
+            passwd: resolvedPassword,
             ha1: nil,
             realm: nil,
-            domain: host
+            domain: resolvedHost
         )
         newCore.addAuthInfo(info: auth)
 
         let params = try newCore.createAccountParams()
-        let identity = try Factory.Instance.createAddress(addr: "sip:\(username)@\(host)")
+        let identity = try Factory.Instance.createAddress(addr: "sip:\(resolvedUsername)@\(resolvedHost)")
         try params.setIdentityaddress(newValue: identity)
         params.registerEnabled = true
 
-        let server = try Factory.Instance.createAddress(addr: "sip:\(host);transport=udp")
+        let server = try Factory.Instance.createAddress(addr: "sip:\(resolvedHost);transport=udp")
         try params.setServeraddress(newValue: server)
 
         let account = try newCore.createAccount(params: params)

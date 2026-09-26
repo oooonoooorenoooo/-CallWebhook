@@ -4,7 +4,8 @@ import LiveCommunicationKit
 @MainActor
 final class DialerModel: ObservableObject {
     @Published var number = ""
-    @Published private(set) var status = "Bereit"\n    @Published private(set) var lastDialedNumber = UserDefaults.standard.string(forKey: "lastDialedNumber") ?? ""
+    @Published private(set) var status = "Bereit"
+    @Published private(set) var lastDialedNumber = UserDefaults.standard.string(forKey: "lastDialedNumber") ?? ""
 
     func append(_ digit: String) {
         number.append(digit)

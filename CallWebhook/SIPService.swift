@@ -44,7 +44,9 @@ final class SIPService: ObservableObject {
         try params.setIdentityaddress(newValue: identity)
         params.registerEnabled = true
 
-        let server = try Factory.Instance.createAddress(addr: "sip:\(resolvedHost);transport=udp")
+        // Keep the SIP username in the registrar URI so Asterisk can map
+        // REGISTER requests to the configured AOR instead of seeing AOR ''.
+        let server = try Factory.Instance.createAddress(addr: "sip:\(resolvedUsername)@\(resolvedHost);transport=udp")
         try params.setServeraddress(newValue: server)
 
         let account = try newCore.createAccount(params: params)

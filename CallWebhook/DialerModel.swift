@@ -6,6 +6,7 @@ final class DialerModel: ObservableObject {
     @Published var number = ""
     @Published private(set) var status = "Bereit"
     @Published private(set) var lastDialedNumber = UserDefaults.standard.string(forKey: "lastDialedNumber") ?? ""
+    private let sip = SIPService.shared
 
     func append(_ digit: String) {
         number.append(digit)
@@ -23,6 +24,20 @@ final class DialerModel: ObservableObject {
         let value = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         status = "Anruf wird gestartet …"
+        lastDialedNumber = value
+        UserDefaults.standard.set(value, forKey: "lastDialedNumber")
+        number = value
+
+        if UserDefaults.standard.bool(forKey: "sipEnabled") {
+            do {
+                try sip.call(value)
+                status = "Asterisk/SIP: \(value)"
+            } catch {
+                status = "SIP-Fehler: \(error.localizedDescription)"
+            }
+            return
+        }
+
         Task {
             do {
                 let handle = Handle(type: .phoneNumber, value: value)
@@ -32,6 +47,13 @@ final class DialerModel: ObservableObject {
             } catch {
                 status = "Fehler: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func hangup() {
+        if UserDefaults.standard.bool(forKey: "sipEnabled") {
+            sip.hangup()
+            status = "SIP-Anruf beendet"
         }
     }
 }

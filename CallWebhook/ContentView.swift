@@ -15,7 +15,7 @@ struct ContentView: View {
             ContactsView()
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
 
-            CallsView()
+            CallsView(dialer: dialer)
                 .tabItem { Label("Anrufe", systemImage: "clock.fill") }
 
             MailboxView(dialer: dialer)
@@ -55,26 +55,35 @@ private struct CallsView: View {
                         ContentUnavailableView(searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer", systemImage: "phone", description: Text("Die Mobilfunk-Anrufhistorie erscheint hier."))
                     } else {
                         List(filteredCalls) { call in
-                            HStack(spacing: 12) {
-                                Image(systemName: directionIcon(call))
-                                    .frame(width: 28)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
-                                    Text(directionText(call)).font(.caption).foregroundStyle(.secondary)
-                                    Text("Status: \(String(describing: call.status))")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                VStack(alignment: .trailing, spacing: 3) {
-                                    Text(call.date, style: .date).font(.caption)
-                                    Text(call.date, style: .time).font(.caption2).foregroundStyle(.secondary)
-                                    if call.duration > 0 {
-                                        Text("\(Int(call.duration) / 60):\(String(format: "%02d", Int(call.duration) % 60))")
-                                            .font(.caption2).foregroundStyle(.secondary)
+                            Button {
+                                guard let number = call.handles.first?.value, !number.isEmpty else { return }
+                                dialer.call(number)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: directionIcon(call))
+                                        .frame(width: 28)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
+                                        Text(directionText(call)).font(.caption).foregroundStyle(.secondary)
+                                        Text("Status: \(String(describing: call.status))")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
                                     }
+                                    Spacer()
+                                    VStack(alignment: .trailing, spacing: 3) {
+                                        Text(call.date, style: .date).font(.caption)
+                                        Text(call.date, style: .time).font(.caption2).foregroundStyle(.secondary)
+                                        if call.duration > 0 {
+                                            Text("\(Int(call.duration) / 60):\(String(format: "%02d", Int(call.duration) % 60))")
+                                                .font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Image(systemName: "phone.fill")
+                                        .foregroundStyle(.green)
                                 }
                             }
+                            .buttonStyle(.plain)
+                            .disabled((call.handles.first?.value ?? "").isEmpty)
                         }
                         .listStyle(.plain)
                         .refreshable { await history.refresh() }

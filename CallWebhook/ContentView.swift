@@ -574,7 +574,11 @@ private struct ExtrasView: View {
                         .autocorrectionDisabled()
                     settingsAction("SIP verbinden / neu registrieren", systemImage: "antenna.radiowaves.left.and.right") {
                         do {
-                            try SIPService.shared.configureAndStart()
+                            try SIPService.shared.configureAndStart(
+                                host: sipHost,
+                                username: sipUsername,
+                                password: sipPassword
+                            )
                         } catch {
                             // Status wird im SIP-Dienst gesetzt.
                         }

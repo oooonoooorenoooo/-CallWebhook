@@ -480,16 +480,16 @@ private struct DialPadView: View {
 
     private var endCallButton: some View {
         Button {
-            // Die echte Beenden-Aktion wird mit der Default-Dialer-Steuerung verbunden.
+            dialer.hangup()
         } label: {
             Image(systemName: "phone.down.fill")
                 .font(.system(size: 27, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 72, height: 72)
-                .background(monitor.active ? Color.red : Color.gray.opacity(0.45), in: Circle())
+                .background((monitor.active || SIPService.shared.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!monitor.active)
+        .disabled(!monitor.active && !SIPService.shared.active)
         .accessibilityLabel("Anruf beenden")
     }
 
@@ -538,6 +538,11 @@ private struct ExtrasView: View {
     @AppStorage("externalListName") private var externalListName = ""
     @AppStorage("externalListEnabled") private var externalListEnabled = false
     @AppStorage("mailboxNumber") private var mailboxNumber = ""
+    @AppStorage("sipEnabled") private var sipEnabled = false
+    @AppStorage("sipHost") private var sipHost = "192.168.178.26"
+    @AppStorage("sipUsername") private var sipUsername = "callwebhook-ios"
+    @AppStorage("sipPassword") private var sipPassword = ""
+    @State private var showSIP = false
     @State private var showMobile = false
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
@@ -556,6 +561,32 @@ private struct ExtrasView: View {
     var body: some View {
         NavigationStack {
             Form {
+                DisclosureGroup("Asterisk / VoIP", isExpanded: $showSIP) {
+                    Toggle("Anrufe über Asterisk", isOn: $sipEnabled)
+                    TextField("Asterisk Host", text: $sipHost)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("SIP Benutzer", text: $sipUsername)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("SIP Passwort", text: $sipPassword)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("SIP verbinden / neu registrieren") {
+                        do {
+                            try SIPService.shared.configureAndStart()
+                        } catch {
+                            // Status wird im SIP-Dienst gesetzt.
+                        }
+                    }
+                    Text(SIPService.shared.status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Aktiv: Zifferblatt, Anrufliste und Mailbox wählen über Asterisk. Deaktiviert: bisheriger Mobilfunkpfad.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 DisclosureGroup("Mobilfunk / Dual-SIM", isExpanded: $showMobile) {
                     TextField("Primäre Rufnummer", text: $primaryPhoneNumber)
                         .keyboardType(.phonePad)

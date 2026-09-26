@@ -572,7 +572,7 @@ private struct ExtrasView: View {
                     SecureField("SIP Passwort", text: $sipPassword)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Button("SIP verbinden / neu registrieren") {
+                    settingsAction("SIP verbinden / neu registrieren", systemImage: "antenna.radiowaves.left.and.right") {
                         do {
                             try SIPService.shared.configureAndStart()
                         } catch {
@@ -597,10 +597,9 @@ private struct ExtrasView: View {
                         .focused($focusedPhoneField, equals: .secondary)
                         .submitLabel(.done)
 
-                    Button("Tastatur schließen") {
+                    settingsAction("Tastatur schließen", systemImage: "keyboard.chevron.compact.down", disabled: focusedPhoneField == nil) {
                         focusedPhoneField = nil
                     }
-                    .disabled(focusedPhoneField == nil)
                 }
 
                 DisclosureGroup("Mailbox", isExpanded: $showMailbox) {
@@ -645,11 +644,11 @@ private struct ExtrasView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Button("HA-Status aktualisieren") {
+                    settingsAction("HA-Status aktualisieren", systemImage: "arrow.clockwise") {
                         monitor.refreshHAState()
                     }
 
-                    Button("Aktuellen Telefonstatus senden") {
+                    settingsAction("Aktuellen Telefonstatus senden", systemImage: "paperplane.fill") {
                         monitor.sendCurrentState()
                     }
 
@@ -658,7 +657,7 @@ private struct ExtrasView: View {
                         .autocorrectionDisabled()
                         .textContentType(.password)
 
-                    Button("Token speichern & testen") {
+                    settingsAction("Token speichern & testen", systemImage: "checkmark.shield.fill") {
                         monitor.refreshHAState()
                     }
                 }
@@ -686,10 +685,13 @@ private struct ExtrasView: View {
                         Toggle("Externe Liste aktiv", isOn: $externalListEnabled)
                             .disabled(externalListURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                        Button("Liste jetzt laden") {
+                        settingsAction(
+                            "Liste jetzt laden",
+                            systemImage: "arrow.down.circle.fill",
+                            disabled: !externalListEnabled || externalListURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ) {
                             // Netzwerkimport und Parser werden als eigener Dienst angebunden.
                         }
-                        .disabled(!externalListEnabled || externalListURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     } header: {
                         Text("Eigene Listenquelle")
                     }
@@ -743,6 +745,32 @@ private struct ExtrasView: View {
                 focusedPhoneField = nil
             }
         }
+    }
+
+    @ViewBuilder
+    private func settingsAction(
+        _ title: String,
+        systemImage: String,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.body.weight(.semibold))
+                    .frame(width: 24)
+                Text(title)
+                    .font(.body.weight(.semibold))
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .disabled(disabled)
     }
 
     @ViewBuilder

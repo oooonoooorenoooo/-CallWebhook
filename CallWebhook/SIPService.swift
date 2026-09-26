@@ -81,7 +81,12 @@ final class SIPService: ObservableObject {
 
     func hangup() {
         guard let core else { return }
-        core.terminateAllCalls()
+        do {
+            try core.terminateAllCalls()
+        } catch {
+            status = "SIP-Auflegen fehlgeschlagen: \(error.localizedDescription)"
+            return
+        }
         active = false
         status = "SIP-Anruf beendet"
     }

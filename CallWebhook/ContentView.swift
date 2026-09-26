@@ -34,6 +34,7 @@ struct ContentView: View {
 
 private struct CallsView: View {
     @EnvironmentObject var monitor: CallMonitor
+    @ObservedObject var dialer: DialerModel
     @StateObject private var history = CallHistoryModel()
     @State private var selection = 0
     @State private var searchText = ""

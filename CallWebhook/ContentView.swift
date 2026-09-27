@@ -108,6 +108,8 @@ private struct SetupWizardView: View {
     @State private var fritzSIPWriteAction = ""
     @State private var fritzSIPWriteStatus = "Schreibschnittstelle noch nicht geprüft"
     @State private var fritzSIPWriteArguments: [String] = []
+    @State private var sipProvisionStatus = "Noch nicht ausgeführt"
+    @State private var isProvisioningSIP = false
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -248,6 +250,15 @@ private struct SetupWizardView: View {
                             .font(.caption)
                         Text("callwhapp2: \(sipClient2Plan)")
                             .font(.caption)
+                        Button {
+                            Task { await provisionMissingSIPClients() }
+                        } label: {
+                            Label(isProvisioningSIP ? "Provisioniere …" : "SIP-Nebenstellen einrichten", systemImage: "gearshape.2.fill")
+                        }
+                        .disabled(isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil)
+                        Text(sipProvisionStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -676,6 +687,94 @@ private struct SetupWizardView: View {
               match.numberOfRanges > 1,
               let valueRange = Range(match.range(at: 1), in: xml) else { return nil }
         return String(xml[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor
+    private func provisionMissingSIPClients() async {
+        guard fritzAuthenticated,
+              !fritzSIPWriteAction.isEmpty,
+              let index1 = sipClient1Index,
+              let index2 = sipClient2Index else {
+            sipProvisionStatus = "FRITZ-SIP ist noch nicht vollständig geprüft"
+            return
+        }
+
+        let existing1 = fritzSIPClients.contains { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }
+        let existing2 = fritzSIPClients.contains { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
+        if existing1 && existing2 {
+            sipProvisionStatus = "callwhapp1 und callwhapp2 sind bereits vorhanden"
+            return
+        }
+
+        isProvisioningSIP = true
+        defer { isProvisioningSIP = false }
+
+        let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = rawHost.contains("://") ? rawHost : "http://\(rawHost):49000"
+
+        do {
+            guard let descriptionURL = URL(string: base + "/tr64desc.xml") else { throw URLError(.badURL) }
+            let (descriptionData, _) = try await URLSession.shared.data(from: descriptionURL)
+            guard let descriptionXML = String(data: descriptionData, encoding: .utf8),
+                  let voipService = extractTR064Services(from: descriptionXML).first(where: {
+                      $0.type.localizedCaseInsensitiveContains("X_VoIP") || $0.type.localizedCaseInsensitiveContains("VoIP")
+                  }) else {
+                throw URLError(.cannotParseResponse)
+            }
+
+            let auth = FritzAuthDelegate(username: fritzUser, password: fritzPassword)
+            let session = URLSession(configuration: .ephemeral, delegate: auth, delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+
+            if !existing1 {
+                let password = randomSIPPassword()
+                let args = try setClientArguments(index: index1, username: "callwhapp1", password: password, outgoing: line1Number)
+                _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+            }
+
+            if !existing2 {
+                let password = randomSIPPassword()
+                let number2 = line2Number.isEmpty ? line1Number : line2Number
+                let args = try setClientArguments(index: index2, username: "callwhapp2", password: password, outgoing: number2)
+                _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+            }
+
+            sipProvisionStatus = "SIP-Nebenstellen wurden angelegt – FRITZ-Prüfung erneut ausführen"
+        } catch {
+            sipProvisionStatus = "Provisionierung abgebrochen: \(error.localizedDescription)"
+        }
+    }
+
+    private func setClientArguments(index: Int, username: String, password: String, outgoing: String) throws -> [(String, String)] {
+        var values: [String: String] = [
+            "NewX_AVM-DE_ClientIndex": String(index),
+            "NewX_AVM-DE_ClientUsername": username,
+            "NewX_AVM-DE_ClientPassword": password,
+            "NewX_AVM-DE_PhoneName": username,
+            "NewX_AVM-DE_OutGoingNumber": outgoing,
+            "NewX_AVM-DE_InComingNumbers": outgoing,
+            "NewX_AVM-DE_ExternalRegistration": "0",
+            "NewX_AVM-DE_ClientId": ""
+        ]
+        values["NewX_AVM-DE_ClientID"] = ""
+
+        var result: [(String, String)] = []
+        for argument in fritzSIPWriteArguments {
+            guard let value = values[argument] else {
+                throw NSError(domain: "CallWebhook.Setup", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unbekanntes FRITZ-Argument \(argument)"])
+            }
+            result.append((argument, value))
+        }
+        guard !result.isEmpty else {
+            throw NSError(domain: "CallWebhook.Setup", code: 2, userInfo: [NSLocalizedDescriptionKey: "Keine SetClient-Argumente ausgelesen"])
+        }
+        return result
+    }
+
+    private func randomSIPPassword() -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789")
+        var generator = SystemRandomNumberGenerator()
+        return String((0..<24).compactMap { _ in alphabet.randomElement(using: &generator) })
     }
 
     private func actionArgumentNames(_ action: String, in scpd: String) -> [String] {

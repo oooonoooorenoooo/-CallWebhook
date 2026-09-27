@@ -105,6 +105,8 @@ private struct SetupWizardView: View {
     @State private var sipClient2Plan = "Noch nicht geprüft"
     @State private var sipClient1Index: Int?
     @State private var sipClient2Index: Int?
+    @State private var fritzSIPWriteAction = ""
+    @State private var fritzSIPWriteStatus = "Schreibschnittstelle noch nicht geprüft"
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -489,6 +491,29 @@ private struct SetupWizardView: View {
                     .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
                 fritzAuthenticated = true
+                do {
+                    if !voipService.scpdURL.isEmpty {
+                        let path = voipService.scpdURL.hasPrefix("/") ? voipService.scpdURL : "/" + voipService.scpdURL
+                        if let scpdURL = URL(string: base + path) {
+                            let (data, response) = try await session.data(from: scpdURL)
+                            if let http = response as? HTTPURLResponse,
+                               (200..<300).contains(http.statusCode),
+                               let scpd = String(data: data, encoding: .utf8) {
+                                if scpd.contains("<name>X_AVM-DE_SetClient4</name>") {
+                                    fritzSIPWriteAction = "X_AVM-DE_SetClient4"
+                                } else if scpd.contains("<name>X_AVM-DE_SetClient3</name>") {
+                                    fritzSIPWriteAction = "X_AVM-DE_SetClient3"
+                                } else if scpd.contains("<name>X_AVM-DE_SetClient2</name>") {
+                                    fritzSIPWriteAction = "X_AVM-DE_SetClient2"
+                                }
+                                fritzSIPWriteStatus = fritzSIPWriteAction.isEmpty ? "Keine SIP-Schreibaktion angeboten" : "SIP-Schreibaktion: \(fritzSIPWriteAction)"
+                            }
+                        }
+                    }
+                } catch {
+                    fritzSIPWriteAction = ""
+                    fritzSIPWriteStatus = "SIP-Schreibschnittstelle nicht lesbar"
+                }
                 if line1Number.isEmpty, let first = fritzVoIPNumbers.first { line1Number = first }
                 if line2Number.isEmpty, fritzVoIPNumbers.count > 1 { line2Number = fritzVoIPNumbers[1] }
                 if line3Number.isEmpty, let first = fritzVoIPNumbers.first { line3Number = first }
@@ -615,6 +640,7 @@ private struct SetupWizardView: View {
     private struct TR064Service {
         let type: String
         let controlURL: String
+        let scpdURL: String
     }
 
     private func extractTR064Services(from xml: String) -> [TR064Service] {
@@ -627,7 +653,8 @@ private struct SetupWizardView: View {
             let block = String(xml[blockRange])
             guard let type = firstXMLValue("serviceType", in: block),
                   let controlURL = firstXMLValue("controlURL", in: block) else { return nil }
-            return TR064Service(type: type, controlURL: controlURL)
+            let scpdURL = firstXMLValue("SCPDURL", in: block) ?? ""
+            return TR064Service(type: type, controlURL: controlURL, scpdURL: scpdURL)
         }
     }
 

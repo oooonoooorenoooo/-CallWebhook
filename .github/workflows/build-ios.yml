@@ -59,6 +59,7 @@ jobs:
           path: CallWebhook-signed.ipa
 
   testflight:
+    needs: development
     runs-on: macos-26
     concurrency:
       group: callwebhook-testflight-main

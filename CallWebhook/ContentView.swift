@@ -152,6 +152,8 @@ private struct SetupWizardView: View {
     @State private var isProvisioningSIP = false
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
+    @State private var callWebhookHAReady = false
+    @State private var callWebhookHAStatus = "CallWebhook-Integration noch nicht geprüft"
     @State private var asteriskConfigStatus = "Noch nicht vorbereitet"
     @State private var asteriskConfigReady = false
     @State private var asteriskInstalled = false
@@ -332,6 +334,8 @@ private struct SetupWizardView: View {
                 .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(homeAssistantReachable ? .green : .secondary)
+                Label(callWebhookHAStatus, systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
+                    .foregroundStyle(callWebhookHAReady ? .green : .orange)
                 SecureField("Home-Assistant-Token", text: $setupHAToken)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -348,7 +352,7 @@ private struct SetupWizardView: View {
                 } label: {
                     Label(isInstallingAsterisk ? "Installiere …" : "Asterisk automatisch installieren", systemImage: "arrow.down.to.line.compact")
                 }
-                .disabled(!asteriskConfigReady || isInstallingAsterisk || setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!asteriskConfigReady || !callWebhookHAReady || isInstallingAsterisk || setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label("Die eigentliche Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
             }
             Section("Automatisch einzurichten") {
@@ -1190,6 +1194,8 @@ private struct SetupWizardView: View {
         isChecking = true
         defer { isChecking = false }
         homeAssistantReachable = false
+        callWebhookHAReady = false
+        callWebhookHAStatus = "CallWebhook-Integration noch nicht geprüft"
         homeAssistantStatus = "Prüfung fehlgeschlagen"
 
         var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1213,8 +1219,51 @@ private struct SetupWizardView: View {
             }
             homeAssistantReachable = true
             homeAssistantStatus = "Home Assistant erreichbar"
+            await checkCallWebhookHAIntegration(base: base)
         } catch {
             homeAssistantStatus = "Nicht erreichbar: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func checkCallWebhookHAIntegration(base: URL) async {
+        callWebhookHAReady = false
+        let token = setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            callWebhookHAStatus = "HA-Token eingeben und erneut prüfen"
+            return
+        }
+        guard let url = URL(string: "/api/callwebhook/setup/asterisk", relativeTo: base)?.absoluteURL else {
+            callWebhookHAStatus = "CallWebhook-Endpunkt konnte nicht gebildet werden"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "OPTIONS"
+        request.timeoutInterval = 8
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                callWebhookHAStatus = "CallWebhook-Integration antwortet nicht"
+                return
+            }
+            if http.statusCode == 404 {
+                callWebhookHAStatus = "CallWebhook-HA-Integration fehlt – Bootstrap erforderlich"
+                return
+            }
+            if http.statusCode == 401 {
+                callWebhookHAStatus = "HA-Token nicht autorisiert"
+                return
+            }
+            if (200..<500).contains(http.statusCode) {
+                callWebhookHAReady = true
+                callWebhookHAStatus = "CallWebhook-HA-Integration bereit"
+                try? SetupKeychain.set(token, account: "home-assistant-token")
+                return
+            }
+            callWebhookHAStatus = "CallWebhook-Integration nicht bereit (HTTP \(http.statusCode))"
+        } catch {
+            callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
         }
     }
 

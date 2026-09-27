@@ -1,0 +1,827 @@
+from pathlib import Path
+from datetime import datetime
+import asyncio
+import json
+import xml.etree.ElementTree as ET
+from urllib.parse import urlparse, parse_qs, quote
+
+import requests
+from aiohttp import web
+
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.core import HomeAssistant
+
+DOMAIN = "callwebhook"
+
+HOST = "192.168.178.1"
+TAMS = ("1", "2")
+REFRESH_SECONDS = 30
+
+BASE_DIR = Path("/config/callwebhook")
+MAILBOX_FILE = BASE_DIR / "mailbox.json"
+XML_FILE = BASE_DIR / "mailbox.xml"
+ARCHIVE_DIR = BASE_DIR / "archive"
+ARCHIVE_FILE = ARCHIVE_DIR / "archive.json"
+SECRETS_FILE = Path("/config/secrets.yaml")
+ASTERISK_ADDON = "b35499aa_asterisk"
+ASTERISK_CUSTOM_DIR = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
+
+_refresh_lock = asyncio.Lock()
+
+
+def get_secret(name):
+    with SECRETS_FILE.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+
+            key, value = line.split(":", 1)
+
+            if key.strip() == name:
+                return value.strip().strip('"').strip("'")
+
+    raise RuntimeError(f"Secret {name} nicht gefunden")
+
+
+def get_auth():
+    return requests.auth.HTTPDigestAuth(
+        get_secret("fritz_callwebhook_user"),
+        get_secret("fritz_callwebhook_password")
+    )
+
+
+def get_text(message, name):
+    value = message.findtext(name)
+
+    if value is None:
+        return ""
+
+    return value.strip()
+
+
+def sort_key(item):
+    try:
+        return datetime.strptime(
+            item.get("date", ""),
+            "%d.%m.%y %H:%M"
+        )
+    except Exception:
+        return datetime.min
+
+
+def tam_control_request(action, body):
+    service = (
+        "urn:dslforum-org:"
+        "service:X_AVM-DE_TAM:1"
+    )
+
+    control_url = (
+        f"http://{HOST}:49000/"
+        "upnp/control/x_tam"
+    )
+
+    soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope
+ xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+ s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:{action} xmlns:u="{service}">
+{body}
+</u:{action}>
+</s:Body>
+</s:Envelope>"""
+
+    response = requests.post(
+        control_url,
+        data=soap.encode("utf-8"),
+        headers={
+            "Content-Type":
+                'text/xml; charset="utf-8"',
+            "SOAPAction":
+                f'"{service}#{action}"',
+        },
+        auth=get_auth(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    return response
+
+
+def delete_fritz_message(tam, index):
+    response = tam_control_request(
+        "DeleteMessage",
+        (
+            f"<NewIndex>{tam}</NewIndex>"
+            f"<NewMessageIndex>{index}</NewMessageIndex>"
+        )
+    )
+
+    audio_file = (
+        BASE_DIR /
+        f"voicemail_{tam}_{index}.wav"
+    )
+
+    if audio_file.exists():
+        try:
+            audio_file.unlink()
+        except Exception as error:
+            print(
+                "CallWebhook lokale WAV konnte "
+                f"nicht entfernt werden: {error}"
+            )
+
+    return response.status_code
+
+
+def load_archive():
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    if not ARCHIVE_FILE.exists():
+        return []
+    try:
+        data = json.loads(ARCHIVE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception as error:
+        print(f"CallWebhook Archiv konnte nicht gelesen werden: {error}")
+        return []
+
+
+def save_archive(archive):
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    temp_file = ARCHIVE_DIR / "archive.json.tmp"
+    temp_file.write_text(json.dumps(archive, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_file.replace(ARCHIVE_FILE)
+
+
+def archive_message(tam, index):
+    if not MAILBOX_FILE.exists():
+        raise RuntimeError("Mailbox-Datei nicht vorhanden")
+    mailbox = json.loads(MAILBOX_FILE.read_text(encoding="utf-8"))
+    message = next((item for item in mailbox if str(item.get("tam", "")) == str(tam) and str(item.get("index", "")) == str(index)), None)
+    if message is None:
+        raise RuntimeError("Nachricht nicht gefunden")
+    source_audio = BASE_DIR / f"voicemail_{tam}_{index}.wav"
+    if not source_audio.exists():
+        raise RuntimeError("Aufnahme nicht vorhanden")
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_audio = ARCHIVE_DIR / f"voicemail_{tam}_{index}.wav"
+    if not archive_audio.exists():
+        temp_audio = ARCHIVE_DIR / f"voicemail_{tam}_{index}.wav.tmp"
+        temp_audio.write_bytes(source_audio.read_bytes())
+        temp_audio.replace(archive_audio)
+    archive = load_archive()
+    archived_message = dict(message)
+    archived_message["archived"] = True
+    archived_message["new"] = False
+    archived_message["audio"] = f"/api/callwebhook/archive/audio/{tam}/{index}"
+    replaced = False
+    for position, item in enumerate(archive):
+        if str(item.get("tam", "")) == str(tam) and str(item.get("index", "")) == str(index):
+            archive[position] = archived_message
+            replaced = True
+            break
+    if not replaced:
+        archive.append(archived_message)
+    archive.sort(key=sort_key, reverse=True)
+    save_archive(archive)
+    return archived_message
+
+
+def merge_mailbox_and_archive(mailbox):
+    archive = load_archive()
+    archived_ids = {(str(item.get("tam", "")), str(item.get("index", ""))) for item in archive}
+    live = []
+    for item in mailbox:
+        key = (str(item.get("tam", "")), str(item.get("index", "")))
+        if key not in archived_ids:
+            live_item = dict(item)
+            live_item["archived"] = False
+            live.append(live_item)
+    combined = archive + live
+    combined.sort(key=sort_key, reverse=True)
+    return combined
+
+def fetch_fritz_mailbox_for_tam(target_tam):
+    BASE_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    service = (
+        "urn:dslforum-org:"
+        "service:X_AVM-DE_TAM:1"
+    )
+
+    response = tam_control_request(
+        "GetMessageList",
+        f"<NewIndex>{target_tam}</NewIndex>"
+    )
+
+    soap_root = ET.fromstring(
+        response.content
+    )
+
+    message_url = None
+
+    for element in soap_root.iter():
+        if element.tag.endswith("NewURL"):
+            message_url = element.text
+            break
+
+    if not message_url:
+        raise RuntimeError(
+            "FRITZ!Box hat keine "
+            "MessageList-URL geliefert"
+        )
+
+    messages_response = requests.get(
+        message_url,
+        auth=get_auth(),
+        timeout=10,
+    )
+
+    messages_response.raise_for_status()
+
+    temp_xml = XML_FILE.with_suffix(
+        ".xml.tmp"
+    )
+
+    temp_xml.write_text(
+        messages_response.text,
+        encoding="utf-8"
+    )
+
+    temp_xml.replace(
+        XML_FILE
+    )
+
+    message_root = ET.fromstring(
+        messages_response.content
+    )
+
+    sid = parse_qs(
+        urlparse(
+            message_url
+        ).query
+    ).get(
+        "sid",
+        [None]
+    )[0]
+
+    if not sid:
+        raise RuntimeError(
+            "Keine SID in der "
+            "MessageList-URL gefunden"
+        )
+
+    messages = message_root.findall(
+        ".//Message"
+    )
+
+    mailbox = []
+    valid_audio_files = set()
+
+    for message in messages:
+        index = get_text(
+            message,
+            "Index"
+        )
+
+        tam = get_text(
+            message,
+            "Tam"
+        )
+
+        called = get_text(
+            message,
+            "Called"
+        )
+
+        date = get_text(
+            message,
+            "Date"
+        )
+
+        duration = get_text(
+            message,
+            "Duration"
+        )
+
+        name = get_text(
+            message,
+            "Name"
+        )
+
+        number = get_text(
+            message,
+            "Number"
+        )
+
+        new_value = get_text(
+            message,
+            "New"
+        )
+
+        path = get_text(
+            message,
+            "Path"
+        )
+
+        if not index:
+            continue
+
+        if not tam:
+            tam = target_tam
+
+        audio_api_path = ""
+
+        filename = (
+            f"voicemail_"
+            f"{tam}_"
+            f"{index}.wav"
+        )
+
+        audio_file = (
+            BASE_DIR /
+            filename
+        )
+
+        if path:
+            if audio_file.exists():
+                valid_audio_files.add(
+                    filename
+                )
+
+                audio_api_path = (
+                    "/api/callwebhook/"
+                    f"audio/{tam}/{index}"
+                )
+
+            else:
+                recording_path = path
+
+                prefix = (
+                    "/download.lua?path="
+                )
+
+                if recording_path.startswith(
+                    prefix
+                ):
+                    recording_path = (
+                        recording_path[
+                            len(prefix):
+                        ]
+                    )
+
+                audio_url = (
+                    f"http://{HOST}"
+                    "/cgi-bin/"
+                    "luacgi_notimeout"
+                    f"?sid={quote(sid)}"
+                    "&script=/lua/photo.lua"
+                    "&myabfile="
+                    f"{quote(recording_path, safe='/')}"
+                )
+
+                try:
+                    audio = requests.get(
+                        audio_url,
+                        timeout=20
+                    )
+
+                    audio.raise_for_status()
+
+                    content_type = (
+                        audio.headers.get(
+                            "Content-Type",
+                            ""
+                        )
+                    )
+
+                    if (
+                        "audio"
+                        not in
+                        content_type.lower()
+                    ):
+                        raise RuntimeError(
+                            "FRITZ!Box lieferte "
+                            "keine Audiodatei"
+                        )
+
+                    temp_audio_file = (
+                        BASE_DIR /
+                        f"{filename}.tmp"
+                    )
+
+                    temp_audio_file.write_bytes(
+                        audio.content
+                    )
+
+                    temp_audio_file.replace(
+                        audio_file
+                    )
+
+                    valid_audio_files.add(
+                        filename
+                    )
+
+                    audio_api_path = (
+                        "/api/callwebhook/"
+                        f"audio/{tam}/{index}"
+                    )
+
+                except Exception as error:
+                    print(
+                        "CallWebhook Audiofehler "
+                        f"{tam}/{index}: {error}"
+                    )
+
+        mailbox.append(
+            {
+                "index": index,
+                "tam": tam,
+                "called": called,
+                "date": date,
+                "duration": duration,
+                "name": name,
+                "number": number,
+                "new": new_value == "1",
+                "audio": audio_api_path,
+            }
+        )
+
+    mailbox.sort(
+        key=sort_key,
+        reverse=True
+    )
+
+    return mailbox
+
+
+def fetch_fritz_mailbox():
+    combined = []
+    for target_tam in TAMS:
+        combined.extend(fetch_fritz_mailbox_for_tam(target_tam))
+    combined.sort(key=sort_key, reverse=True)
+    valid_audio_files = {
+        Path(item.get("audio", "")).name
+        for item in combined
+        if item.get("audio", "").startswith("/api/callwebhook/audio/")
+    }
+    for audio_file in BASE_DIR.glob("voicemail_*.wav"):
+        if audio_file.name not in valid_audio_files:
+            try:
+                audio_file.unlink()
+            except Exception as error:
+                print(f"CallWebhook konnte {audio_file.name} nicht entfernen: {error}")
+    temp_json = BASE_DIR / "mailbox.json.tmp"
+    temp_json.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_json.replace(MAILBOX_FILE)
+    return combined
+
+
+async def async_refresh_mailbox(
+    hass: HomeAssistant
+):
+    async with _refresh_lock:
+        try:
+            return await hass.async_add_executor_job(
+                fetch_fritz_mailbox
+            )
+        except Exception as error:
+            print(
+                "CallWebhook Mailbox-Refresh "
+                f"fehlgeschlagen: {error}"
+            )
+            return None
+
+
+async def mailbox_refresh_loop(
+    hass: HomeAssistant
+):
+    while True:
+        await async_refresh_mailbox(
+            hass
+        )
+
+        await asyncio.sleep(
+            REFRESH_SECONDS
+        )
+
+
+def install_asterisk_config(pjsip, extensions, addon, custom_path):
+    if addon != ASTERISK_ADDON:
+        raise RuntimeError("Unbekanntes Asterisk-Add-on")
+    requested_dir = Path(custom_path)
+    if requested_dir != ASTERISK_CUSTOM_DIR:
+        raise RuntimeError("Unzulässiger Asterisk-Konfigurationspfad")
+    if not ASTERISK_CUSTOM_DIR.exists():
+        raise RuntimeError(
+            "Asterisk-Konfigurationsordner ist für Home Assistant nicht erreichbar: "
+            f"{ASTERISK_CUSTOM_DIR}"
+        )
+    if not isinstance(pjsip, str) or not pjsip.strip():
+        raise RuntimeError("pjsip-Konfiguration fehlt")
+    if not isinstance(extensions, str) or not extensions.strip():
+        raise RuntimeError("extensions-Konfiguration fehlt")
+    required_pjsip = ("[fritz1-auth]", "[fritz1-endpoint]", "[fritz2-auth]", "[fritz2-endpoint]")
+    required_extensions = ("[from-callwebhook-ios]",)
+    if not all(token in pjsip for token in required_pjsip):
+        raise RuntimeError("pjsip-Konfiguration unvollständig")
+    if not all(token in extensions for token in required_extensions):
+        raise RuntimeError("extensions-Konfiguration unvollständig")
+
+    ASTERISK_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+    targets = {
+        ASTERISK_CUSTOM_DIR / "pjsip_callwebhook.conf": pjsip,
+        ASTERISK_CUSTOM_DIR / "extensions_callwebhook.conf": extensions,
+    }
+    backups = {}
+    try:
+        for target, content in targets.items():
+            if target.exists():
+                backup = target.with_suffix(target.suffix + ".bak")
+                backup.write_bytes(target.read_bytes())
+                backups[target] = backup
+            temp = target.with_suffix(target.suffix + ".tmp")
+            temp.write_text(content.rstrip() + "\n", encoding="utf-8")
+            temp.replace(target)
+    except Exception:
+        for target, backup in backups.items():
+            if backup.exists():
+                backup.replace(target)
+        raise
+    return [str(path) for path in targets]
+
+
+class CallWebhookAsteriskSetupView(HomeAssistantView):
+    url = "/api/callwebhook/setup/asterisk"
+    name = "api:callwebhook:setup:asterisk"
+    requires_auth = True
+
+    async def post(self, request):
+        hass = request.app["hass"]
+        try:
+            payload = await request.json()
+        except Exception:
+            return self.json({"ok": False, "error": "Ungültiges JSON"}, status_code=400)
+
+        try:
+            files = await hass.async_add_executor_job(
+                install_asterisk_config,
+                payload.get("pjsip"),
+                payload.get("extensions"),
+                payload.get("addon"),
+                payload.get("custom_path"),
+            )
+            await hass.services.async_call(
+                "hassio",
+                "addon_restart",
+                {"addon": ASTERISK_ADDON},
+                blocking=True,
+            )
+        except Exception as error:
+            return self.json({"ok": False, "error": str(error)}, status_code=500)
+
+        return self.json({
+            "ok": True,
+            "addon": ASTERISK_ADDON,
+            "files": files,
+            "mailbox_tam_1": payload.get("mailbox_tam_1"),
+            "mailbox_tam_2": payload.get("mailbox_tam_2"),
+        })
+
+
+class CallWebhookMailboxView(
+    HomeAssistantView
+):
+    url = "/api/callwebhook/mailbox"
+    name = "api:callwebhook:mailbox"
+    requires_auth = True
+
+    async def get(
+        self,
+        request
+    ):
+        hass = request.app["hass"]
+
+        refreshed = await async_refresh_mailbox(
+            hass
+        )
+
+        if refreshed is not None:
+            combined = await hass.async_add_executor_job(merge_mailbox_and_archive, refreshed)
+            return self.json(combined)
+
+        if not MAILBOX_FILE.exists():
+            return self.json([])
+
+        try:
+            content = (
+                await hass.async_add_executor_job(
+                    MAILBOX_FILE.read_text,
+                    "utf-8"
+                )
+            )
+
+            data = json.loads(
+                content
+            )
+
+            combined = await hass.async_add_executor_job(merge_mailbox_and_archive, data)
+            return self.json(combined)
+
+        except Exception as error:
+            return self.json(
+                {
+                    "error": str(error)
+                },
+                status_code=500
+            )
+
+
+class CallWebhookMailboxArchiveView(HomeAssistantView):
+    url = "/api/callwebhook/mailbox/{tam}/{index}/archive"
+    name = "api:callwebhook:mailbox:archive"
+    requires_auth = True
+
+    async def post(self, request, tam, index):
+        if not tam.isdigit() or not index.isdigit():
+            raise web.HTTPBadRequest()
+        hass = request.app["hass"]
+        async with _refresh_lock:
+            try:
+                archived = await hass.async_add_executor_job(archive_message, tam, index)
+            except Exception as error:
+                return self.json({"success": False, "error": str(error)}, status_code=500)
+        return self.json({"success": True, "tam": tam, "index": index, "message": archived})
+
+
+class CallWebhookMailboxDeleteView(
+    HomeAssistantView
+):
+    url = (
+        "/api/callwebhook/"
+        "mailbox/{tam}/{index}"
+    )
+
+    name = "api:callwebhook:mailbox:delete"
+    requires_auth = True
+
+    async def delete(
+        self,
+        request,
+        tam,
+        index
+    ):
+        if (
+            not tam.isdigit()
+            or not index.isdigit()
+        ):
+            raise web.HTTPBadRequest()
+
+        hass = request.app["hass"]
+
+        async with _refresh_lock:
+            try:
+                await hass.async_add_executor_job(
+                    delete_fritz_message,
+                    tam,
+                    index
+                )
+
+                mailbox = (
+                    await hass.async_add_executor_job(
+                        fetch_fritz_mailbox
+                    )
+                )
+
+            except requests.HTTPError as error:
+                return self.json(
+                    {
+                        "success": False,
+                        "error": str(error)
+                    },
+                    status_code=502
+                )
+
+            except Exception as error:
+                return self.json(
+                    {
+                        "success": False,
+                        "error": str(error)
+                    },
+                    status_code=500
+                )
+
+        return self.json(
+            {
+                "success": True,
+                "tam": tam,
+                "index": index,
+                "mailbox": mailbox
+            }
+        )
+
+
+class CallWebhookArchiveAudioView(HomeAssistantView):
+    url = "/api/callwebhook/archive/audio/{tam}/{index}"
+    name = "api:callwebhook:archive:audio"
+    requires_auth = True
+
+    async def get(self, request, tam, index):
+        if not tam.isdigit() or not index.isdigit():
+            raise web.HTTPBadRequest()
+        audio_file = ARCHIVE_DIR / f"voicemail_{tam}_{index}.wav"
+        if not audio_file.exists():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path=audio_file, headers={"Content-Type": "audio/x-wav", "Cache-Control": "private, no-store"})
+
+
+class CallWebhookAudioView(
+    HomeAssistantView
+):
+    url = (
+        "/api/callwebhook/"
+        "audio/{tam}/{index}"
+    )
+
+    name = "api:callwebhook:audio"
+    requires_auth = True
+
+    async def get(
+        self,
+        request,
+        tam,
+        index
+    ):
+        if (
+            not tam.isdigit()
+            or not index.isdigit()
+        ):
+            raise web.HTTPBadRequest()
+
+        audio_file = (
+            BASE_DIR /
+            f"voicemail_{tam}_{index}.wav"
+        )
+
+        if not audio_file.exists():
+            raise web.HTTPNotFound()
+
+        return web.FileResponse(
+            path=audio_file,
+            headers={
+                "Content-Type":
+                    "audio/x-wav",
+                "Cache-Control":
+                    "private, no-store"
+            }
+        )
+
+
+async def async_setup(
+    hass: HomeAssistant,
+    config: dict
+) -> bool:
+    BASE_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+    hass.http.register_view(
+        CallWebhookAsteriskSetupView
+    )
+
+    hass.http.register_view(
+        CallWebhookMailboxView
+    )
+
+    hass.http.register_view(
+        CallWebhookMailboxDeleteView
+    )
+
+    hass.http.register_view(
+        CallWebhookMailboxArchiveView
+    )
+
+    hass.http.register_view(
+        CallWebhookAudioView
+    )
+
+    hass.http.register_view(
+        CallWebhookArchiveAudioView
+    )
+
+    hass.async_create_task(
+        mailbox_refresh_loop(
+            hass
+        ),
+        "CallWebhook mailbox refresh"
+    )
+
+    return True

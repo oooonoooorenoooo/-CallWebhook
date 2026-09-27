@@ -274,101 +274,70 @@ private struct ContactDetailView: View {
         Set(businessContactIDs.split(separator: "\n").map(String.init)).contains(contact.identifier)
     }
 
-    private var name: String {
-        CNContactFormatter.string(from: contact, style: .fullName) ?? contact.organizationName
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Zuordnung", selection: Binding(
+                get: { isBusiness ? "Beruflich" : "Privat" },
+                set: { newValue in
+                    var ids = Set(businessContactIDs.split(separator: "\n").map(String.init))
+                    if newValue == "Beruflich" {
+                        ids.insert(contact.identifier)
+                    } else {
+                        ids.remove(contact.identifier)
+                    }
+                    businessContactIDs = ids.sorted().joined(separator: "\n")
+                }
+            )) {
+                Text("Privat").tag("Privat")
+                Text("Beruflich").tag("Beruflich")
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            NativeContactView(contact: contact, dialer: dialer)
+        }
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct NativeContactView: UIViewControllerRepresentable {
+    let contact: CNContact
+    @ObservedObject var dialer: DialerModel
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(dialer: dialer)
     }
 
-    var body: some View {
-        List {
-            Section {
-                HStack(spacing: 16) {
-                    Group {
-                        if let data = contact.thumbnailImageData, let image = UIImage(data: data) {
-                            Image(uiImage: image).resizable().scaledToFill()
-                        } else {
-                            Image(systemName: "person.crop.circle.fill").resizable()
-                        }
-                    }
-                    .frame(width: 64, height: 64)
-                    .clipShape(Circle())
+    func makeUIViewController(context: Context) -> CNContactViewController {
+        let controller = CNContactViewController(for: contact)
+        controller.delegate = context.coordinator
+        controller.allowsEditing = true
+        controller.allowsActions = true
+        controller.shouldShowLinkedContacts = true
+        return controller
+    }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(name).font(.title3.bold())
-                        if !contact.organizationName.isEmpty {
-                            Text(contact.organizationName).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
+    func updateUIViewController(_ uiViewController: CNContactViewController, context: Context) {}
 
-            Section("Liste") {
-                Picker("Zuordnung", selection: Binding(
-                    get: { isBusiness ? "Beruflich" : "Privat" },
-                    set: { newValue in
-                        var ids = Set(businessContactIDs.split(separator: "\n").map(String.init))
-                        if newValue == "Beruflich" {
-                            ids.insert(contact.identifier)
-                        } else {
-                            ids.remove(contact.identifier)
-                        }
-                        businessContactIDs = ids.sorted().joined(separator: "\n")
-                    }
-                )) {
-                    Text("Privat").tag("Privat")
-                    Text("Beruflich").tag("Beruflich")
-                }
-                .pickerStyle(.segmented)
-            }
+    final class Coordinator: NSObject, CNContactViewControllerDelegate {
+        let dialer: DialerModel
 
-            if !contact.phoneNumbers.isEmpty {
-                Section("Telefon") {
-                    ForEach(Array(contact.phoneNumbers.enumerated()), id: \.offset) { _, item in
-                        Button {
-                            dialer.call(item.value.stringValue)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(CNLabeledValue<NSString>.localizedString(forLabel: item.label ?? "Telefon"))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Text(item.value.stringValue)
-                                        .foregroundStyle(.primary)
-                                }
-                                Spacer()
-                                Image(systemName: "phone.fill").foregroundStyle(.green)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if !contact.emailAddresses.isEmpty {
-                Section("E-Mail") {
-                    ForEach(Array(contact.emailAddresses.enumerated()), id: \.offset) { _, item in
-                        LabeledContent(CNLabeledValue<NSString>.localizedString(forLabel: item.label ?? "E-Mail")) {
-                            Text(item.value as String)
-                        }
-                    }
-                }
-            }
-
-            if !contact.postalAddresses.isEmpty {
-                Section("Adressen") {
-                    ForEach(Array(contact.postalAddresses.enumerated()), id: \.offset) { _, item in
-                        let address = item.value
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(CNLabeledValue<CNPostalAddress>.localizedString(forLabel: item.label ?? "Adresse"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text([address.street, [address.postalCode, address.city].filter { !$0.isEmpty }.joined(separator: " "), address.country].filter { !$0.isEmpty }.joined(separator: "\n"))
-                        }
-                    }
-                }
-            }
+        init(dialer: DialerModel) {
+            self.dialer = dialer
         }
-        .navigationTitle(name)
-        .navigationBarTitleDisplayMode(.inline)
+
+        func contactViewController(
+            _ viewController: CNContactViewController,
+            shouldPerformDefaultActionFor property: CNContactProperty
+        ) -> Bool {
+            if property.key == CNContactPhoneNumbersKey,
+               let phone = property.value as? CNPhoneNumber {
+                dialer.call(phone.stringValue)
+                return false
+            }
+            return true
+        }
     }
 }
 

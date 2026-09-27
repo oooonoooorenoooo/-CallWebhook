@@ -418,6 +418,22 @@ private struct MailboxView: View {
                                 Label("Löschen", systemImage: "trash")
                             }
                         }
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            if !message.isArchived {
+                                Button {
+                                    Task {
+                                        do {
+                                            try await mailbox.archive(message)
+                                        } catch {
+                                            mailbox.setError(error.localizedDescription)
+                                        }
+                                    }
+                                } label: {
+                                    Label("Speichern", systemImage: "archivebox.fill")
+                                }
+                                .tint(.blue)
+                            }
+                        }
                     }
                     .listStyle(.plain)
                     .refreshable { await mailbox.refresh() }

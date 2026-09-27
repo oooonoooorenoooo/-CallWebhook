@@ -61,6 +61,11 @@ private struct SetupWizardView: View {
     @State private var line1Label = "Mobil 1"
     @State private var line2Label = "Mobil 2"
     @State private var line3Label = "Festnetz"
+    @State private var fritzReachable = false
+    @State private var fritzStatus = "Noch nicht geprüft"
+    @State private var homeAssistantReachable = false
+    @State private var homeAssistantStatus = "Noch nicht geprüft"
+    @State private var isChecking = false
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
     @AppStorage("sipLine2Prefix") private var sipLine2Prefix = ""
@@ -106,6 +111,7 @@ private struct SetupWizardView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canContinue)
                 }
                 .padding()
             }
@@ -134,7 +140,17 @@ private struct SetupWizardView: View {
                 SecureField("Kennwort", text: $fritzPassword)
             }
             Section {
-                Label("TR-064-Erkennung und automatische Einrichtung der SIP-Nebenstellen werden in diesem Schritt angebunden.", systemImage: "gearshape.2")
+                Button {
+                    Task { await checkFritzBox() }
+                } label: {
+                    Label(isChecking ? "Prüfe …" : "FRITZ!Box prüfen", systemImage: "network")
+                }
+                .disabled(isChecking || fritzHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Label(fritzStatus, systemImage: fritzReachable ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(fritzReachable ? .green : .secondary)
+            }
+            Section {
+                Label("Nach erfolgreicher Erreichbarkeitsprüfung werden im nächsten Ausbauschritt TR-064-Anmeldung und SIP-Nebenstellen automatisch provisioniert.", systemImage: "gearshape.2")
             }
         }
     }
@@ -146,7 +162,15 @@ private struct SetupWizardView: View {
                     .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
                     .autocorrectionDisabled()
-                Label("Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
+                Button {
+                    Task { await checkHomeAssistant() }
+                } label: {
+                    Label(isChecking ? "Prüfe …" : "Home Assistant prüfen", systemImage: "house.and.flag")
+                }
+                .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(homeAssistantReachable ? .green : .secondary)
+                Label("Die eigentliche Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
             }
             Section("Automatisch einzurichten") {
                 Label("CallWebhook-Integration", systemImage: "checkmark.circle")
@@ -185,8 +209,8 @@ private struct SetupWizardView: View {
 
     private var verification: some View {
         List {
-            setupCheck("FRITZ!Box", detail: fritzHost.isEmpty ? "Noch nicht konfiguriert" : fritzHost, ready: !fritzHost.isEmpty)
-            setupCheck("Home Assistant", detail: homeAssistantURL.isEmpty ? "Noch nicht verbunden" : homeAssistantURL, ready: !homeAssistantURL.isEmpty)
+            setupCheck("FRITZ!Box", detail: fritzStatus, ready: fritzReachable)
+            setupCheck("Home Assistant", detail: homeAssistantStatus, ready: homeAssistantReachable)
             setupCheck("Leitung 1", detail: line1Label, ready: true)
             setupCheck("Leitung 2", detail: sipLine2Enabled ? line2Label : "Deaktiviert", ready: true)
             setupCheck("Leitung 3", detail: sipLine3Enabled ? line3Label : "Deaktiviert", ready: true)
@@ -203,6 +227,83 @@ private struct SetupWizardView: View {
                 Text(title)
                 Text(detail).font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var canContinue: Bool {
+        switch step {
+        case 1: return fritzReachable
+        case 2: return homeAssistantReachable
+        case 4: return fritzReachable && homeAssistantReachable
+        default: return true
+        }
+    }
+
+    @MainActor
+    private func checkFritzBox() async {
+        isChecking = true
+        defer { isChecking = false }
+        fritzReachable = false
+        fritzStatus = "Prüfung fehlgeschlagen"
+
+        let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawHost.isEmpty else {
+            fritzStatus = "Adresse fehlt"
+            return
+        }
+        let base = rawHost.contains("://") ? rawHost : "http://\(rawHost):49000"
+        guard let url = URL(string: base + "/tr64desc.xml") else {
+            fritzStatus = "Ungültige FRITZ!Box-Adresse"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<400).contains(http.statusCode),
+                  String(data: data, encoding: .utf8)?.localizedCaseInsensitiveContains("TR-064") == true ||
+                  String(data: data, encoding: .utf8)?.localizedCaseInsensitiveContains("device") == true else {
+                fritzStatus = "Keine TR-064-Beschreibung gefunden"
+                return
+            }
+            fritzReachable = true
+            fritzStatus = "FRITZ!Box erreichbar – TR-064 gefunden"
+        } catch {
+            fritzStatus = "Nicht erreichbar: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func checkHomeAssistant() async {
+        isChecking = true
+        defer { isChecking = false }
+        homeAssistantReachable = false
+        homeAssistantStatus = "Prüfung fehlgeschlagen"
+
+        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            homeAssistantStatus = "Adresse fehlt"
+            return
+        }
+        if !raw.contains("://") { raw = "http://" + raw }
+        guard let base = URL(string: raw),
+              let url = URL(string: "/manifest.json", relativeTo: base)?.absoluteURL else {
+            homeAssistantStatus = "Ungültige Home-Assistant-Adresse"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else {
+                homeAssistantStatus = "Home Assistant antwortet nicht wie erwartet"
+                return
+            }
+            homeAssistantReachable = true
+            homeAssistantStatus = "Home Assistant erreichbar"
+        } catch {
+            homeAssistantStatus = "Nicht erreichbar: \(error.localizedDescription)"
         }
     }
 

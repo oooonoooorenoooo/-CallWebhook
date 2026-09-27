@@ -150,6 +150,8 @@ private struct SetupWizardView: View {
     @State private var isProvisioningSIP = false
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
+    @State private var asteriskConfigStatus = "Noch nicht vorbereitet"
+    @State private var asteriskConfigReady = false
     @State private var isChecking = false
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
@@ -321,6 +323,14 @@ private struct SetupWizardView: View {
                 .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(homeAssistantReachable ? .green : .secondary)
+                Button {
+                    prepareAsteriskConfiguration()
+                } label: {
+                    Label("Asterisk-Konfiguration vorbereiten", systemImage: "server.rack")
+                }
+                .disabled(!homeAssistantReachable)
+                Label(asteriskConfigStatus, systemImage: asteriskConfigReady ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(asteriskConfigReady ? .green : .secondary)
                 Label("Die eigentliche Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
             }
             Section("Automatisch einzurichten") {
@@ -426,7 +436,7 @@ private struct SetupWizardView: View {
                 detail: mailboxSummary,
                 ready: fritzTAMs.isEmpty || mailbox1TAM >= 0 || mailbox2TAM >= 0
             )
-            setupCheck("Asterisk", detail: "Automatische Prüfung folgt", ready: false)
+            setupCheck("Asterisk", detail: asteriskConfigStatus, ready: asteriskConfigReady)
         }
     }
 
@@ -436,6 +446,127 @@ private struct SetupWizardView: View {
         if let tam = fritzTAMs.first(where: { $0.index == mailbox1TAM }) { names.append("Mailbox 1: \(tam.displayName)") }
         if let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("Mailbox 2: \(tam.displayName)") }
         return names.isEmpty ? "Nicht verwendet" : names.joined(separator: " · ")
+    }
+
+    private func prepareAsteriskConfiguration() {
+        guard let password1 = SetupKeychain.get(account: "fritz-sip-callwhapp1"),
+              let password2 = SetupKeychain.get(account: "fritz-sip-callwhapp2") else {
+            asteriskConfigReady = false
+            asteriskConfigStatus = "FRITZ-SIP-Zugangsdaten fehlen noch"
+            return
+        }
+
+        let host = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "http://", with: "")
+            .replacingOccurrences(of: "https://", with: "")
+            .components(separatedBy: ":").first ?? "fritz.box"
+
+        let pjsip = """
+        [fritz1-auth]
+        type=auth
+        auth_type=userpass
+        username=callwhapp1
+        password=\(password1)
+
+        [fritz1-aor]
+        type=aor
+        contact=sip:\(host)
+
+        [fritz1-endpoint]
+        type=endpoint
+        transport=transport-udp
+        context=from-fritz
+        disallow=all
+        allow=alaw,ulaw
+        outbound_auth=fritz1-auth
+        aors=fritz1-aor
+        from_user=callwhapp1
+        from_domain=\(host)
+        direct_media=no
+
+        [fritz1-registration]
+        type=registration
+        transport=transport-udp
+        outbound_auth=fritz1-auth
+        server_uri=sip:\(host)
+        client_uri=sip:callwhapp1@\(host)
+        contact_user=callwhapp1
+        retry_interval=60
+        line=yes
+        endpoint=fritz1-endpoint
+
+        [fritz2-auth]
+        type=auth
+        auth_type=userpass
+        username=callwhapp2
+        password=\(password2)
+
+        [fritz2-aor]
+        type=aor
+        contact=sip:\(host)
+
+        [fritz2-endpoint]
+        type=endpoint
+        transport=transport-udp
+        context=from-fritz
+        disallow=all
+        allow=alaw,ulaw
+        outbound_auth=fritz2-auth
+        aors=fritz2-aor
+        from_user=callwhapp2
+        from_domain=\(host)
+        direct_media=no
+
+        [fritz2-registration]
+        type=registration
+        transport=transport-udp
+        outbound_auth=fritz2-auth
+        server_uri=sip:\(host)
+        client_uri=sip:callwhapp2@\(host)
+        contact_user=callwhapp2
+        retry_interval=60
+        line=yes
+        endpoint=fritz2-endpoint
+        """
+
+        let prefix2 = sipLine2Prefix.isEmpty ? "*82" : sipLine2Prefix
+        let prefix3 = sipLine3Prefix.isEmpty ? "*83" : sipLine3Prefix
+        let dialplan = """
+        [from-callwebhook-ios]
+        exten => _\(prefix2)**X.,1,NoOp(CallWebhook Leitung 2 internal FRITZ call to ${EXTEN:\(prefix2.count)})
+         same => n,Dial(PJSIP/${EXTEN:\(prefix2.count)}@fritz2-endpoint,60)
+         same => n,Hangup()
+
+        exten => _\(prefix2)X.,1,NoOp(CallWebhook Leitung 2 to ${EXTEN:\(prefix2.count)})
+         same => n,Dial(PJSIP/${EXTEN:\(prefix2.count)}@fritz2-endpoint,60)
+         same => n,Hangup()
+
+        exten => _\(prefix3)**X.,1,NoOp(CallWebhook Leitung 3 internal FRITZ call to ${EXTEN:\(prefix3.count)})
+         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz1-endpoint,60)
+         same => n,Hangup()
+
+        exten => _\(prefix3)X.,1,NoOp(CallWebhook Leitung 3 to ${EXTEN:\(prefix3.count)})
+         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz1-endpoint,60)
+         same => n,Hangup()
+
+        exten => _**X.,1,NoOp(CallWebhook internal FRITZ call to ${EXTEN})
+         same => n,Dial(PJSIP/${EXTEN}@fritz1-endpoint,60)
+         same => n,Hangup()
+
+        exten => _X.,1,NoOp(CallWebhook Leitung 1 to ${EXTEN})
+         same => n,Dial(PJSIP/${EXTEN}@fritz1-endpoint,60)
+         same => n,Hangup()
+        """
+
+        do {
+            try SetupKeychain.set(pjsip, account: "asterisk-pjsip-generated")
+            try SetupKeychain.set(dialplan, account: "asterisk-extensions-generated")
+            asteriskConfigReady = true
+            asteriskConfigStatus = "Konfiguration sicher vorbereitet – Übergabe an Home Assistant folgt"
+        } catch {
+            asteriskConfigReady = false
+            asteriskConfigStatus = "Asterisk-Konfiguration konnte nicht sicher gespeichert werden"
+        }
     }
 
     private func setupCheck(_ title: String, detail: String, ready: Bool) -> some View {

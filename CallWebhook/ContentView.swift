@@ -154,6 +154,9 @@ private struct SetupWizardView: View {
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var asteriskConfigStatus = "Noch nicht vorbereitet"
     @State private var asteriskConfigReady = false
+    @State private var asteriskInstalled = false
+    @State private var isInstallingAsterisk = false
+    @State private var setupHAToken = ""
     @State private var isChecking = false
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
@@ -329,6 +332,9 @@ private struct SetupWizardView: View {
                 .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(homeAssistantReachable ? .green : .secondary)
+                SecureField("Home-Assistant-Token", text: $setupHAToken)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
                 Button {
                     prepareAsteriskConfiguration()
                 } label: {
@@ -337,6 +343,12 @@ private struct SetupWizardView: View {
                 .disabled(!homeAssistantReachable)
                 Label(asteriskConfigStatus, systemImage: asteriskConfigReady ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(asteriskConfigReady ? .green : .secondary)
+                Button {
+                    Task { await installAsteriskConfiguration() }
+                } label: {
+                    Label(isInstallingAsterisk ? "Installiere …" : "Asterisk automatisch installieren", systemImage: "arrow.down.to.line.compact")
+                }
+                .disabled(!asteriskConfigReady || isInstallingAsterisk || setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label("Die eigentliche Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
             }
             Section("Automatisch einzurichten") {
@@ -442,7 +454,7 @@ private struct SetupWizardView: View {
                 detail: mailboxSummary,
                 ready: fritzTAMs.isEmpty || mailbox1TAM >= 0 || mailbox2TAM >= 0
             )
-            setupCheck("Asterisk", detail: asteriskConfigStatus, ready: asteriskConfigReady)
+            setupCheck("Asterisk", detail: asteriskConfigStatus, ready: asteriskInstalled)
         }
     }
 
@@ -452,6 +464,70 @@ private struct SetupWizardView: View {
         if let tam = fritzTAMs.first(where: { $0.index == mailbox1TAM }) { names.append("Mailbox 1: \(tam.displayName)") }
         if let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("Mailbox 2: \(tam.displayName)") }
         return names.isEmpty ? "Nicht verwendet" : names.joined(separator: " · ")
+    }
+
+    @MainActor
+    private func installAsteriskConfiguration() async {
+        guard let pjsip = SetupKeychain.get(account: "asterisk-pjsip-generated"),
+              let extensions = SetupKeychain.get(account: "asterisk-extensions-generated") else {
+            asteriskInstalled = false
+            asteriskConfigStatus = "Vorbereitete Asterisk-Konfiguration fehlt"
+            return
+        }
+
+        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.contains("://") { raw = "http://" + raw }
+        guard let base = URL(string: raw),
+              let url = URL(string: "/api/callwebhook/setup/asterisk", relativeTo: base)?.absoluteURL else {
+            asteriskInstalled = false
+            asteriskConfigStatus = "Ungültige Home-Assistant-Adresse"
+            return
+        }
+
+        isInstallingAsterisk = true
+        defer { isInstallingAsterisk = false }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("Bearer \(setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "pjsip": pjsip,
+            "extensions": extensions,
+            "addon": "b35499aa_asterisk",
+            "custom_path": "/addon_configs/b35499aa_asterisk/asterisk/custom",
+            "mailbox_tam_1": mailbox1TAM,
+            "mailbox_tam_2": mailbox2TAM
+        ]
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw URLError(.badServerResponse)
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let message = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                asteriskInstalled = false
+                asteriskConfigStatus = "HA-Provisionierung fehlgeschlagen: \(message)"
+                return
+            }
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let ok = (json?["ok"] as? Bool) ?? false
+            guard ok else {
+                asteriskInstalled = false
+                asteriskConfigStatus = "Home Assistant hat die Installation nicht bestätigt"
+                return
+            }
+            asteriskInstalled = true
+            asteriskConfigStatus = "Asterisk installiert und von Home Assistant bestätigt"
+            try? SetupKeychain.set(setupHAToken, account: "home-assistant-token")
+        } catch {
+            asteriskInstalled = false
+            asteriskConfigStatus = "Asterisk-Installation fehlgeschlagen: \(error.localizedDescription)"
+        }
     }
 
     private func prepareAsteriskConfiguration() {
@@ -636,7 +712,7 @@ private struct SetupWizardView: View {
         case 2: return homeAssistantReachable
         case 3:
             return !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
-        case 4: return fritzReachable && homeAssistantReachable
+        case 4: return fritzReachable && homeAssistantReachable && asteriskInstalled
         default: return true
         }
     }

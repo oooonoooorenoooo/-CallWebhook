@@ -19,17 +19,16 @@ final class SIPService: ObservableObject {
         let resolvedUsername = (username ?? defaults.string(forKey: "sipUsername") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedPassword = password ?? defaults.string(forKey: "sipPassword") ?? ""
 
-        // Persist the exact credentials used for a successful/manual registration.
-        // Dialer calls can then reuse the already running core or rebuild it if iOS
-        // has released it, without losing the SecureField password.
-        defaults.set(resolvedHost, forKey: "sipHost")
-        defaults.set(resolvedUsername, forKey: "sipUsername")
-        defaults.set(resolvedPassword, forKey: "sipPassword")
-
         guard !resolvedHost.isEmpty, !resolvedUsername.isEmpty, !resolvedPassword.isEmpty else {
             status = "SIP-Zugangsdaten fehlen"
             throw SIPError.notConfigured
         }
+
+        // Only persist complete credentials. Never let an empty SecureField overwrite
+        // the password that a previous successful registration stored.
+        defaults.set(resolvedHost, forKey: "sipHost")
+        defaults.set(resolvedUsername, forKey: "sipUsername")
+        defaults.set(resolvedPassword, forKey: "sipPassword")
 
         iterateTimer?.invalidate()
         core?.stop()

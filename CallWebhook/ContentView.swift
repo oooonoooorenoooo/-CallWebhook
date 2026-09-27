@@ -41,6 +41,11 @@ private struct CallsView: View {
     @State private var searchText = ""
     @State private var isSelectingCalls = false
     @State private var selectedCallIDs: Set<UUID> = []
+    @AppStorage("hiddenCallIDs") private var hiddenCallIDs = ""
+
+    private var hiddenIDs: Set<String> {
+        Set(hiddenCallIDs.split(separator: "\n").map(String.init))
+    }
 
     var body: some View {
         NavigationStack {
@@ -112,6 +117,13 @@ private struct CallsView: View {
                                     }
                                     .disabled(selectedCallIDs.isEmpty)
                                     Spacer()
+                                    Button(role: .destructive) {
+                                        hideSelectedCalls()
+                                    } label: {
+                                        Label("Löschen", systemImage: "trash")
+                                    }
+                                    .disabled(selectedCallIDs.isEmpty)
+                                    Spacer()
                                     Text("\(selectedCallIDs.count) ausgewählt")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -164,9 +176,17 @@ private struct CallsView: View {
         presenter.present(controller, animated: true)
     }
 
+    private func hideSelectedCalls() {
+        var ids = hiddenIDs
+        ids.formUnion(selectedCallIDs.map { $0.uuidString })
+        hiddenCallIDs = ids.sorted().joined(separator: "\n")
+        selectedCallIDs.removeAll()
+    }
+
     private var filteredCalls: [ConversationHistoryManager.RecentConversation] {
         history.conversations.filter {
-            searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText)
+            !hiddenIDs.contains($0.id.uuidString) &&
+            (searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText))
         }
     }
 

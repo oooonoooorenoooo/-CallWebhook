@@ -6,6 +6,7 @@ import LiveCommunicationKit
 import AVKit
 
 struct ContentView: View {
+    @AppStorage("setupCompleted") private var setupCompleted = false
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
@@ -14,6 +15,18 @@ struct ContentView: View {
     @StateObject private var dialer = DialerModel()
 
     var body: some View {
+        Group {
+            if setupCompleted {
+                mainTabs
+            } else {
+                SetupWizardView {
+                    setupCompleted = true
+                }
+            }
+        }
+    }
+
+    private var mainTabs: some View {
         TabView {
             ContactsView(dialer: dialer)
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
@@ -32,6 +45,177 @@ struct ContentView: View {
                 .tabItem { Label("Extras", systemImage: "ellipsis.circle.fill") }
         }
         .tint(.blue)
+    }
+}
+
+
+private struct SetupWizardView: View {
+    let onFinished: () -> Void
+
+    @State private var step = 0
+    @State private var fritzHost = "fritz.box"
+    @State private var fritzUser = ""
+    @State private var fritzPassword = ""
+    @State private var homeAssistantURL = ""
+    @State private var easybellEnabled = false
+    @State private var line1Label = "Mobil 1"
+    @State private var line2Label = "Mobil 2"
+    @State private var line3Label = "Festnetz"
+    @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
+    @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
+    @AppStorage("sipLine2Prefix") private var sipLine2Prefix = ""
+    @AppStorage("sipLine3Prefix") private var sipLine3Prefix = ""
+
+    private let titles = [
+        "Willkommen",
+        "FRITZ!Box",
+        "Home Assistant",
+        "Telefonleitungen",
+        "Prüfung"
+    ]
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                ProgressView(value: Double(step + 1), total: Double(titles.count))
+                    .padding(.horizontal)
+
+                Group {
+                    switch step {
+                    case 0: welcome
+                    case 1: fritz
+                    case 2: homeAssistant
+                    case 3: lines
+                    default: verification
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                HStack {
+                    if step > 0 {
+                        Button("Zurück") { step -= 1 }
+                            .buttonStyle(.bordered)
+                    }
+                    Spacer()
+                    Button(step == titles.count - 1 ? "Einrichtung abschließen" : "Weiter") {
+                        if step == titles.count - 1 {
+                            persistSetup()
+                            onFinished()
+                        } else {
+                            step += 1
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+            }
+            .navigationTitle(titles[step])
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private var welcome: some View {
+        ContentUnavailableView(
+            "CallWebhook einrichten",
+            systemImage: "phone.connection.fill",
+            description: Text("Der Assistent richtet FRITZ!Box, Home Assistant, Asterisk, Mailboxen und Telefonleitungen ein. Nach einer vollständigen Neuinstallation beginnt die Einrichtung immer hier.")
+        )
+    }
+
+    private var fritz: some View {
+        Form {
+            Section("FRITZ!Box") {
+                TextField("Adresse", text: $fritzHost)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                TextField("Benutzer", text: $fritzUser)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                SecureField("Kennwort", text: $fritzPassword)
+            }
+            Section {
+                Label("TR-064-Erkennung und automatische Einrichtung der SIP-Nebenstellen werden in diesem Schritt angebunden.", systemImage: "gearshape.2")
+            }
+        }
+    }
+
+    private var homeAssistant: some View {
+        Form {
+            Section("Home Assistant") {
+                TextField("Home-Assistant-Adresse", text: $homeAssistantURL)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                Label("Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
+            }
+            Section("Automatisch einzurichten") {
+                Label("CallWebhook-Integration", systemImage: "checkmark.circle")
+                Label("Asterisk-Konfiguration", systemImage: "checkmark.circle")
+                Label("Mailbox/TAM-Zuordnung", systemImage: "checkmark.circle")
+            }
+        }
+    }
+
+    private var lines: some View {
+        Form {
+            Section("Leitung 1") {
+                TextField("Bezeichnung", text: $line1Label)
+                Text("easybell / CLIP no screening")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Leitung 2") {
+                Toggle("Aktiv", isOn: $sipLine2Enabled)
+                TextField("Bezeichnung", text: $line2Label)
+                TextField("Asterisk-Präfix", text: $sipLine2Prefix)
+                    .keyboardType(.numbersAndPunctuation)
+            }
+            Section("Leitung 3") {
+                Toggle("Aktiv", isOn: $sipLine3Enabled)
+                TextField("Bezeichnung", text: $line3Label)
+                TextField("Asterisk-Präfix", text: $sipLine3Prefix)
+                    .keyboardType(.numbersAndPunctuation)
+                Text("FRITZ!Box-Festnetzleitung")
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("easybell verwenden", isOn: $easybellEnabled)
+            }
+        }
+    }
+
+    private var verification: some View {
+        List {
+            setupCheck("FRITZ!Box", detail: fritzHost.isEmpty ? "Noch nicht konfiguriert" : fritzHost, ready: !fritzHost.isEmpty)
+            setupCheck("Home Assistant", detail: homeAssistantURL.isEmpty ? "Noch nicht verbunden" : homeAssistantURL, ready: !homeAssistantURL.isEmpty)
+            setupCheck("Leitung 1", detail: line1Label, ready: true)
+            setupCheck("Leitung 2", detail: sipLine2Enabled ? line2Label : "Deaktiviert", ready: true)
+            setupCheck("Leitung 3", detail: sipLine3Enabled ? line3Label : "Deaktiviert", ready: true)
+            setupCheck("Mailboxen", detail: "Automatische Prüfung folgt", ready: false)
+            setupCheck("Asterisk", detail: "Automatische Prüfung folgt", ready: false)
+        }
+    }
+
+    private func setupCheck(_ title: String, detail: String, ready: Bool) -> some View {
+        HStack {
+            Image(systemName: ready ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundStyle(ready ? .green : .secondary)
+            VStack(alignment: .leading) {
+                Text(title)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func persistSetup() {
+        let defaults = UserDefaults.standard
+        defaults.set(fritzHost, forKey: "setupFritzHost")
+        defaults.set(fritzUser, forKey: "setupFritzUser")
+        defaults.set(homeAssistantURL, forKey: "setupHomeAssistantURL")
+        defaults.set(easybellEnabled, forKey: "setupEasybellEnabled")
+        defaults.set(line1Label, forKey: "sipLine1Label")
+        defaults.set(line2Label, forKey: "sipLine2Label")
+        defaults.set(line3Label, forKey: "sipLine3Label")
+        // Passwords are intentionally not persisted in UserDefaults.
     }
 }
 

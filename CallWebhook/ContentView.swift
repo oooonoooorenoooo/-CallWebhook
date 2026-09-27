@@ -229,6 +229,7 @@ private struct ContactsView: View {
     private func loadContacts() {
         let store = CNContactStore()
         let keys: [CNKeyDescriptor] = [
+            CNContactViewController.descriptorForRequiredKeys(),
             CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
             CNContactOrganizationNameKey as CNKeyDescriptor,
             CNContactThumbnailImageDataKey as CNKeyDescriptor,

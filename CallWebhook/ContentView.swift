@@ -327,13 +327,16 @@ private struct NativeContactView: UIViewControllerRepresentable {
             self.dialer = dialer
         }
 
-        func contactViewController(
+        nonisolated func contactViewController(
             _ viewController: CNContactViewController,
             shouldPerformDefaultActionFor property: CNContactProperty
         ) -> Bool {
             if property.key == CNContactPhoneNumbersKey,
                let phone = property.value as? CNPhoneNumber {
-                dialer.call(phone.stringValue)
+                let number = phone.stringValue
+                Task { @MainActor [dialer] in
+                    dialer.call(number)
+                }
                 return false
             }
             return true

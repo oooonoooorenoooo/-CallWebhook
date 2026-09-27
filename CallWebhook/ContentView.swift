@@ -12,7 +12,7 @@ struct ContentView: View {
 
     var body: some View {
         TabView {
-            ContactsView()
+            ContactsView(dialer: dialer)
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
 
             CallsView(dialer: dialer)
@@ -130,6 +130,7 @@ private struct ContactsView: View {
         case company = "Unternehmen"
     }
 
+    @ObservedObject var dialer: DialerModel
     @State private var area = ContactArea.privateContacts
     @State private var contacts: [CNContact] = []
     @AppStorage("contactSort") private var sortValue = ContactSort.firstName.rawValue
@@ -155,21 +156,25 @@ private struct ContactsView: View {
                 .padding(.horizontal)
 
                 List(contacts, id: \.identifier) { contact in
-                    HStack(spacing: 12) {
-                        Group {
-                            if let data = contact.thumbnailImageData, let image = UIImage(data: data) {
-                                Image(uiImage: image).resizable().scaledToFill()
-                            } else {
-                                Image(systemName: "person.crop.circle.fill").resizable()
+                    NavigationLink {
+                        ContactDetailView(contact: contact, dialer: dialer)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Group {
+                                if let data = contact.thumbnailImageData, let image = UIImage(data: data) {
+                                    Image(uiImage: image).resizable().scaledToFill()
+                                } else {
+                                    Image(systemName: "person.crop.circle.fill").resizable()
+                                }
                             }
-                        }
-                        .frame(width: 44, height: 44)
-                        .clipShape(Circle())
+                            .frame(width: 44, height: 44)
+                            .clipShape(Circle())
 
-                        VStack(alignment: .leading) {
-                            Text(CNContactFormatter.string(from: contact, style: .fullName) ?? contact.organizationName)
-                            if !contact.organizationName.isEmpty {
-                                Text(contact.organizationName).font(.caption).foregroundStyle(.secondary)
+                            VStack(alignment: .leading) {
+                                Text(CNContactFormatter.string(from: contact, style: .fullName) ?? contact.organizationName)
+                                if !contact.organizationName.isEmpty {
+                                    Text(contact.organizationName).font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -186,7 +191,10 @@ private struct ContactsView: View {
         let keys: [CNKeyDescriptor] = [
             CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
             CNContactOrganizationNameKey as CNKeyDescriptor,
-            CNContactThumbnailImageDataKey as CNKeyDescriptor
+            CNContactThumbnailImageDataKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor,
+            CNContactEmailAddressesKey as CNKeyDescriptor,
+            CNContactPostalAddressesKey as CNKeyDescriptor
         ]
         func fetchContacts() {
             let request = CNContactFetchRequest(keysToFetch: keys)
@@ -195,13 +203,9 @@ private struct ContactsView: View {
                 try store.enumerateContacts(with: request) { contact, _ in
                     loaded.append(contact)
                 }
-                DispatchQueue.main.async {
-                    contacts = loaded
-                }
+                DispatchQueue.main.async { contacts = loaded }
             } catch {
-                DispatchQueue.main.async {
-                    contacts = []
-                }
+                DispatchQueue.main.async { contacts = [] }
             }
         }
 
@@ -218,6 +222,89 @@ private struct ContactsView: View {
         @unknown default:
             contacts = []
         }
+    }
+}
+
+private struct ContactDetailView: View {
+    let contact: CNContact
+    @ObservedObject var dialer: DialerModel
+
+    private var name: String {
+        CNContactFormatter.string(from: contact, style: .fullName) ?? contact.organizationName
+    }
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 16) {
+                    Group {
+                        if let data = contact.thumbnailImageData, let image = UIImage(data: data) {
+                            Image(uiImage: image).resizable().scaledToFill()
+                        } else {
+                            Image(systemName: "person.crop.circle.fill").resizable()
+                        }
+                    }
+                    .frame(width: 64, height: 64)
+                    .clipShape(Circle())
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(name).font(.title3.bold())
+                        if !contact.organizationName.isEmpty {
+                            Text(contact.organizationName).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if !contact.phoneNumbers.isEmpty {
+                Section("Telefon") {
+                    ForEach(Array(contact.phoneNumbers.enumerated()), id: \.offset) { _, item in
+                        Button {
+                            dialer.call(item.value.stringValue)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(CNLabeledValue<NSString>.localizedString(forLabel: item.label ?? "Telefon"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(item.value.stringValue)
+                                        .foregroundStyle(.primary)
+                                }
+                                Spacer()
+                                Image(systemName: "phone.fill").foregroundStyle(.green)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if !contact.emailAddresses.isEmpty {
+                Section("E-Mail") {
+                    ForEach(Array(contact.emailAddresses.enumerated()), id: \.offset) { _, item in
+                        LabeledContent(CNLabeledValue<NSString>.localizedString(forLabel: item.label ?? "E-Mail")) {
+                            Text(item.value as String)
+                        }
+                    }
+                }
+            }
+
+            if !contact.postalAddresses.isEmpty {
+                Section("Adressen") {
+                    ForEach(Array(contact.postalAddresses.enumerated()), id: \.offset) { _, item in
+                        let address = item.value
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(CNLabeledValue<CNPostalAddress>.localizedString(forLabel: item.label ?? "Adresse"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text([address.street, [address.postalCode, address.city].filter { !$0.isEmpty }.joined(separator: " "), address.country].filter { !$0.isEmpty }.joined(separator: "\n"))
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle(name)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

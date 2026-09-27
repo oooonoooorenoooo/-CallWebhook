@@ -8,6 +8,8 @@ import AVKit
 struct ContentView: View {
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
+    @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
+    @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
 
@@ -22,7 +24,7 @@ struct ContentView: View {
             MailboxView(dialer: dialer)
                 .tabItem { Label("Mailbox", systemImage: "recordingtape") }
 
-            DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber)
+            DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber, sipLine2Enabled: sipLine2Enabled, sipLine3Enabled: sipLine3Enabled)
                 .environmentObject(monitor)
                 .tabItem { Label("Zifferblatt", systemImage: "circle.grid.3x3.fill") }
 
@@ -781,6 +783,9 @@ private struct DialPadView: View {
     @ObservedObject private var sip = SIPService.shared
     let primaryPhoneNumber: String
     let secondaryPhoneNumber: String
+    let sipLine2Enabled: Bool
+    let sipLine3Enabled: Bool
+    @AppStorage("sipEnabled") private var sipEnabled = false
     private let rows = [["1","2","3"],["4","5","6"],["7","8","9"],["*","0","#"]]
 
     var body: some View {
@@ -857,8 +862,13 @@ private struct DialPadView: View {
                     }
                 }
 
-                HStack(spacing: 22) {
-                    if !secondaryPhoneNumber.isEmpty {
+                HStack(spacing: 18) {
+                    if sipEnabled {
+                        sipCallButton(line: 1)
+                        if sipLine2Enabled { sipCallButton(line: 2) }
+                        if sipLine3Enabled { sipCallButton(line: 3) }
+                        endCallButton
+                    } else if !secondaryPhoneNumber.isEmpty {
                         callButton(line: 1)
                         endCallButton
                         callButton(line: 2)
@@ -893,6 +903,28 @@ private struct DialPadView: View {
         .buttonStyle(.plain)
         .disabled(!monitor.active && !SIPService.shared.active)
         .accessibilityLabel("Anruf beenden")
+    }
+
+    private func sipCallButton(line: Int) -> some View {
+        Button {
+            dialer.call(line: line)
+        } label: {
+            ZStack {
+                Circle().fill(.green).frame(width: 72, height: 72)
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("\(line)")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 20)
+                    .background(.black.opacity(0.55), in: Circle())
+                    .offset(x: 24, y: -24)
+            }
+            .frame(width: 72, height: 72)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Mit SIP-Leitung \(line) anrufen")
     }
 
     @ViewBuilder

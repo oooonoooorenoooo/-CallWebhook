@@ -86,6 +86,9 @@ private struct SetupWizardView: View {
     @State private var line1Label = "Mobil 1"
     @State private var line2Label = "Mobil 2"
     @State private var line3Label = "Festnetz"
+    @State private var line1Number = ""
+    @State private var line2Number = ""
+    @State private var line3Number = ""
     @State private var fritzReachable = false
     @State private var fritzStatus = "Noch nicht geprüft"
     @State private var fritzVoIPAvailable = false
@@ -234,25 +237,56 @@ private struct SetupWizardView: View {
         Form {
             Section("Leitung 1") {
                 TextField("Bezeichnung", text: $line1Label)
-                Text("easybell / CLIP no screening")
+                fritzNumberPicker("Absenderrufnummer", selection: $line1Number)
+                Text(easybellEnabled ? "easybell / CLIP no screening" : "FRITZ!Box")
                     .foregroundStyle(.secondary)
             }
             Section("Leitung 2") {
                 Toggle("Aktiv", isOn: $sipLine2Enabled)
-                TextField("Bezeichnung", text: $line2Label)
-                TextField("Asterisk-Präfix", text: $sipLine2Prefix)
-                    .keyboardType(.numbersAndPunctuation)
+                if sipLine2Enabled {
+                    TextField("Bezeichnung", text: $line2Label)
+                    fritzNumberPicker("Absenderrufnummer", selection: $line2Number)
+                    TextField("Asterisk-Präfix", text: $sipLine2Prefix)
+                        .keyboardType(.numbersAndPunctuation)
+                }
             }
             Section("Leitung 3") {
                 Toggle("Aktiv", isOn: $sipLine3Enabled)
-                TextField("Bezeichnung", text: $line3Label)
-                TextField("Asterisk-Präfix", text: $sipLine3Prefix)
-                    .keyboardType(.numbersAndPunctuation)
-                Text("FRITZ!Box-Festnetzleitung")
-                    .foregroundStyle(.secondary)
+                if sipLine3Enabled {
+                    TextField("Bezeichnung", text: $line3Label)
+                    fritzNumberPicker("FRITZ!-Festnetzrufnummer", selection: $line3Number)
+                    TextField("Asterisk-Präfix", text: $sipLine3Prefix)
+                        .keyboardType(.numbersAndPunctuation)
+                    Text("Direkter FRITZ!Box-Pfad ohne CLIP no screening")
+                        .foregroundStyle(.secondary)
+                }
             }
             Section {
-                Toggle("easybell verwenden", isOn: $easybellEnabled)
+                Toggle("easybell für Mobilrufnummern verwenden", isOn: $easybellEnabled)
+                if easybellEnabled {
+                    Text("Leitung 1 und 2 können später über denselben easybell-Trunk mit unterschiedlichen CLIP-no-screening-Rufnummern geführt werden.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onAppear {
+            if sipLine2Prefix.isEmpty { sipLine2Prefix = "*82" }
+            if sipLine3Prefix.isEmpty { sipLine3Prefix = "*83" }
+        }
+    }
+
+    @ViewBuilder
+    private func fritzNumberPicker(_ title: String, selection: Binding<String>) -> some View {
+        if fritzVoIPNumbers.isEmpty {
+            TextField(title, text: selection)
+                .keyboardType(.phonePad)
+        } else {
+            Picker(title, selection: selection) {
+                Text("Bitte wählen").tag("")
+                ForEach(fritzVoIPNumbers, id: \.self) { number in
+                    Text(number).tag(number)
+                }
             }
         }
     }
@@ -261,9 +295,9 @@ private struct SetupWizardView: View {
         List {
             setupCheck("FRITZ!Box", detail: fritzStatus, ready: fritzReachable)
             setupCheck("Home Assistant", detail: homeAssistantStatus, ready: homeAssistantReachable)
-            setupCheck("Leitung 1", detail: line1Label, ready: true)
-            setupCheck("Leitung 2", detail: sipLine2Enabled ? line2Label : "Deaktiviert", ready: true)
-            setupCheck("Leitung 3", detail: sipLine3Enabled ? line3Label : "Deaktiviert", ready: true)
+            setupCheck("Leitung 1", detail: "\(line1Label) – \(line1Number)", ready: !line1Number.isEmpty)
+            setupCheck("Leitung 2", detail: sipLine2Enabled ? "\(line2Label) – \(line2Number)" : "Deaktiviert", ready: !sipLine2Enabled || !line2Number.isEmpty)
+            setupCheck("Leitung 3", detail: sipLine3Enabled ? "\(line3Label) – \(line3Number)" : "Deaktiviert", ready: !sipLine3Enabled || !line3Number.isEmpty)
             setupCheck("Mailboxen", detail: "Automatische Prüfung folgt", ready: false)
             setupCheck("Asterisk", detail: "Automatische Prüfung folgt", ready: false)
         }
@@ -284,6 +318,8 @@ private struct SetupWizardView: View {
         switch step {
         case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated
         case 2: return homeAssistantReachable
+        case 3:
+            return !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
         case 4: return fritzReachable && homeAssistantReachable
         default: return true
         }
@@ -364,6 +400,9 @@ private struct SetupWizardView: View {
                     .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
                 fritzAuthenticated = true
+                if line1Number.isEmpty, let first = fritzVoIPNumbers.first { line1Number = first }
+                if line2Number.isEmpty, fritzVoIPNumbers.count > 1 { line2Number = fritzVoIPNumbers[1] }
+                if line3Number.isEmpty, let first = fritzVoIPNumbers.first { line3Number = first }
 
                 if let tamService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:") }) {
                     var count = 0
@@ -530,6 +569,9 @@ private struct SetupWizardView: View {
         defaults.set(line1Label, forKey: "sipLine1Label")
         defaults.set(line2Label, forKey: "sipLine2Label")
         defaults.set(line3Label, forKey: "sipLine3Label")
+        defaults.set(line1Number, forKey: "sipLine1Number")
+        defaults.set(line2Number, forKey: "sipLine2Number")
+        defaults.set(line3Number, forKey: "sipLine3Number")
         // Passwords are intentionally not persisted in UserDefaults.
     }
 }

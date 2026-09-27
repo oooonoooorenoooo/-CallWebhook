@@ -404,6 +404,19 @@ private struct MailboxView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                Task {
+                                    do {
+                                        try await mailbox.delete(message)
+                                    } catch {
+                                        mailbox.setError(error.localizedDescription)
+                                    }
+                                }
+                            } label: {
+                                Label("Löschen", systemImage: "trash")
+                            }
+                        }
                     }
                     .listStyle(.plain)
                     .refreshable { await mailbox.refresh() }

@@ -39,6 +39,8 @@ private struct CallsView: View {
     @StateObject private var history = CallHistoryModel()
     @State private var selection = 0
     @State private var searchText = ""
+    @State private var isSelectingCalls = false
+    @State private var selectedCallIDs: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
@@ -58,10 +60,22 @@ private struct CallsView: View {
                     } else {
                         List(filteredCalls) { call in
                             Button {
-                                guard let number = call.handles.first?.value, !number.isEmpty else { return }
-                                dialer.call(number)
+                                if isSelectingCalls {
+                                    if selectedCallIDs.contains(call.id) {
+                                        selectedCallIDs.remove(call.id)
+                                    } else {
+                                        selectedCallIDs.insert(call.id)
+                                    }
+                                } else {
+                                    guard let number = call.handles.first?.value, !number.isEmpty else { return }
+                                    dialer.call(number)
+                                }
                             } label: {
                                 HStack(spacing: 12) {
+                                    if isSelectingCalls {
+                                        Image(systemName: selectedCallIDs.contains(call.id) ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(selectedCallIDs.contains(call.id) ? .blue : .secondary)
+                                    }
                                     Image(systemName: directionIcon(call))
                                         .frame(width: 28)
                                     VStack(alignment: .leading, spacing: 3) {
@@ -85,9 +99,27 @@ private struct CallsView: View {
                                 }
                             }
                             .buttonStyle(.plain)
-                            .disabled((call.handles.first?.value ?? "").isEmpty)
+                            .disabled(!isSelectingCalls && (call.handles.first?.value ?? "").isEmpty)
                         }
                         .listStyle(.plain)
+                        .safeAreaInset(edge: .bottom) {
+                            if isSelectingCalls {
+                                HStack {
+                                    Button {
+                                        shareSelectedCalls()
+                                    } label: {
+                                        Label("Teilen", systemImage: "square.and.arrow.up")
+                                    }
+                                    .disabled(selectedCallIDs.isEmpty)
+                                    Spacer()
+                                    Text("\(selectedCallIDs.count) ausgewählt")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding()
+                                .background(.bar)
+                            }
+                        }
                         .refreshable { await history.refresh() }
                     }
                 } else {
@@ -100,8 +132,36 @@ private struct CallsView: View {
             .navigationTitle("Anrufe")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "Telefonnummer")
+            .toolbar {
+                if selection == 0 {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(isSelectingCalls ? "Fertig" : "Auswählen") {
+                            isSelectingCalls.toggle()
+                            if !isSelectingCalls { selectedCallIDs.removeAll() }
+                        }
+                    }
+                }
+            }
             .task { await history.refresh() }
         }
+    }
+
+    private func shareSelectedCalls() {
+        let selected = history.conversations.filter { selectedCallIDs.contains($0.id) }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        let text = selected.map { call in
+            let number = call.handles.first?.value ?? "Unbekannt"
+            return "\(formatter.string(from: call.date)) – \(number) – \(directionText(call))"
+        }.joined(separator: "\n")
+        guard !text.isEmpty else { return }
+        let controller = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }),
+              let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
+        var presenter = root
+        while let presented = presenter.presentedViewController { presenter = presented }
+        presenter.present(controller, animated: true)
     }
 
     private var filteredCalls: [ConversationHistoryManager.RecentConversation] {
@@ -437,6 +497,8 @@ private struct MailboxView: View {
     @StateObject private var mailbox = MailboxModel()
     @AppStorage("mailboxNumber") private var mailboxNumber = ""
     @State private var playingMessage: MailboxMessage?
+    @State private var isSelectingMailbox = false
+    @State private var selectedMessageIDs: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -458,9 +520,21 @@ private struct MailboxView: View {
                 } else {
                     List(mailbox.messages) { message in
                         Button {
-                            playingMessage = message
+                            if isSelectingMailbox {
+                                if selectedMessageIDs.contains(message.id) {
+                                    selectedMessageIDs.remove(message.id)
+                                } else {
+                                    selectedMessageIDs.insert(message.id)
+                                }
+                            } else {
+                                playingMessage = message
+                            }
                         } label: {
                             HStack(spacing: 12) {
+                                if isSelectingMailbox {
+                                    Image(systemName: selectedMessageIDs.contains(message.id) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(selectedMessageIDs.contains(message.id) ? .blue : .secondary)
+                                }
                                 Image(systemName: message.isNew ? "recordingtape.circle.fill" : "recordingtape.circle")
                                     .font(.title2)
                                     .foregroundStyle(message.isNew ? .blue : .secondary)
@@ -523,12 +597,46 @@ private struct MailboxView: View {
                     }
                     .listStyle(.plain)
                     .refreshable { await mailbox.refresh() }
+                    .safeAreaInset(edge: .bottom) {
+                        if isSelectingMailbox {
+                            HStack {
+                                Button {
+                                    Task { await archiveSelectedMessages() }
+                                } label: {
+                                    Label("Speichern", systemImage: "archivebox.fill")
+                                }
+                                .disabled(selectedMessageIDs.isEmpty)
+
+                                Spacer()
+
+                                Text("\(selectedMessageIDs.count) ausgewählt")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Spacer()
+
+                                Button(role: .destructive) {
+                                    Task { await deleteSelectedMessages() }
+                                } label: {
+                                    Label("Löschen", systemImage: "trash")
+                                }
+                                .disabled(selectedMessageIDs.isEmpty)
+                            }
+                            .padding()
+                            .background(.bar)
+                        }
+                    }
                 }
             }
             .navigationTitle("Mailbox")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button(isSelectingMailbox ? "Fertig" : "Auswählen") {
+                        isSelectingMailbox.toggle()
+                        if !isSelectingMailbox { selectedMessageIDs.removeAll() }
+                    }
+
                     Button {
                         Task { await mailbox.refresh() }
                     } label: {
@@ -554,6 +662,32 @@ private struct MailboxView: View {
                 .presentationDetents([.medium])
             }
         }
+    }
+
+    private func archiveSelectedMessages() async {
+        let selected = mailbox.messages.filter { selectedMessageIDs.contains($0.id) && !$0.isArchived }
+        for message in selected {
+            do {
+                try await mailbox.archive(message)
+            } catch {
+                mailbox.setError(error.localizedDescription)
+                return
+            }
+        }
+        selectedMessageIDs.removeAll()
+    }
+
+    private func deleteSelectedMessages() async {
+        let selected = mailbox.messages.filter { selectedMessageIDs.contains($0.id) }
+        for message in selected {
+            do {
+                try await mailbox.delete(message)
+            } catch {
+                mailbox.setError(error.localizedDescription)
+                return
+            }
+        }
+        selectedMessageIDs.removeAll()
     }
 }
 

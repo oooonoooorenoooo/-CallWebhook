@@ -4,6 +4,7 @@ import Contacts
 import ContactsUI
 import LiveCommunicationKit
 import AVKit
+import Security
 
 private final class FritzAuthDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let username: String
@@ -27,6 +28,43 @@ private final class FritzAuthDelegate: NSObject, URLSessionTaskDelegate, @unchec
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
+    }
+}
+
+private enum SetupKeychain {
+    private static let service = "de.reno.CallWebhook.setup"
+
+    static func set(_ value: String, account: String) throws {
+        guard let data = value.data(using: .utf8) else {
+            throw NSError(domain: "CallWebhook.Keychain", code: -1)
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(item as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
+    static func get(account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
 
@@ -730,6 +768,7 @@ private struct SetupWizardView: View {
                 let password = randomSIPPassword()
                 let args = try setClientArguments(index: index1, username: "callwhapp1", password: password, outgoing: line1Number)
                 _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                try SetupKeychain.set(password, account: "fritz-sip-callwhapp1")
             }
 
             if !existing2 {
@@ -737,9 +776,10 @@ private struct SetupWizardView: View {
                 let number2 = line2Number.isEmpty ? line1Number : line2Number
                 let args = try setClientArguments(index: index2, username: "callwhapp2", password: password, outgoing: number2)
                 _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                try SetupKeychain.set(password, account: "fritz-sip-callwhapp2")
             }
 
-            sipProvisionStatus = "SIP-Nebenstellen wurden angelegt – FRITZ-Prüfung erneut ausführen"
+            sipProvisionStatus = "SIP-Nebenstellen angelegt und Zugangsdaten sicher gespeichert – FRITZ-Prüfung erneut ausführen"
         } catch {
             sipProvisionStatus = "Provisionierung abgebrochen: \(error.localizedDescription)"
         }

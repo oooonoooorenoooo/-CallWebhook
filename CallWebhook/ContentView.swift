@@ -5,6 +5,31 @@ import ContactsUI
 import LiveCommunicationKit
 import AVKit
 
+private final class FritzAuthDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let username: String
+    let password: String
+
+    init(username: String, password: String) {
+        self.username = username
+        self.password = password
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let method = challenge.protectionSpace.authenticationMethod
+        if (method == NSURLAuthenticationMethodHTTPDigest || method == NSURLAuthenticationMethodHTTPBasic),
+           challenge.previousFailureCount == 0 {
+            completionHandler(.useCredential, URLCredential(user: username, password: password, persistence: .forSession))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
 struct ContentView: View {
     @AppStorage("setupCompleted") private var setupCompleted = false
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -66,6 +91,9 @@ private struct SetupWizardView: View {
     @State private var fritzVoIPAvailable = false
     @State private var fritzTAMAvailable = false
     @State private var fritzServiceCount = 0
+    @State private var fritzAuthenticated = false
+    @State private var fritzVoIPNumbers: [String] = []
+    @State private var fritzTAMCount = 0
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -159,6 +187,16 @@ private struct SetupWizardView: View {
                     Text("\(fritzServiceCount) TR-064-Dienste erkannt")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Label("FRITZ-Anmeldung", systemImage: fritzAuthenticated ? "checkmark.circle.fill" : "xmark.circle")
+                        .foregroundStyle(fritzAuthenticated ? .green : .red)
+                    if fritzAuthenticated {
+                        Text("Internettelefonie: \(fritzVoIPNumbers.isEmpty ? "keine Rufnummer erkannt" : fritzVoIPNumbers.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Anrufbeantworter erkannt: \(fritzTAMCount)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             Section {
@@ -244,7 +282,7 @@ private struct SetupWizardView: View {
 
     private var canContinue: Bool {
         switch step {
-        case 1: return fritzReachable && fritzVoIPAvailable
+        case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated
         case 2: return homeAssistantReachable
         case 4: return fritzReachable && homeAssistantReachable
         default: return true
@@ -259,6 +297,9 @@ private struct SetupWizardView: View {
         fritzVoIPAvailable = false
         fritzTAMAvailable = false
         fritzServiceCount = 0
+        fritzAuthenticated = false
+        fritzVoIPNumbers = []
+        fritzTAMCount = 0
         fritzStatus = "Prüfung fehlgeschlagen"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -289,16 +330,151 @@ private struct SetupWizardView: View {
             fritzTAMAvailable = serviceTypes.contains { $0.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.localizedCaseInsensitiveContains(":TAM:") }
             fritzReachable = true
 
-            if fritzVoIPAvailable && fritzTAMAvailable {
-                fritzStatus = "FRITZ!Box bereit – Telefonie und TAM erkannt"
-            } else if fritzVoIPAvailable {
-                fritzStatus = "FRITZ!Box erreichbar – Telefonie erkannt, TAM fehlt"
-            } else {
+            guard fritzVoIPAvailable else {
                 fritzStatus = "FRITZ!Box erreichbar – Telefoniedienst nicht erkannt"
+                return
+            }
+            guard !fritzUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !fritzPassword.isEmpty else {
+                fritzStatus = "FRITZ!Box erreichbar – Benutzer und Kennwort fehlen"
+                return
+            }
+
+            let services = extractTR064Services(from: xml)
+            guard let voipService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_VoIP") || $0.type.localizedCaseInsensitiveContains("VoIP") }) else {
+                fritzStatus = "X_VoIP-Steuerung nicht gefunden"
+                return
+            }
+
+            let auth = FritzAuthDelegate(username: fritzUser, password: fritzPassword)
+            let session = URLSession(configuration: .ephemeral, delegate: auth, delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+
+            do {
+                let response = try await soapCall(
+                    session: session,
+                    base: base,
+                    serviceType: voipService.type,
+                    controlURL: voipService.controlURL,
+                    action: "GetExistingVoIPNumbers",
+                    arguments: []
+                )
+                fritzVoIPNumbers = extractSOAPValue("NewExistingVoIPNumbers", from: response)
+                    .split(whereSeparator: { $0 == "," || $0 == ";" || $0 == "\n" })
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                fritzAuthenticated = true
+
+                if let tamService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:") }) {
+                    var count = 0
+                    for index in 0..<10 {
+                        do {
+                            _ = try await soapCall(
+                                session: session,
+                                base: base,
+                                serviceType: tamService.type,
+                                controlURL: tamService.controlURL,
+                                action: "GetInfo",
+                                arguments: [("NewIndex", String(index))]
+                            )
+                            count += 1
+                        } catch {
+                            if index > 1 { break }
+                        }
+                    }
+                    fritzTAMCount = count
+                }
+
+                fritzStatus = "FRITZ-Anmeldung erfolgreich – Telefonie ausgelesen"
+            } catch {
+                fritzAuthenticated = false
+                fritzStatus = "FRITZ-Anmeldung fehlgeschlagen: \(error.localizedDescription)"
             }
         } catch {
             fritzStatus = "Nicht erreichbar: \(error.localizedDescription)"
         }
+    }
+
+    private struct TR064Service {
+        let type: String
+        let controlURL: String
+    }
+
+    private func extractTR064Services(from xml: String) -> [TR064Service] {
+        let blockPattern = "<service>\\s*([\\s\\S]*?)\\s*</service>"
+        guard let blockRegex = try? NSRegularExpression(pattern: blockPattern, options: [.caseInsensitive]) else { return [] }
+        let range = NSRange(xml.startIndex..<xml.endIndex, in: xml)
+        return blockRegex.matches(in: xml, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let blockRange = Range(match.range(at: 1), in: xml) else { return nil }
+            let block = String(xml[blockRange])
+            guard let type = firstXMLValue("serviceType", in: block),
+                  let controlURL = firstXMLValue("controlURL", in: block) else { return nil }
+            return TR064Service(type: type, controlURL: controlURL)
+        }
+    }
+
+    private func firstXMLValue(_ tag: String, in xml: String) -> String? {
+        let pattern = "<\(NSRegularExpression.escapedPattern(for: tag))>\\s*([^<]+)\\s*</\(NSRegularExpression.escapedPattern(for: tag))>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(xml.startIndex..<xml.endIndex, in: xml)
+        guard let match = regex.firstMatch(in: xml, range: range),
+              match.numberOfRanges > 1,
+              let valueRange = Range(match.range(at: 1), in: xml) else { return nil }
+        return String(xml[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func extractSOAPValue(_ tag: String, from xml: String) -> String {
+        firstXMLValue(tag, in: xml) ?? ""
+    }
+
+    private func soapCall(
+        session: URLSession,
+        base: String,
+        serviceType: String,
+        controlURL: String,
+        action: String,
+        arguments: [(String, String)]
+    ) async throws -> String {
+        let normalizedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
+        let path = controlURL.hasPrefix("/") ? controlURL : "/" + controlURL
+        guard let url = URL(string: normalizedBase + path) else {
+            throw URLError(.badURL)
+        }
+
+        let argsXML = arguments.map { "<\($0.0)>\(xmlEscaped($0.1))</\($0.0)>" }.joined()
+        let envelope = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            <u:\(action) xmlns:u="\(serviceType)">\(argsXML)</u:\(action)>
+          </s:Body>
+        </s:Envelope>
+        """
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.httpBody = envelope.data(using: .utf8)
+        request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("\(serviceType)#\(action)", forHTTPHeaderField: "SOAPAction")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "CallWebhook.TR064", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "TR-064 HTTP \(http.statusCode)"])
+        }
+        guard let text = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeContentData) }
+        return text
+    }
+
+    private func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 
     private func extractTR064ServiceTypes(from xml: String) -> [String] {

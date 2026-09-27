@@ -101,6 +101,10 @@ private struct SetupWizardView: View {
     @State private var mailbox1TAM = -1
     @State private var mailbox2TAM = -1
     @State private var fritzSIPClients: [FritzSIPClient] = []
+    @State private var sipClient1Plan = "Noch nicht geprüft"
+    @State private var sipClient2Plan = "Noch nicht geprüft"
+    @State private var sipClient1Index: Int?
+    @State private var sipClient2Index: Int?
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -236,6 +240,11 @@ private struct SetupWizardView: View {
                             Label(client.displayName, systemImage: "phone.connection")
                                 .font(.caption)
                         }
+                        Divider()
+                        Text("callwhapp1: \(sipClient1Plan)")
+                            .font(.caption)
+                        Text("callwhapp2: \(sipClient2Plan)")
+                            .font(.caption)
                     }
                 }
             }
@@ -412,6 +421,10 @@ private struct SetupWizardView: View {
         fritzTAMCount = 0
         fritzTAMs = []
         fritzSIPClients = []
+        sipClient1Index = nil
+        sipClient2Index = nil
+        sipClient1Plan = "Noch nicht geprüft"
+        sipClient2Plan = "Noch nicht geprüft"
         fritzStatus = "Prüfung fehlgeschlagen"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -541,6 +554,27 @@ private struct SetupWizardView: View {
                     if consecutiveMisses >= 4 && index >= 5 { break }
                 }
                 fritzSIPClients = clients
+                var reserved = Set(clients.map(\.index))
+                if let existing = clients.first(where: { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }) {
+                    sipClient1Index = existing.index
+                    sipClient1Plan = "vorhanden, Index \(existing.index)"
+                } else if let free = (0..<20).first(where: { !reserved.contains($0) }) {
+                    sipClient1Index = free
+                    reserved.insert(free)
+                    sipClient1Plan = "freier Index \(free) reserviert"
+                } else {
+                    sipClient1Plan = "kein freier Clientplatz"
+                }
+                if let existing = clients.first(where: { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }) {
+                    sipClient2Index = existing.index
+                    sipClient2Plan = "vorhanden, Index \(existing.index)"
+                } else if let free = (0..<20).first(where: { !reserved.contains($0) }) {
+                    sipClient2Index = free
+                    reserved.insert(free)
+                    sipClient2Plan = "freier Index \(free) reserviert"
+                } else {
+                    sipClient2Plan = "kein freier Clientplatz"
+                }
 
                 if let tamService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:") }) {
                     var discovered: [FritzTAM] = []

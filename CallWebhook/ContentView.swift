@@ -107,6 +107,7 @@ private struct SetupWizardView: View {
     @State private var sipClient2Index: Int?
     @State private var fritzSIPWriteAction = ""
     @State private var fritzSIPWriteStatus = "Schreibschnittstelle noch nicht geprüft"
+    @State private var fritzSIPWriteArguments: [String] = []
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -506,12 +507,21 @@ private struct SetupWizardView: View {
                                 } else if scpd.contains("<name>X_AVM-DE_SetClient2</name>") {
                                     fritzSIPWriteAction = "X_AVM-DE_SetClient2"
                                 }
-                                fritzSIPWriteStatus = fritzSIPWriteAction.isEmpty ? "Keine SIP-Schreibaktion angeboten" : "SIP-Schreibaktion: \(fritzSIPWriteAction)"
+                                if !fritzSIPWriteAction.isEmpty {
+                                    fritzSIPWriteArguments = actionArgumentNames(fritzSIPWriteAction, in: scpd)
+                                } else {
+                                    fritzSIPWriteArguments = []
+                                }
+                                fritzSIPWriteStatus = fritzSIPWriteAction.isEmpty
+                                    ? "Keine SIP-Schreibaktion angeboten"
+                                    : "SIP-Schreibaktion: \(fritzSIPWriteAction) · \(fritzSIPWriteArguments.count) Argumente"
+
                             }
                         }
                     }
                 } catch {
                     fritzSIPWriteAction = ""
+                    fritzSIPWriteArguments = []
                     fritzSIPWriteStatus = "SIP-Schreibschnittstelle nicht lesbar"
                 }
                 if line1Number.isEmpty, let first = fritzVoIPNumbers.first { line1Number = first }
@@ -666,6 +676,24 @@ private struct SetupWizardView: View {
               match.numberOfRanges > 1,
               let valueRange = Range(match.range(at: 1), in: xml) else { return nil }
         return String(xml[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func actionArgumentNames(_ action: String, in scpd: String) -> [String] {
+        let escaped = NSRegularExpression.escapedPattern(for: action)
+        let pattern = "<action>\\s*<name>\\s*\(escaped)\\s*</name>([\\s\\S]*?)</action>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: scpd, range: NSRange(scpd.startIndex..<scpd.endIndex, in: scpd)),
+              match.numberOfRanges > 1,
+              let bodyRange = Range(match.range(at: 1), in: scpd) else { return [] }
+        let body = String(scpd[bodyRange])
+        let argumentPattern = "<argument>[\\s\\S]*?<name>\\s*([^<]+)\\s*</name>[\\s\\S]*?<direction>\\s*in\\s*</direction>[\\s\\S]*?</argument>"
+        guard let argumentRegex = try? NSRegularExpression(pattern: argumentPattern, options: [.caseInsensitive]) else { return [] }
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        return argumentRegex.matches(in: body, range: range).compactMap { item in
+            guard item.numberOfRanges > 1,
+                  let nameRange = Range(item.range(at: 1), in: body) else { return nil }
+            return String(body[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     private func extractSOAPValue(_ tag: String, from xml: String) -> String {

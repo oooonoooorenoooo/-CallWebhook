@@ -959,7 +959,7 @@ private struct DialPadView: View {
 
 private struct ExtrasView: View {
     @EnvironmentObject var monitor: CallMonitor
-    private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, haToken, externalListName, externalListURL, blacklist, whitelist }
+    private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, sipLine2Prefix, sipLine3Prefix, haToken, externalListName, externalListURL, blacklist, whitelist }
     @FocusState private var focusedInputField: InputField?
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
@@ -1032,12 +1032,14 @@ private struct ExtrasView: View {
                     Toggle("SIP-Leitung 2 aktiv", isOn: $sipLine2Enabled)
                     if sipLine2Enabled {
                         TextField("Asterisk-Präfix Leitung 2", text: $sipLine2Prefix)
+                            .focused($focusedInputField, equals: .sipLine2Prefix)
                             .keyboardType(.numbersAndPunctuation)
                     }
 
                     Toggle("SIP-Leitung 3 aktiv", isOn: $sipLine3Enabled)
                     if sipLine3Enabled {
                         TextField("Asterisk-Präfix Leitung 3", text: $sipLine3Prefix)
+                            .focused($focusedInputField, equals: .sipLine3Prefix)
                             .keyboardType(.numbersAndPunctuation)
                     }
                     Text("Aktiv: Zifferblatt, Anrufliste und Mailbox wählen über Asterisk. Deaktiviert: bisheriger Mobilfunkpfad.")

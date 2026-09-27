@@ -976,6 +976,10 @@ private struct ExtrasView: View {
     @AppStorage("sipHost") private var sipHost = "192.168.178.26"
     @AppStorage("sipUsername") private var sipUsername = "callwebhook-ios"
     @AppStorage("sipPassword") private var sipPassword = ""
+    @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
+    @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
+    @AppStorage("sipLine2Prefix") private var sipLine2Prefix = ""
+    @AppStorage("sipLine3Prefix") private var sipLine3Prefix = ""
     @State private var showSIP = false
     @ObservedObject private var sip = SIPService.shared
     @State private var showMobile = false
@@ -1024,6 +1028,18 @@ private struct ExtrasView: View {
                     Text(sip.status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    Toggle("SIP-Leitung 2 aktiv", isOn: $sipLine2Enabled)
+                    if sipLine2Enabled {
+                        TextField("Asterisk-Präfix Leitung 2", text: $sipLine2Prefix)
+                            .keyboardType(.numbersAndPunctuation)
+                    }
+
+                    Toggle("SIP-Leitung 3 aktiv", isOn: $sipLine3Enabled)
+                    if sipLine3Enabled {
+                        TextField("Asterisk-Präfix Leitung 3", text: $sipLine3Prefix)
+                            .keyboardType(.numbersAndPunctuation)
+                    }
                     Text("Aktiv: Zifferblatt, Anrufliste und Mailbox wählen über Asterisk. Deaktiviert: bisheriger Mobilfunkpfad.")
                         .font(.caption)
                         .foregroundStyle(.secondary)

@@ -927,8 +927,8 @@ private struct DialPadView: View {
 
 private struct ExtrasView: View {
     @EnvironmentObject var monitor: CallMonitor
-    private enum PhoneField: Hashable { case primary, secondary }
-    @FocusState private var focusedPhoneField: PhoneField?
+    private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, haToken, externalListName, externalListURL, blacklist, whitelist }
+    @FocusState private var focusedInputField: InputField?
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryPhoneNumber = ""
     @AppStorage("callFilterMode") private var callFilterMode = "Blacklist"
@@ -967,12 +967,15 @@ private struct ExtrasView: View {
                 DisclosureGroup("Asterisk / VoIP", isExpanded: $showSIP) {
                     Toggle("Anrufe über Asterisk", isOn: $sipEnabled)
                     TextField("Asterisk Host", text: $sipHost)
+                        .focused($focusedInputField, equals: .sipHost)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     TextField("SIP Benutzer", text: $sipUsername)
+                        .focused($focusedInputField, equals: .sipUsername)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     SecureField("SIP Passwort", text: $sipPassword)
+                        .focused($focusedInputField, equals: .sipPassword)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     settingsAction("SIP verbinden / neu registrieren", systemImage: "antenna.radiowaves.left.and.right") {
@@ -997,20 +1000,18 @@ private struct ExtrasView: View {
                 DisclosureGroup("Mobilfunk / Dual-SIM", isExpanded: $showMobile) {
                     TextField("Primäre Rufnummer", text: $primaryPhoneNumber)
                         .keyboardType(.phonePad)
-                        .focused($focusedPhoneField, equals: .primary)
+                        .focused($focusedInputField, equals: .primary)
                         .submitLabel(.done)
                     TextField("Zweite Rufnummer", text: $secondaryPhoneNumber)
                         .keyboardType(.phonePad)
-                        .focused($focusedPhoneField, equals: .secondary)
+                        .focused($focusedInputField, equals: .secondary)
                         .submitLabel(.done)
 
-                    settingsAction("Tastatur schließen", systemImage: "keyboard.chevron.compact.down", disabled: focusedPhoneField == nil) {
-                        focusedPhoneField = nil
-                    }
                 }
 
                 DisclosureGroup("Mailbox", isExpanded: $showMailbox) {
                     TextField("Mailbox-Rufnummer", text: $mailboxNumber)
+                        .focused($focusedInputField, equals: .mailbox)
                         .keyboardType(.phonePad)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -1051,6 +1052,7 @@ private struct ExtrasView: View {
                     }
 
                     SecureField("Long-Lived Access Token von Home Assistant eintragen", text: $monitor.haToken)
+                        .focused($focusedInputField, equals: .haToken)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textContentType(.password)
@@ -1076,7 +1078,9 @@ private struct ExtrasView: View {
 
                     Section {
                         TextField("Listenname", text: $externalListName)
+                            .focused($focusedInputField, equals: .externalListName)
                         TextField("HTTPS-URL (TXT / CSV / JSON)", text: $externalListURL)
+                            .focused($focusedInputField, equals: .externalListURL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
@@ -1134,13 +1138,13 @@ private struct ExtrasView: View {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Fertig") {
-                        focusedPhoneField = nil
+                        focusedInputField = nil
                     }
                 }
             }
             .scrollDismissesKeyboard(.interactively)
             .onTapGesture {
-                focusedPhoneField = nil
+                focusedInputField = nil
             }
         }
     }
@@ -1165,11 +1169,11 @@ private struct ExtrasView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.glass)
-        .controlSize(.large)
+        .controlSize(.regular)
         .disabled(disabled)
     }
 
@@ -1183,6 +1187,7 @@ private struct ExtrasView: View {
     ) -> some View {
         HStack {
             TextField(placeholder, text: newEntry)
+                .focused($focusedInputField, equals: title == "Blacklist" ? .blacklist : .whitelist)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
 

@@ -65,6 +65,10 @@ final class MailboxModel: ObservableObject {
         }
     }
 
+    func setError(_ message: String) {
+        errorMessage = message
+    }
+
     func delete(_ message: MailboxMessage) async throws {
         guard !token.isEmpty else {
             throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])

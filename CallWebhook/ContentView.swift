@@ -142,9 +142,72 @@ private struct ContactsView: View {
     }
 
     private var visibleContacts: [CNContact] {
-        contacts.filter { contact in
-            area == .business ? businessIDs.contains(contact.identifier) : !businessIDs.contains(contact.identifier)
+        contacts
+            .filter { contact in
+                area == .business ? businessIDs.contains(contact.identifier) : !businessIDs.contains(contact.identifier)
+            }
+            .sorted { lhs, rhs in
+                let left = sortText(for: lhs)
+                let right = sortText(for: rhs)
+                let comparison = left.localizedCaseInsensitiveCompare(right)
+                if comparison == .orderedSame {
+                    let leftFallback = CNContactFormatter.string(from: lhs, style: .fullName) ?? lhs.organizationName
+                    let rightFallback = CNContactFormatter.string(from: rhs, style: .fullName) ?? rhs.organizationName
+                    return leftFallback.localizedCaseInsensitiveCompare(rightFallback) == .orderedAscending
+                }
+                return comparison == .orderedAscending
+            }
+    }
+
+    private func sortText(for contact: CNContact) -> String {
+        switch ContactSort(rawValue: sortValue) ?? .firstName {
+        case .firstName:
+            return [contact.givenName, contact.familyName, contact.organizationName]
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? ""
+        case .lastName:
+            return [contact.familyName, contact.givenName, contact.organizationName]
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? ""
+        case .company:
+            return [contact.organizationName, contact.familyName, contact.givenName]
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? ""
         }
+    }
+
+    private func move(_ contact: CNContact, to target: ContactArea) {
+        var ids = businessIDs
+        if target == .business {
+            ids.insert(contact.identifier)
+        } else {
+            ids.remove(contact.identifier)
+        }
+        businessContactIDs = ids.sorted().joined(separator: "\n")
+    }
+
+    private func phoneNumbers(for contact: CNContact) -> [String] {
+        contact.phoneNumbers
+            .map { $0.value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func addToBlacklist(_ contact: CNContact) {
+        var values = Set(
+            UserDefaults.standard.string(forKey: "blacklistEntries")?
+                .split(separator: "\n")
+                .map(String.init) ?? []
+        )
+        values.formUnion(phoneNumbers(for: contact))
+        UserDefaults.standard.set(values.sorted().joined(separator: "\n"), forKey: "blacklistEntries")
+    }
+
+    private func report(_ contact: CNContact) {
+        addToBlacklist(contact)
+        var values = Set(
+            UserDefaults.standard.string(forKey: "reportedContactNumbers")?
+                .split(separator: "\n")
+                .map(String.init) ?? []
+        )
+        values.formUnion(phoneNumbers(for: contact))
+        UserDefaults.standard.set(values.sorted().joined(separator: "\n"), forKey: "reportedContactNumbers")
     }
 
     var body: some View {
@@ -188,6 +251,29 @@ private struct ContactsView: View {
                                     Text(contact.organizationName).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
+                        }
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        Button {
+                            move(contact, to: area == .business ? .privateContacts : .business)
+                        } label: {
+                            Label(area == .business ? "Privat" : "Beruflich",
+                                  systemImage: area == .business ? "person.fill" : "briefcase.fill")
+                        }
+                        .tint(.blue)
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button {
+                            addToBlacklist(contact)
+                        } label: {
+                            Label("Blockieren", systemImage: "hand.raised.fill")
+                        }
+                        .tint(.orange)
+
+                        Button(role: .destructive) {
+                            report(contact)
+                        } label: {
+                            Label("Melden", systemImage: "exclamationmark.bubble.fill")
                         }
                     }
                 }

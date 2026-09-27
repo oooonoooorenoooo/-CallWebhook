@@ -377,6 +377,7 @@ private struct VoicemailPlayerView: View {
 private struct DialPadView: View {
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
+    @ObservedObject private var sip = SIPService.shared
     let primaryPhoneNumber: String
     let secondaryPhoneNumber: String
     private let rows = [["1","2","3"],["4","5","6"],["7","8","9"],["*","0","#"]]

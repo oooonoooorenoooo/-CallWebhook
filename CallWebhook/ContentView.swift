@@ -63,6 +63,9 @@ private struct SetupWizardView: View {
     @State private var line3Label = "Festnetz"
     @State private var fritzReachable = false
     @State private var fritzStatus = "Noch nicht geprüft"
+    @State private var fritzVoIPAvailable = false
+    @State private var fritzTAMAvailable = false
+    @State private var fritzServiceCount = 0
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -148,6 +151,15 @@ private struct SetupWizardView: View {
                 .disabled(isChecking || fritzHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label(fritzStatus, systemImage: fritzReachable ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(fritzReachable ? .green : .secondary)
+                if fritzReachable {
+                    Label("Telefonie / X_VoIP", systemImage: fritzVoIPAvailable ? "checkmark.circle.fill" : "xmark.circle")
+                        .foregroundStyle(fritzVoIPAvailable ? .green : .red)
+                    Label("Anrufbeantworter / TAM", systemImage: fritzTAMAvailable ? "checkmark.circle.fill" : "xmark.circle")
+                        .foregroundStyle(fritzTAMAvailable ? .green : .red)
+                    Text("\(fritzServiceCount) TR-064-Dienste erkannt")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section {
                 Label("Nach erfolgreicher Erreichbarkeitsprüfung werden im nächsten Ausbauschritt TR-064-Anmeldung und SIP-Nebenstellen automatisch provisioniert.", systemImage: "gearshape.2")
@@ -232,7 +244,7 @@ private struct SetupWizardView: View {
 
     private var canContinue: Bool {
         switch step {
-        case 1: return fritzReachable
+        case 1: return fritzReachable && fritzVoIPAvailable
         case 2: return homeAssistantReachable
         case 4: return fritzReachable && homeAssistantReachable
         default: return true
@@ -244,6 +256,9 @@ private struct SetupWizardView: View {
         isChecking = true
         defer { isChecking = false }
         fritzReachable = false
+        fritzVoIPAvailable = false
+        fritzTAMAvailable = false
+        fritzServiceCount = 0
         fritzStatus = "Prüfung fehlgeschlagen"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -262,15 +277,38 @@ private struct SetupWizardView: View {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse,
                   (200..<400).contains(http.statusCode),
-                  String(data: data, encoding: .utf8)?.localizedCaseInsensitiveContains("TR-064") == true ||
-                  String(data: data, encoding: .utf8)?.localizedCaseInsensitiveContains("device") == true else {
+                  let xml = String(data: data, encoding: .utf8),
+                  xml.localizedCaseInsensitiveContains("device") else {
                 fritzStatus = "Keine TR-064-Beschreibung gefunden"
                 return
             }
+
+            let serviceTypes = extractTR064ServiceTypes(from: xml)
+            fritzServiceCount = serviceTypes.count
+            fritzVoIPAvailable = serviceTypes.contains { $0.localizedCaseInsensitiveContains("X_VoIP") || $0.localizedCaseInsensitiveContains("VoIP") }
+            fritzTAMAvailable = serviceTypes.contains { $0.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.localizedCaseInsensitiveContains(":TAM:") }
             fritzReachable = true
-            fritzStatus = "FRITZ!Box erreichbar – TR-064 gefunden"
+
+            if fritzVoIPAvailable && fritzTAMAvailable {
+                fritzStatus = "FRITZ!Box bereit – Telefonie und TAM erkannt"
+            } else if fritzVoIPAvailable {
+                fritzStatus = "FRITZ!Box erreichbar – Telefonie erkannt, TAM fehlt"
+            } else {
+                fritzStatus = "FRITZ!Box erreichbar – Telefoniedienst nicht erkannt"
+            }
         } catch {
             fritzStatus = "Nicht erreichbar: \(error.localizedDescription)"
+        }
+    }
+
+    private func extractTR064ServiceTypes(from xml: String) -> [String] {
+        let pattern = "<serviceType>\\s*([^<]+)\\s*</serviceType>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        let range = NSRange(xml.startIndex..<xml.endIndex, in: xml)
+        return regex.matches(in: xml, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let valueRange = Range(match.range(at: 1), in: xml) else { return nil }
+            return String(xml[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 

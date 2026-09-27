@@ -82,13 +82,10 @@ private struct CallsView: View {
                                             .foregroundStyle(selectedCallIDs.contains(call.id) ? .blue : .secondary)
                                     }
                                     Image(systemName: directionIcon(call))
+                                        .foregroundStyle(callStatusColor(call))
                                         .frame(width: 28)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
-                                        Text(directionText(call)).font(.caption).foregroundStyle(.secondary)
-                                        Text("Status: \(String(describing: call.status))")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
                                     }
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 3) {
@@ -196,6 +193,11 @@ private struct CallsView: View {
 
     private func directionIcon(_ call: ConversationHistoryManager.RecentConversation) -> String {
         String(describing: call.direction).lowercased().contains("incoming") ? "phone.arrow.down.left" : "phone.arrow.up.right"
+    }
+
+    private func callStatusColor(_ call: ConversationHistoryManager.RecentConversation) -> Color {
+        let status = String(describing: call.status).lowercased()
+        return status.contains("connected") ? .green : .red
     }
 }
 

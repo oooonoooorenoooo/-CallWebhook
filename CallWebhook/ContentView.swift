@@ -134,6 +134,17 @@ private struct ContactsView: View {
     @State private var area = ContactArea.privateContacts
     @State private var contacts: [CNContact] = []
     @AppStorage("contactSort") private var sortValue = ContactSort.firstName.rawValue
+    @AppStorage("businessContactIDs") private var businessContactIDs = ""
+
+    private var businessIDs: Set<String> {
+        Set(businessContactIDs.split(separator: "\n").map(String.init))
+    }
+
+    private var visibleContacts: [CNContact] {
+        contacts.filter { contact in
+            area == .business ? businessIDs.contains(contact.identifier) : !businessIDs.contains(contact.identifier)
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -155,9 +166,9 @@ private struct ContactsView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.horizontal)
 
-                List(contacts, id: \.identifier) { contact in
+                List(visibleContacts, id: \.identifier) { contact in
                     NavigationLink {
-                        ContactDetailView(contact: contact, dialer: dialer)
+                        ContactDetailView(contact: contact, dialer: dialer, businessContactIDs: $businessContactIDs)
                     } label: {
                         HStack(spacing: 12) {
                             Group {
@@ -228,6 +239,11 @@ private struct ContactsView: View {
 private struct ContactDetailView: View {
     let contact: CNContact
     @ObservedObject var dialer: DialerModel
+    @Binding var businessContactIDs: String
+
+    private var isBusiness: Bool {
+        Set(businessContactIDs.split(separator: "\n").map(String.init)).contains(contact.identifier)
+    }
 
     private var name: String {
         CNContactFormatter.string(from: contact, style: .fullName) ?? contact.organizationName
@@ -254,6 +270,25 @@ private struct ContactDetailView: View {
                         }
                     }
                 }
+            }
+
+            Section("Liste") {
+                Picker("Zuordnung", selection: Binding(
+                    get: { isBusiness ? "Beruflich" : "Privat" },
+                    set: { newValue in
+                        var ids = Set(businessContactIDs.split(separator: "\n").map(String.init))
+                        if newValue == "Beruflich" {
+                            ids.insert(contact.identifier)
+                        } else {
+                            ids.remove(contact.identifier)
+                        }
+                        businessContactIDs = ids.sorted().joined(separator: "\n")
+                    }
+                )) {
+                    Text("Privat").tag("Privat")
+                    Text("Beruflich").tag("Beruflich")
+                }
+                .pickerStyle(.segmented)
             }
 
             if !contact.phoneNumbers.isEmpty {

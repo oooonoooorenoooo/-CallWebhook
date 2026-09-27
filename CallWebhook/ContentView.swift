@@ -97,6 +97,9 @@ private struct SetupWizardView: View {
     @State private var fritzAuthenticated = false
     @State private var fritzVoIPNumbers: [String] = []
     @State private var fritzTAMCount = 0
+    @State private var fritzTAMs: [FritzTAM] = []
+    @State private var mailbox1TAM = -1
+    @State private var mailbox2TAM = -1
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -104,6 +107,17 @@ private struct SetupWizardView: View {
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
     @AppStorage("sipLine2Prefix") private var sipLine2Prefix = ""
     @AppStorage("sipLine3Prefix") private var sipLine3Prefix = ""
+
+    private struct FritzTAM: Identifiable, Hashable {
+        let index: Int
+        let name: String
+        let enabled: Bool
+
+        var id: Int { index }
+        var displayName: String {
+            "\(name.isEmpty ? "Anrufbeantworter \(index + 1)" : name)\(enabled ? "" : " (aus)")"
+        }
+    }
 
     private let titles = [
         "Willkommen",
@@ -261,6 +275,26 @@ private struct SetupWizardView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if !fritzTAMs.isEmpty {
+                Section("Mailboxen") {
+                    Picker("Mailbox 1", selection: $mailbox1TAM) {
+                        Text("Nicht verwenden").tag(-1)
+                        ForEach(fritzTAMs) { tam in
+                            Text(tam.displayName).tag(tam.index)
+                        }
+                    }
+                    Picker("Mailbox 2", selection: $mailbox2TAM) {
+                        Text("Nicht verwenden").tag(-1)
+                        ForEach(fritzTAMs) { tam in
+                            Text(tam.displayName).tag(tam.index)
+                        }
+                    }
+                    Text("Die Auswahl wird später für den automatischen Home-Assistant-Mailboxabruf verwendet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section {
                 Toggle("easybell für Mobilrufnummern verwenden", isOn: $easybellEnabled)
                 if easybellEnabled {
@@ -298,9 +332,21 @@ private struct SetupWizardView: View {
             setupCheck("Leitung 1", detail: "\(line1Label) – \(line1Number)", ready: !line1Number.isEmpty)
             setupCheck("Leitung 2", detail: sipLine2Enabled ? "\(line2Label) – \(line2Number)" : "Deaktiviert", ready: !sipLine2Enabled || !line2Number.isEmpty)
             setupCheck("Leitung 3", detail: sipLine3Enabled ? "\(line3Label) – \(line3Number)" : "Deaktiviert", ready: !sipLine3Enabled || !line3Number.isEmpty)
-            setupCheck("Mailboxen", detail: "Automatische Prüfung folgt", ready: false)
+            setupCheck(
+                "Mailboxen",
+                detail: mailboxSummary,
+                ready: fritzTAMs.isEmpty || mailbox1TAM >= 0 || mailbox2TAM >= 0
+            )
             setupCheck("Asterisk", detail: "Automatische Prüfung folgt", ready: false)
         }
+    }
+
+    private var mailboxSummary: String {
+        if fritzTAMs.isEmpty { return "Keine FRITZ!-Mailbox erkannt" }
+        var names: [String] = []
+        if let tam = fritzTAMs.first(where: { $0.index == mailbox1TAM }) { names.append("Mailbox 1: \(tam.displayName)") }
+        if let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("Mailbox 2: \(tam.displayName)") }
+        return names.isEmpty ? "Nicht verwendet" : names.joined(separator: " · ")
     }
 
     private func setupCheck(_ title: String, detail: String, ready: Bool) -> some View {
@@ -336,6 +382,7 @@ private struct SetupWizardView: View {
         fritzAuthenticated = false
         fritzVoIPNumbers = []
         fritzTAMCount = 0
+        fritzTAMs = []
         fritzStatus = "Prüfung fehlgeschlagen"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -405,10 +452,10 @@ private struct SetupWizardView: View {
                 if line3Number.isEmpty, let first = fritzVoIPNumbers.first { line3Number = first }
 
                 if let tamService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:") }) {
-                    var count = 0
+                    var discovered: [FritzTAM] = []
                     for index in 0..<10 {
                         do {
-                            _ = try await soapCall(
+                            let tamResponse = try await soapCall(
                                 session: session,
                                 base: base,
                                 serviceType: tamService.type,
@@ -416,12 +463,18 @@ private struct SetupWizardView: View {
                                 action: "GetInfo",
                                 arguments: [("NewIndex", String(index))]
                             )
-                            count += 1
+                            let name = extractSOAPValue("NewName", from: tamResponse)
+                            let enableValue = extractSOAPValue("NewEnable", from: tamResponse).lowercased()
+                            let enabled = enableValue == "1" || enableValue == "true"
+                            discovered.append(FritzTAM(index: index, name: name, enabled: enabled))
                         } catch {
                             if index > 1 { break }
                         }
                     }
-                    fritzTAMCount = count
+                    fritzTAMs = discovered
+                    fritzTAMCount = discovered.count
+                    if mailbox1TAM < 0, let first = discovered.first { mailbox1TAM = first.index }
+                    if mailbox2TAM < 0, discovered.count > 1 { mailbox2TAM = discovered[1].index }
                 }
 
                 fritzStatus = "FRITZ-Anmeldung erfolgreich – Telefonie ausgelesen"
@@ -572,6 +625,8 @@ private struct SetupWizardView: View {
         defaults.set(line1Number, forKey: "sipLine1Number")
         defaults.set(line2Number, forKey: "sipLine2Number")
         defaults.set(line3Number, forKey: "sipLine3Number")
+        defaults.set(mailbox1TAM, forKey: "setupMailbox1TAM")
+        defaults.set(mailbox2TAM, forKey: "setupMailbox2TAM")
         // Passwords are intentionally not persisted in UserDefaults.
     }
 }

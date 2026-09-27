@@ -60,6 +60,9 @@ jobs:
 
   testflight:
     runs-on: macos-26
+    concurrency:
+      group: callwebhook-testflight-main
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
@@ -144,6 +147,12 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
+          LATEST_MAIN_SHA="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$LATEST_MAIN_SHA" != "$GITHUB_SHA" ]; then
+            echo "Neuere main-Version vorhanden: $LATEST_MAIN_SHA"
+            echo "Dieser Zwischenstand ($GITHUB_SHA) wird nicht zu TestFlight hochgeladen."
+            exit 0
+          fi
           xcrun altool --upload-app -f CallWebhook-TestFlight.ipa -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
       - uses: actions/upload-artifact@v4
         with:

@@ -143,6 +143,8 @@ private struct SetupWizardView: View {
     @State private var sipClient2Plan = "Noch nicht geprüft"
     @State private var sipClient1Index: Int?
     @State private var sipClient2Index: Int?
+    @State private var sipClient3Plan = "Noch nicht geprüft"
+    @State private var sipClient3Index: Int?
     @State private var fritzSIPWriteAction = ""
     @State private var fritzSIPWriteStatus = "Schreibschnittstelle noch nicht geprüft"
     @State private var fritzSIPWriteArguments: [String] = []
@@ -290,12 +292,16 @@ private struct SetupWizardView: View {
                             .font(.caption)
                         Text("callwhapp2: \(sipClient2Plan)")
                             .font(.caption)
+                        if sipLine3Enabled {
+                            Text("callwhapp3: \(sipClient3Plan)")
+                                .font(.caption)
+                        }
                         Button {
                             Task { await provisionMissingSIPClients() }
                         } label: {
                             Label(isProvisioningSIP ? "Provisioniere …" : "SIP-Nebenstellen einrichten", systemImage: "gearshape.2.fill")
                         }
-                        .disabled(isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil)
+                        .disabled(isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil || (sipLine3Enabled && sipClient3Index == nil))
                         Text(sipProvisionStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -461,6 +467,49 @@ private struct SetupWizardView: View {
             .replacingOccurrences(of: "https://", with: "")
             .components(separatedBy: ":").first ?? "fritz.box"
 
+        let password3 = sipLine3Enabled ? SetupKeychain.get(account: "fritz-sip-callwhapp3") : nil
+        if sipLine3Enabled && password3 == nil {
+            asteriskConfigReady = false
+            asteriskConfigStatus = "FRITZ-SIP-Zugangsdaten für Leitung 3 fehlen noch"
+            return
+        }
+
+        let fritz3 = sipLine3Enabled ? """
+
+        [fritz3-auth]
+        type=auth
+        auth_type=userpass
+        username=callwhapp3
+        password=\(password3 ?? "")
+
+        [fritz3-aor]
+        type=aor
+        contact=sip:\(host)
+
+        [fritz3-endpoint]
+        type=endpoint
+        transport=transport-udp
+        context=from-fritz
+        disallow=all
+        allow=alaw,ulaw
+        outbound_auth=fritz3-auth
+        aors=fritz3-aor
+        from_user=callwhapp3
+        from_domain=\(host)
+        direct_media=no
+
+        [fritz3-registration]
+        type=registration
+        transport=transport-udp
+        outbound_auth=fritz3-auth
+        server_uri=sip:\(host)
+        client_uri=sip:callwhapp3@\(host)
+        contact_user=callwhapp3
+        retry_interval=60
+        line=yes
+        endpoint=fritz3-endpoint
+        """ : ""
+
         let pjsip = """
         [fritz1-auth]
         type=auth
@@ -527,6 +576,7 @@ private struct SetupWizardView: View {
         retry_interval=60
         line=yes
         endpoint=fritz2-endpoint
+        \(fritz3)
         """
 
         let prefix2 = sipLine2Prefix.isEmpty ? "*82" : sipLine2Prefix
@@ -542,11 +592,11 @@ private struct SetupWizardView: View {
          same => n,Hangup()
 
         exten => _\(prefix3)**X.,1,NoOp(CallWebhook Leitung 3 internal FRITZ call to ${EXTEN:\(prefix3.count)})
-         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz1-endpoint,60)
+         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz3-endpoint,60)
          same => n,Hangup()
 
         exten => _\(prefix3)X.,1,NoOp(CallWebhook Leitung 3 to ${EXTEN:\(prefix3.count)})
-         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz1-endpoint,60)
+         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz3-endpoint,60)
          same => n,Hangup()
 
         exten => _**X.,1,NoOp(CallWebhook internal FRITZ call to ${EXTEN})
@@ -608,6 +658,8 @@ private struct SetupWizardView: View {
         sipClient2Index = nil
         sipClient1Plan = "Noch nicht geprüft"
         sipClient2Plan = "Noch nicht geprüft"
+        sipClient3Index = nil
+        sipClient3Plan = "Noch nicht geprüft"
         fritzStatus = "Prüfung fehlgeschlagen"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -791,6 +843,22 @@ private struct SetupWizardView: View {
                     sipClient2Plan = "kein freier Clientplatz"
                 }
 
+                if sipLine3Enabled {
+                    if let existing = clients.first(where: { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }) {
+                        sipClient3Index = existing.index
+                        sipClient3Plan = "vorhanden, Index \(existing.index)"
+                    } else if let free = (0..<20).first(where: { !reserved.contains($0) }) {
+                        sipClient3Index = free
+                        reserved.insert(free)
+                        sipClient3Plan = "freier Index \(free) reserviert"
+                    } else {
+                        sipClient3Plan = "kein freier Clientplatz"
+                    }
+                } else {
+                    sipClient3Index = nil
+                    sipClient3Plan = "Leitung 3 deaktiviert"
+                }
+
                 if let tamService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:") }) {
                     var discovered: [FritzTAM] = []
                     for index in 0..<10 {
@@ -870,7 +938,8 @@ private struct SetupWizardView: View {
 
         let existing1 = fritzSIPClients.contains { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }
         let existing2 = fritzSIPClients.contains { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
-        if existing1 && existing2 {
+        let existing3 = fritzSIPClients.contains { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }
+        if existing1 && existing2 && (!sipLine3Enabled || existing3) {
             sipProvisionStatus = "callwhapp1 und callwhapp2 sind bereits vorhanden"
             return
         }
@@ -908,6 +977,16 @@ private struct SetupWizardView: View {
                 let args = try setClientArguments(index: index2, username: "callwhapp2", password: password, outgoing: number2)
                 _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
                 try SetupKeychain.set(password, account: "fritz-sip-callwhapp2")
+            }
+
+            if sipLine3Enabled && !existing3 {
+                guard let index3 = sipClient3Index else {
+                    throw NSError(domain: "CallWebhook.Setup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Kein sicherer Clientplatz für Leitung 3"])
+                }
+                let password = randomSIPPassword()
+                let args = try setClientArguments(index: index3, username: "callwhapp3", password: password, outgoing: line3Number)
+                _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                try SetupKeychain.set(password, account: "fritz-sip-callwhapp3")
             }
 
             sipProvisionStatus = "SIP-Nebenstellen angelegt und Zugangsdaten sicher gespeichert – FRITZ-Prüfung erneut ausführen"

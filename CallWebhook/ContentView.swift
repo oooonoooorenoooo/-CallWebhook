@@ -100,6 +100,7 @@ private struct SetupWizardView: View {
     @State private var fritzTAMs: [FritzTAM] = []
     @State private var mailbox1TAM = -1
     @State private var mailbox2TAM = -1
+    @State private var fritzSIPClients: [FritzSIPClient] = []
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
     @State private var isChecking = false
@@ -116,6 +117,21 @@ private struct SetupWizardView: View {
         var id: Int { index }
         var displayName: String {
             "\(name.isEmpty ? "Anrufbeantworter \(index + 1)" : name)\(enabled ? "" : " (aus)")"
+        }
+    }
+
+    private struct FritzSIPClient: Identifiable, Hashable {
+        let index: Int
+        let username: String
+        let phoneName: String
+        let outgoingNumber: String
+        let internalNumber: String
+
+        var id: Int { index }
+        var displayName: String {
+            let name = phoneName.isEmpty ? username : phoneName
+            let number = outgoingNumber.isEmpty ? "" : " – \(outgoingNumber)"
+            return "\(name)\(number)"
         }
     }
 
@@ -213,6 +229,13 @@ private struct SetupWizardView: View {
                         Text("Anrufbeantworter erkannt: \(fritzTAMCount)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Text("SIP-Nebenstellen: \(fritzSIPClients.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(fritzSIPClients) { client in
+                            Label(client.displayName, systemImage: "phone.connection")
+                                .font(.caption)
+                        }
                     }
                 }
             }
@@ -333,6 +356,11 @@ private struct SetupWizardView: View {
             setupCheck("Leitung 2", detail: sipLine2Enabled ? "\(line2Label) – \(line2Number)" : "Deaktiviert", ready: !sipLine2Enabled || !line2Number.isEmpty)
             setupCheck("Leitung 3", detail: sipLine3Enabled ? "\(line3Label) – \(line3Number)" : "Deaktiviert", ready: !sipLine3Enabled || !line3Number.isEmpty)
             setupCheck(
+                "FRITZ-SIP-Nebenstellen",
+                detail: fritzSIPClients.isEmpty ? "Keine vorhandene SIP-Nebenstelle erkannt" : fritzSIPClients.map(\.displayName).joined(separator: " · "),
+                ready: fritzAuthenticated
+            )
+            setupCheck(
                 "Mailboxen",
                 detail: mailboxSummary,
                 ready: fritzTAMs.isEmpty || mailbox1TAM >= 0 || mailbox2TAM >= 0
@@ -383,6 +411,7 @@ private struct SetupWizardView: View {
         fritzVoIPNumbers = []
         fritzTAMCount = 0
         fritzTAMs = []
+        fritzSIPClients = []
         fritzStatus = "Prüfung fehlgeschlagen"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -450,6 +479,68 @@ private struct SetupWizardView: View {
                 if line1Number.isEmpty, let first = fritzVoIPNumbers.first { line1Number = first }
                 if line2Number.isEmpty, fritzVoIPNumbers.count > 1 { line2Number = fritzVoIPNumbers[1] }
                 if line3Number.isEmpty, let first = fritzVoIPNumbers.first { line3Number = first }
+
+                var clients: [FritzSIPClient] = []
+                var consecutiveMisses = 0
+                for index in 0..<20 {
+                    do {
+                        let clientResponse = try await soapCall(
+                            session: session,
+                            base: base,
+                            serviceType: voipService.type,
+                            controlURL: voipService.controlURL,
+                            action: "X_AVM-DE_GetClient3",
+                            arguments: [("NewX_AVM-DE_ClientIndex", String(index))]
+                        )
+                        let username = extractSOAPValue("NewX_AVM-DE_ClientUsername", from: clientResponse)
+                        let phoneName = extractSOAPValue("NewX_AVM-DE_PhoneName", from: clientResponse)
+                        let outgoing = extractSOAPValue("NewX_AVM-DE_OutGoingNumber", from: clientResponse)
+                        let internalNumber = extractSOAPValue("NewX_AVM-DE_InternalNumber", from: clientResponse)
+                        if !username.isEmpty || !phoneName.isEmpty || !internalNumber.isEmpty {
+                            clients.append(FritzSIPClient(
+                                index: index,
+                                username: username,
+                                phoneName: phoneName,
+                                outgoingNumber: outgoing,
+                                internalNumber: internalNumber
+                            ))
+                            consecutiveMisses = 0
+                        } else {
+                            consecutiveMisses += 1
+                        }
+                    } catch {
+                        do {
+                            let clientResponse = try await soapCall(
+                                session: session,
+                                base: base,
+                                serviceType: voipService.type,
+                                controlURL: voipService.controlURL,
+                                action: "X_AVM-DE_GetClient2",
+                                arguments: [("NewX_AVM-DE_ClientIndex", String(index))]
+                            )
+                            let username = extractSOAPValue("NewX_AVM-DE_ClientUsername", from: clientResponse)
+                            let phoneName = extractSOAPValue("NewX_AVM-DE_PhoneName", from: clientResponse)
+                            let outgoing = extractSOAPValue("NewX_AVM-DE_OutGoingNumber", from: clientResponse)
+                            let internalNumber = extractSOAPValue("NewX_AVM-DE_InternalNumber", from: clientResponse)
+                            if !username.isEmpty || !phoneName.isEmpty || !internalNumber.isEmpty {
+                                clients.append(FritzSIPClient(
+                                    index: index,
+                                    username: username,
+                                    phoneName: phoneName,
+                                    outgoingNumber: outgoing,
+                                    internalNumber: internalNumber
+                                ))
+                                consecutiveMisses = 0
+                            } else {
+                                consecutiveMisses += 1
+                            }
+                        } catch {
+                            consecutiveMisses += 1
+                        }
+                    }
+                    if consecutiveMisses >= 4 && index >= 5 { break }
+                }
+                fritzSIPClients = clients
 
                 if let tamService = services.first(where: { $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:") }) {
                     var discovered: [FritzTAM] = []

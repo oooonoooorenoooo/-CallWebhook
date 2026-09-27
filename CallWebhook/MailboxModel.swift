@@ -65,6 +65,30 @@ final class MailboxModel: ObservableObject {
         }
     }
 
+    func delete(_ message: MailboxMessage) async throws {
+        guard !token.isEmpty else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])
+        }
+
+        guard let url = URL(string: "\(baseURL)/api/callwebhook/mailbox/\(message.tam)/\(message.index)") else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ungültige Lösch-URL"])
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Löschen HTTP \(code)"])
+        }
+
+        messages.removeAll { $0.id == message.id }
+        errorMessage = nil
+    }
+
     func loadAudio(for message: MailboxMessage) async throws -> Data {
         guard !token.isEmpty else {
             throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])

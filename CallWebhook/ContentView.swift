@@ -486,10 +486,10 @@ private struct DialPadView: View {
                 .font(.system(size: 27, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 72, height: 72)
-                .background((monitor.active || SIPService.shared.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
+                .background((monitor.active || sip.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!monitor.active && !SIPService.shared.active)
+        .disabled(!monitor.active && !sip.active)
         .accessibilityLabel("Anruf beenden")
     }
 
@@ -543,6 +543,7 @@ private struct ExtrasView: View {
     @AppStorage("sipUsername") private var sipUsername = "callwebhook-ios"
     @AppStorage("sipPassword") private var sipPassword = ""
     @State private var showSIP = false
+    @ObservedObject private var sip = SIPService.shared
     @State private var showMobile = false
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
@@ -583,7 +584,7 @@ private struct ExtrasView: View {
                             // Status wird im SIP-Dienst gesetzt.
                         }
                     }
-                    Text(SIPService.shared.status)
+                    Text(sip.status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("Aktiv: Zifferblatt, Anrufliste und Mailbox wählen über Asterisk. Deaktiviert: bisheriger Mobilfunkpfad.")

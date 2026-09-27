@@ -101,6 +101,12 @@ private struct CallsView: View {
                                 }
                             }
                             .buttonStyle(.plain)
+                            .onLongPressGesture {
+                                guard !isSelectingCalls,
+                                      let number = call.handles.first?.value,
+                                      !number.isEmpty else { return }
+                                UIPasteboard.general.string = number
+                            }
                             .disabled(!isSelectingCalls && (call.handles.first?.value ?? "").isEmpty)
                         }
                         .listStyle(.plain)

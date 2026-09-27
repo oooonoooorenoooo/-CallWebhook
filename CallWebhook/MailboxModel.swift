@@ -10,11 +10,13 @@ struct MailboxMessage: Codable, Identifiable {
     let number: String
     let isNew: Bool
     let audio: String
+    let archived: Bool?
 
+    var isArchived: Bool { archived == true }
     var id: String { "\(tam)-\(index)" }
 
     enum CodingKeys: String, CodingKey {
-        case index, tam, called, date, duration, name, number, audio
+        case index, tam, called, date, duration, name, number, audio, archived
         case isNew = "new"
     }
 }
@@ -67,6 +69,29 @@ final class MailboxModel: ObservableObject {
 
     func setError(_ message: String) {
         errorMessage = message
+    }
+
+    func archive(_ message: MailboxMessage) async throws {
+        guard !token.isEmpty else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])
+        }
+
+        guard let url = URL(string: "\(baseURL)/api/callwebhook/mailbox/\(message.tam)/\(message.index)/archive") else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ungültige Speicher-URL"])
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Speichern HTTP \(code)"])
+        }
+
+        await refresh()
     }
 
     func delete(_ message: MailboxMessage) async throws {

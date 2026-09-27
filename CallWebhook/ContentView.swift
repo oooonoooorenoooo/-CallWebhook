@@ -487,10 +487,10 @@ private struct DialPadView: View {
                 .font(.system(size: 27, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 72, height: 72)
-                .background((monitor.active || sip.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
+                .background((monitor.active || SIPService.shared.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!monitor.active && !sip.active)
+        .disabled(!monitor.active && !SIPService.shared.active)
         .accessibilityLabel("Anruf beenden")
     }
 

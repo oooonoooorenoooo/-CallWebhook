@@ -20,6 +20,20 @@ final class DialerModel: ObservableObject {
         call(number)
     }
 
+    func call(line: Int) {
+        let value = number.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        status = "Anruf wird gestartet …"
+        lastDialedNumber = value
+        UserDefaults.standard.set(value, forKey: "lastDialedNumber")
+        do {
+            try sip.call(value, line: line)
+            status = "SIP Leitung \(line): \(value)"
+        } catch {
+            status = "SIP-Fehler: \(error.localizedDescription)"
+        }
+    }
+
     func call(_ phoneNumber: String) {
         let value = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }

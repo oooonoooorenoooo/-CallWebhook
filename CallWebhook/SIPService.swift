@@ -71,7 +71,7 @@ final class SIPService: ObservableObject {
         }
     }
 
-    func call(_ number: String) throws {
+    func call(_ number: String, line: Int = 1) throws {
         if core == nil {
             try configureAndStart()
         }
@@ -83,11 +83,22 @@ final class SIPService: ObservableObject {
             throw SIPError.notConfigured
         }
 
-        let target = try Factory.Instance.createAddress(addr: "sip:\(number)@\(host)")
+        let defaults = UserDefaults.standard
+        let prefix: String
+        switch line {
+        case 2:
+            prefix = defaults.string(forKey: "sipLine2Prefix") ?? ""
+        case 3:
+            prefix = defaults.string(forKey: "sipLine3Prefix") ?? ""
+        default:
+            prefix = ""
+        }
+        let targetNumber = prefix + number
+        let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
         core.configureAudioSession()
         _ = core.inviteAddress(addr: target)
         active = true
-        status = "SIP-Anruf an \(number)"
+        status = "SIP Leitung \(line): \(number)"
     }
 
     func hangup() {

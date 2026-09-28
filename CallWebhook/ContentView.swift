@@ -129,7 +129,7 @@ private struct SetupWizardView: View {
     @State private var fritzUser = ""
     @State private var fritzPassword = ""
     @State private var fritzUserChoice: Bool? = nil
-    @State private var homeAssistantURL = ""
+    @State private var homeAssistantURL = "26"
     @State private var easybellEnabled = false
     @State private var line1Label = "Mobil 1"
     @State private var line2Label = "Mobil 2"
@@ -374,14 +374,21 @@ private struct SetupWizardView: View {
     private var homeAssistant: some View {
         Form {
             Section("Home Assistant") {
-                TextField("Home-Assistant-Adresse", text: $homeAssistantURL)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
+                HStack(spacing: 0) {
+                    Text("192.168.178.")
+                        .foregroundStyle(.secondary)
+                    TextField("26", text: $homeAssistantURL)
+                        .keyboardType(.numberPad)
+                        .onChange(of: homeAssistantURL) { _, value in
+                            let digits = String(value.filter(\.isNumber).prefix(3))
+                            if digits != value { homeAssistantURL = digits }
+                        }
+                }
                 Button {
                     Task { await checkHomeAssistant() }
                 } label: {
-                    Label(isChecking ? "Prüfe …" : "Home Assistant prüfen", systemImage: "house.and.flag")
+                    Label(isChecking ? "Prüfe …" : (homeAssistantReachable ? "Home Assistant geprüft" : "Home Assistant prüfen"), systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "house.and.flag")
+                        .foregroundStyle(homeAssistantReachable ? .green : .blue)
                 }
                 .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
@@ -627,13 +634,7 @@ private struct SetupWizardView: View {
         }
 
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        var raw = input
-        if !raw.contains("://") {
-            raw = "http://" + raw
-            if let parsed = URL(string: raw), parsed.port == nil {
-                raw += ":8123"
-            }
-        }
+        let raw = "http://192.168.178.\(input):8123"
         guard let base = URL(string: raw),
               let url = URL(string: "/api/callwebhook/setup/asterisk", relativeTo: base)?.absoluteURL else {
             asteriskInstalled = false
@@ -1544,13 +1545,7 @@ private struct SetupWizardView: View {
     @MainActor
     private func authenticateHomeAssistant() async {
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        var raw = input
-        if !raw.contains("://") {
-            raw = "http://" + raw
-            if let parsed = URL(string: raw), parsed.port == nil {
-                raw += ":8123"
-            }
-        }
+        let raw = "http://192.168.178.\(input):8123"
         guard let base = URL(string: raw) else {
             homeAssistantStatus = "Ungültige Home-Assistant-Adresse"
             return
@@ -1584,13 +1579,7 @@ private struct SetupWizardView: View {
             homeAssistantStatus = "Adresse fehlt"
             return
         }
-        var raw = input
-        if !raw.contains("://") {
-            raw = "http://" + raw
-            if let parsed = URL(string: raw), parsed.port == nil {
-                raw += ":8123"
-            }
-        }
+        let raw = "http://192.168.178.\(input):8123"
         guard let base = URL(string: raw),
               let url = URL(string: "/manifest.json", relativeTo: base)?.absoluteURL else {
             homeAssistantStatus = "Ungültige Home-Assistant-Adresse"
@@ -1679,7 +1668,7 @@ private struct SetupWizardView: View {
     private func openCallWebhookBootstrap() {
         let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
         UIPasteboard.general.string = repository
-        callWebhookHAStatus = "CallWebhook-Repository in Home Assistant hinzufügen. Danach „CallWebhook Bootstrap“ installieren und starten."
+        callWebhookHAStatus = "Repository hinzufügen. Danach im App-Store nach „CallWebhook“ suchen, „CallWebhook Bootstrap“ installieren und einmal starten. Anschließend hier die Installation prüfen."
         var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
         components?.queryItems = [URLQueryItem(name: "repository_url", value: repository)]
         if let url = components?.url {

@@ -566,6 +566,19 @@ private struct SetupWizardView: View {
 
     private var lines: some View {
         Form {
+            Section("Hinterlegte FRITZ!Box-Rufnummern") {
+                ForEach(Array(fritzVoIPNumbers.enumerated()), id: \.element) { index, number in
+                    LabeledContent("Rufnummer \(index + 1)", value: number)
+                }
+                if fritzVoIPNumbers.isEmpty {
+                    Text("Keine Rufnummern ausgelesen. Du kannst die tatsächliche Nummer manuell eintragen.")
+                        .foregroundStyle(.secondary)
+                }
+                Button("Rufnummern neu auslesen") {
+                    Task { await checkFritzBox() }
+                }
+                .disabled(isChecking)
+            }
             Section("Leitung 1") {
                 TextField("Bezeichnung", text: $line1Label)
                 fritzNumberPicker("Absenderrufnummer", selection: $line1Number)
@@ -606,8 +619,8 @@ private struct SetupWizardView: View {
                     } else {
                         Picker("FRITZ!-Festnetzrufnummer", selection: $line3Number) {
                             Text("Bitte wählen").tag("")
-                            ForEach(fritzVoIPNumbers, id: \.self) { number in
-                                Text(number).tag(number)
+                            ForEach(Array(fritzVoIPNumbers.enumerated()), id: \.element) { index, number in
+                                Text("\(index + 1) · \(number)").tag(number)
                             }
                         }
                         Button("Andere Festnetzrufnummer eingeben") {
@@ -688,8 +701,8 @@ private struct SetupWizardView: View {
         } else {
             Picker(title, selection: selection) {
                 Text("Bitte wählen").tag("")
-                ForEach(fritzVoIPNumbers, id: \.self) { number in
-                    Text(number).tag(number)
+                ForEach(Array(fritzVoIPNumbers.enumerated()), id: \.element) { index, number in
+                    Text("\(index + 1) · \(number)").tag(number)
                 }
             }
         }
@@ -1279,49 +1292,52 @@ private struct SetupWizardView: View {
 
             do {
                 var resolvedNumbers: [String] = []
-                if let countXML = try? await soapCall(
-                    session: session,
-                    base: base,
-                    serviceType: voipService.type,
-                    controlURL: voipService.controlURL,
-                    action: "X_AVM-DE_GetNumberOfVoIPAccounts",
-                    arguments: []
-                ) {
-                    let countText = extractSOAPValue("NewNumberOfVoIPAccounts", from: countXML)
-                    let accountCount = Int(countText) ?? 0
-                    if accountCount > 0 {
-                        for accountIndex in 0..<accountCount {
+                // GetNumbers returns the complete configured telephone-number list.
+                // GetExistingVoIPNumbers returns a COUNT, not telephone numbers.
+                for action in ["X_AVM-DE_GetNumbers", "X_AVM-DE_GetVoIPAccounts"] {
+                    if let response = try? await soapCall(
+                        session: session, base: base, serviceType: voipService.type,
+                        controlURL: voipService.controlURL, action: action, arguments: []
+                    ) {
+                        resolvedNumbers = FritzPhoneNumbers.parse(response)
+                        if !resolvedNumbers.isEmpty { break }
+                    }
+                }
+                if resolvedNumbers.isEmpty {
+                    let countXML = try await soapCall(
+                        session: session, base: base, serviceType: voipService.type,
+                        controlURL: voipService.controlURL, action: "GetExistingVoIPNumbers", arguments: []
+                    )
+                    let count = Int(extractSOAPValue("NewExistingVoIPNumbers", from: countXML)) ?? 0
+                    if count > 0 {
+                        var slots = count
+                        if let maxXML = try? await soapCall(
+                            session: session, base: base, serviceType: voipService.type,
+                            controlURL: voipService.controlURL, action: "GetMaxVoIPNumbers", arguments: []
+                        ), let maximum = Int(extractSOAPValue("NewMaxVoIPNumbers", from: maxXML)) {
+                            slots = max(count, maximum)
+                        }
+                        for index in 0..<slots {
                             if let account = try? await soapCall(
-                                session: session,
-                                base: base,
-                                serviceType: voipService.type,
-                                controlURL: voipService.controlURL,
-                                action: "X_AVM-DE_GetVoIPAccount",
-                                arguments: [("NewVoIPAccountIndex", String(accountIndex))]
+                                session: session, base: base, serviceType: voipService.type,
+                                controlURL: voipService.controlURL, action: "X_AVM-DE_GetVoIPAccount",
+                                arguments: [("NewVoIPAccountIndex", String(index))]
                             ) {
-                                let number = extractSOAPValue("NewVoIPNumber", from: account)
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !number.isEmpty { resolvedNumbers.append(number) }
+                                resolvedNumbers.append(contentsOf: FritzPhoneNumbers.parse(account))
+                                if resolvedNumbers.count >= count { break }
                             }
                         }
                     }
                 }
-                // Compatibility fallback for FRITZ!OS variants without the account-count action.
-                if resolvedNumbers.isEmpty {
-                    let response = try await soapCall(
-                        session: session,
-                        base: base,
-                        serviceType: voipService.type,
-                        controlURL: voipService.controlURL,
-                        action: "GetExistingVoIPNumbers",
-                        arguments: []
-                    )
-                    resolvedNumbers = extractSOAPValue("NewExistingVoIPNumbers", from: response)
-                        .split(whereSeparator: { $0 == "," || $0 == ";" || $0 == "\n" })
-                        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
+                var seenNumbers = Set<String>()
+                fritzVoIPNumbers = resolvedNumbers.filter { seenNumbers.insert($0).inserted }
+                // Clear the old count-as-number selection without replacing manual numbers.
+                let oldCount = String(fritzVoIPNumbers.count)
+                if !fritzVoIPNumbers.contains(oldCount) {
+                    if line1Number == oldCount { line1Number = "" }
+                    if line2Number == oldCount { line2Number = "" }
+                    if line3Number == oldCount { line3Number = "" }
                 }
-                fritzVoIPNumbers = Array(NSOrderedSet(array: resolvedNumbers)) as? [String] ?? resolvedNumbers
                 fritzAuthenticated = true
                 do {
                     if !voipService.scpdURL.isEmpty {

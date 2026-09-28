@@ -24,6 +24,10 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook
+        INFOPLIST_KEY_CFBundleURLTypes:
+          - CFBundleURLName: de.reno.CallWebhook.oauth
+            CFBundleURLSchemes:
+              - callwebhook
         INFOPLIST_KEY_NSContactsUsageDescription: CallWebhook benötigt Zugriff auf deine Kontakte, um Namen und Kontaktbilder im Telefonbuch anzuzeigen.
         INFOPLIST_KEY_NSCameraUsageDescription: CallWebhook enthält eine VoIP-Bibliothek, die auf Kamera-APIs zugreifen kann. Kamerazugriff wird nur für zukünftige Kommunikationsfunktionen verwendet.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallWebhook benötigt Zugriff auf das Mikrofon, damit du VoIP-Telefonate über Asterisk führen kannst.

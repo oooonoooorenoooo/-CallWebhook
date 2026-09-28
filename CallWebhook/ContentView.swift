@@ -149,6 +149,7 @@ private struct SetupWizardView: View {
     @State private var fritzTAMs: [FritzTAM] = []
     @State private var mailbox1TAM = -1
     @State private var mailbox2TAM = -1
+    @State private var mailbox3TAM = -1
     @State private var fritzSIPClients: [FritzSIPClient] = []
     @State private var sipClient1Plan = "Noch nicht geprüft"
     @State private var sipClient2Plan = "Noch nicht geprüft"
@@ -546,20 +547,30 @@ private struct SetupWizardView: View {
                 }
             }
             if !fritzTAMs.isEmpty {
-                Section("Mailboxen") {
-                    Picker("Mailbox 1", selection: $mailbox1TAM) {
+                Section("Anrufbeantworter je Leitung") {
+                    Picker("\(line1Label) · \(line1Number.isEmpty ? "Rufnummer wählen" : line1Number)", selection: $mailbox1TAM) {
                         Text("Nicht verwenden").tag(-1)
                         ForEach(fritzTAMs) { tam in
                             Text(tam.displayName).tag(tam.index)
                         }
                     }
-                    Picker("Mailbox 2", selection: $mailbox2TAM) {
-                        Text("Nicht verwenden").tag(-1)
-                        ForEach(fritzTAMs) { tam in
-                            Text(tam.displayName).tag(tam.index)
+                    if sipLine2Enabled {
+                        Picker("\(line2Label) · \(line2Number.isEmpty ? "Rufnummer wählen" : line2Number)", selection: $mailbox2TAM) {
+                            Text("Nicht verwenden").tag(-1)
+                            ForEach(fritzTAMs) { tam in
+                                Text(tam.displayName).tag(tam.index)
+                            }
                         }
                     }
-                    Text("Die Auswahl wird später für den automatischen Home-Assistant-Mailboxabruf verwendet.")
+                    if sipLine3Enabled {
+                        Picker("\(line3Label) · \(line3Number.isEmpty ? "Rufnummer wählen" : line3Number)", selection: $mailbox3TAM) {
+                            Text("Nicht verwenden").tag(-1)
+                            ForEach(fritzTAMs) { tam in
+                                Text(tam.displayName).tag(tam.index)
+                            }
+                        }
+                    }
+                    Text("Hier wird erst nach der Rufnummernauswahl festgelegt, welcher FRITZ!Box-Anrufbeantworter zu welcher CallWebhook-Leitung gehört.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -627,12 +638,12 @@ private struct SetupWizardView: View {
     }
 
     private var mailboxSelectionVerified: Bool {
-        if fritzTAMs.isEmpty {
-            return mailbox1TAM < 0 && mailbox2TAM < 0
-        }
-        let first = mailbox1TAM < 0 || fritzTAMs.contains { $0.index == mailbox1TAM }
-        let second = mailbox2TAM < 0 || fritzTAMs.contains { $0.index == mailbox2TAM }
-        return first && second
+        guard !fritzTAMs.isEmpty else { return false }
+        let first = mailbox1TAM >= 0 && fritzTAMs.contains { $0.index == mailbox1TAM }
+        let second = !sipLine2Enabled || (mailbox2TAM >= 0 && fritzTAMs.contains { $0.index == mailbox2TAM })
+        let third = !sipLine3Enabled || (mailbox3TAM >= 0 && fritzTAMs.contains { $0.index == mailbox3TAM })
+        let selected = [mailbox1TAM, sipLine2Enabled ? mailbox2TAM : -1, sipLine3Enabled ? mailbox3TAM : -1].filter { $0 >= 0 }
+        return first && second && third && Set(selected).count == selected.count
     }
 
     private var verification: some View {
@@ -662,8 +673,9 @@ private struct SetupWizardView: View {
     private var mailboxSummary: String {
         if fritzTAMs.isEmpty { return "Keine FRITZ!-Mailbox erkannt" }
         var names: [String] = []
-        if let tam = fritzTAMs.first(where: { $0.index == mailbox1TAM }) { names.append("Mailbox 1: \(tam.displayName)") }
-        if let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("Mailbox 2: \(tam.displayName)") }
+        if let tam = fritzTAMs.first(where: { $0.index == mailbox1TAM }) { names.append("\(line1Label): \(tam.displayName)") }
+        if let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("\(line2Label): \(tam.displayName)") }
+        if let tam = fritzTAMs.first(where: { $0.index == mailbox3TAM }) { names.append("\(line3Label): \(tam.displayName)") }
         return names.isEmpty ? "Nicht verwendet" : names.joined(separator: " · ")
     }
 
@@ -706,7 +718,8 @@ private struct SetupWizardView: View {
             "addon": "b35499aa_asterisk",
             "custom_path": "/addon_configs/b35499aa_asterisk/asterisk/custom",
             "mailbox_tam_1": mailbox1TAM,
-            "mailbox_tam_2": mailbox2TAM
+            "mailbox_tam_2": mailbox2TAM,
+            "mailbox_tam_3": mailbox3TAM
         ]
 
         do {
@@ -1926,6 +1939,7 @@ private struct SetupWizardView: View {
         defaults.set(line3Number, forKey: "sipLine3Number")
         defaults.set(mailbox1TAM, forKey: "setupMailbox1TAM")
         defaults.set(mailbox2TAM, forKey: "setupMailbox2TAM")
+        defaults.set(mailbox3TAM, forKey: "setupMailbox3TAM")
         // Passwords are intentionally not persisted in UserDefaults.
     }
 }

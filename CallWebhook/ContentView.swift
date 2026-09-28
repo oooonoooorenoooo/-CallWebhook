@@ -2067,7 +2067,7 @@ private struct SetupWizardView: View {
             components?.queryItems = [URLQueryItem(name: "app", value: slug)]
             if let url = components?.url {
                 callWebhookHAStatus = "CallWebhook Bootstrap gefunden – öffne App-Seite …"
-                UIApplication.shared.open(url)
+                await UIApplication.shared.open(url)
                 Task { await waitForCallWebhookAfterRestart() }
             }
         } catch {

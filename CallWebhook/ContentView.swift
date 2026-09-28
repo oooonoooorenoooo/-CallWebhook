@@ -351,12 +351,11 @@ private struct SetupWizardView: View {
                 .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(homeAssistantReachable ? .green : .secondary)
-                Label(callWebhookHAStatus, systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
-                    .foregroundStyle(callWebhookHAReady ? .green : .orange)
                 Button {
                     Task { await authenticateHomeAssistant() }
                 } label: {
                     Label(isAuthenticatingHA ? "Home Assistant öffnet …" : (haAuthenticated ? "Home Assistant verbunden" : "Mit Home Assistant verbinden"), systemImage: haAuthenticated ? "checkmark.shield.fill" : "person.badge.key.fill")
+                        .foregroundStyle(haAuthenticated ? .green : .blue)
                 }
                 .disabled(isAuthenticatingHA || !homeAssistantReachable)
                 if haAuthenticated {
@@ -367,7 +366,7 @@ private struct SetupWizardView: View {
                     Button {
                         openCallWebhookBootstrap()
                     } label: {
-                        Label("CallWebhook-Bootstrap in HA installieren", systemImage: "shippingbox.and.arrow.backward")
+                        Label("CallWebhook-Bootstrap zu HA hinzufügen", systemImage: "shippingbox.and.arrow.backward")
                     }
                     Button {
                         Task { await checkHomeAssistant() }
@@ -376,6 +375,8 @@ private struct SetupWizardView: View {
                     }
                     .disabled(isChecking)
                 }
+                Label(callWebhookHAStatus, systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
+                    .foregroundStyle(callWebhookHAReady ? .green : .orange)
                 Button {
                     prepareAsteriskConfiguration()
                 } label: {
@@ -1011,7 +1012,7 @@ private struct SetupWizardView: View {
         sipClient2Plan = "Noch nicht geprüft"
         sipClient3Index = nil
         sipClient3Plan = "Noch nicht geprüft"
-        fritzStatus = "Prüfung fehlgeschlagen"
+        fritzStatus = "Prüfe FRITZ!Box …"
 
         let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawHost.isEmpty else {
@@ -1633,9 +1634,12 @@ private struct SetupWizardView: View {
 
     @MainActor
     private func openCallWebhookBootstrap() {
-        UIPasteboard.general.string = "https://github.com/oooonoooorenoooo/-CallWebhook"
-        callWebhookHAStatus = "Repository-Adresse kopiert. In Home Assistant: Apps → App Store → ⋯ → Repositories → Einfügen. Danach „CallWebhook Bootstrap“ installieren und starten."
-        if let url = URL(string: "https://my.home-assistant.io/redirect/supervisor_store/") {
+        let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
+        UIPasteboard.general.string = repository
+        callWebhookHAStatus = "CallWebhook-Repository in Home Assistant hinzufügen. Danach „CallWebhook Bootstrap“ installieren und starten."
+        var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
+        components?.queryItems = [URLQueryItem(name: "repository_url", value: repository)]
+        if let url = components?.url {
             UIApplication.shared.open(url)
         }
     }

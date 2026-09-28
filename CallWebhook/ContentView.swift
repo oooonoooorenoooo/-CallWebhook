@@ -1955,7 +1955,7 @@ private struct SetupWizardView: View {
         let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
         var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_app/")
         components?.queryItems = [
-            URLQueryItem(name: "app", value: "ff04a358_callwebhook_bootstrap"),
+            URLQueryItem(name: "app", value: "callwebhook_bootstrap"),
             URLQueryItem(name: "repository_url", value: repository)
         ]
         if let url = components?.url {

@@ -562,6 +562,21 @@ def ensure_asterisk_addon():
         )
         if repo.status_code not in (200, 201, 400, 409):
             raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
+        # A newly added custom repository is indexed asynchronously by Supervisor.
+        # Wait until the Asterisk app is visible in the store before installing it.
+        store_info = None
+        for _ in range(30):
+            store_info = requests.get(
+                f"http://{host}/store/addons/{ASTERISK_ADDON}",
+                headers=headers,
+                timeout=30,
+            )
+            if store_info.status_code < 300:
+                break
+            time.sleep(2)
+        if store_info is None or store_info.status_code >= 300:
+            detail = "" if store_info is None else f"HTTP {store_info.status_code} – {store_info.text}"
+            raise RuntimeError(f"Asterisk-Repository wurde hinzugefügt, aber Asterisk ist noch nicht im Store verfügbar: {detail}")
         install = requests.post(
             f"http://{host}/store/addons/{ASTERISK_ADDON}/install",
             headers=headers,

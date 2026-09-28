@@ -364,12 +364,28 @@ private struct SetupWizardView: View {
                     Label(isInstallingAsterisk ? "Installiere …" : "Asterisk automatisch installieren", systemImage: "arrow.down.to.line.compact")
                 }
                 .disabled(!asteriskConfigReady || !callWebhookHAReady || isInstallingAsterisk || setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Label("Die eigentliche Anmeldung wird über den Home-Assistant-OAuth-Flow erfolgen.", systemImage: "lock.shield")
+                Label("Der Home-Assistant-Token wird ausschließlich sicher im iOS-Keychain gespeichert.", systemImage: "lock.shield")
+                    .foregroundStyle(.secondary)
             }
             Section("Automatisch einzurichten") {
-                Label("CallWebhook-Integration", systemImage: "checkmark.circle")
-                Label("Asterisk-Konfiguration", systemImage: "checkmark.circle")
-                Label("Mailbox/TAM-Zuordnung", systemImage: "checkmark.circle")
+                Label(
+                    callWebhookHAReady ? "CallWebhook-Integration bereit" : "CallWebhook-Integration ausstehend",
+                    systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "circle.dashed"
+                )
+                .foregroundStyle(callWebhookHAReady ? .green : .secondary)
+
+                Label(
+                    asteriskInstalled ? "Asterisk und iPhone-SIP bereit" : (asteriskConfigReady ? "Asterisk vorbereitet" : "Asterisk ausstehend"),
+                    systemImage: asteriskInstalled ? "checkmark.circle.fill" : "circle.dashed"
+                )
+                .foregroundStyle(asteriskInstalled ? .green : .secondary)
+
+                let mailboxReady = mailbox1TAM >= 0 || mailbox2TAM >= 0
+                Label(
+                    mailboxReady ? "Mailbox/TAM-Zuordnung erkannt" : "Mailbox/TAM-Zuordnung ausstehend",
+                    systemImage: mailboxReady ? "checkmark.circle.fill" : "circle.dashed"
+                )
+                .foregroundStyle(mailboxReady ? .green : .secondary)
             }
         }
     }

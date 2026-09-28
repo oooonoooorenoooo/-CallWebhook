@@ -172,6 +172,7 @@ private struct SetupWizardView: View {
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
     @State private var isBootstrappingHA = false
+    @State private var isWaitingForHARestart = false
     @State private var haAuthenticated = false
     @State private var isChecking = false
     @State private var easybellUsername = ""
@@ -425,9 +426,11 @@ private struct SetupWizardView: View {
                     }
                     Button {
                         openCallWebhookBootstrapApp()
+                        Task { await waitForCallWebhookAfterRestart() }
                     } label: {
-                        Label("CallWebhook Bootstrap öffnen", systemImage: "arrow.up.forward.app")
+                        Label(isWaitingForHARestart ? "Warte auf Home Assistant …" : "CallWebhook Bootstrap öffnen", systemImage: isWaitingForHARestart ? "arrow.trianglehead.2.clockwise.rotate.90" : "arrow.up.forward.app")
                     }
+                    .disabled(isWaitingForHARestart)
                     Button {
                         Task { await checkHomeAssistant() }
                     } label: {
@@ -1775,6 +1778,42 @@ private struct SetupWizardView: View {
             haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
         }
+    }
+
+    @MainActor
+    private func waitForCallWebhookAfterRestart() async {
+        guard !isWaitingForHARestart else { return }
+        isWaitingForHARestart = true
+        defer { isWaitingForHARestart = false }
+        callWebhookHAStatus = "Warte auf Bootstrap und Home-Assistant-Neustart …"
+
+        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty, let base = URL(string: "http://192.168.178.\(input):8123") else {
+            callWebhookHAStatus = "Home-Assistant-Adresse ist ungültig"
+            return
+        }
+
+        for _ in 0..<120 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            do {
+                var request = URLRequest(url: base.appendingPathComponent("manifest.json"))
+                request.timeoutInterval = 2
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { continue }
+                homeAssistantReachable = true
+                homeAssistantStatus = "Home Assistant erreichbar"
+                await checkCallWebhookHAIntegration(base: base)
+                if callWebhookHAReady {
+                    callWebhookHAStatus = "CallWebhook-HA-Integration bereit – Einrichtung wird fortgesetzt"
+                    if step == 2 { step = 3 }
+                    return
+                }
+            } catch {
+                continue
+            }
+        }
+        callWebhookHAStatus = "Home Assistant ist noch nicht bereit – bitte Installation prüfen"
     }
 
     @MainActor

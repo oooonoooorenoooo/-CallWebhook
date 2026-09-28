@@ -413,7 +413,12 @@ private struct SetupWizardView: View {
                     Button {
                         openCallWebhookBootstrap()
                     } label: {
-                        Label("CallWebhook-Bootstrap zu HA hinzufügen", systemImage: "shippingbox.and.arrow.backward")
+                        Label("CallWebhook-Repository zu HA hinzufügen", systemImage: "shippingbox.and.arrow.backward")
+                    }
+                    Button {
+                        openCallWebhookBootstrapApp()
+                    } label: {
+                        Label("CallWebhook Bootstrap öffnen", systemImage: "arrow.up.forward.app")
                     }
                     Button {
                         Task { await checkHomeAssistant() }
@@ -1761,6 +1766,19 @@ private struct SetupWizardView: View {
         } catch {
             haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func openCallWebhookBootstrapApp() {
+        let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
+        var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_app/")
+        components?.queryItems = [
+            URLQueryItem(name: "app", value: "ff04a358_callwebhook_bootstrap"),
+            URLQueryItem(name: "repository_url", value: repository)
+        ]
+        if let url = components?.url {
+            UIApplication.shared.open(url)
         }
     }
 

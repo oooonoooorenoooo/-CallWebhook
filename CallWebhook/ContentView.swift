@@ -1172,7 +1172,6 @@ private struct SetupWizardView: View {
                 if line3Number.isEmpty, let first = fritzVoIPNumbers.first { line3Number = first }
 
                 var clients: [FritzSIPClient] = []
-                var consecutiveMisses = 0
                 for index in 0..<20 {
                     do {
                         let clientResponse = try await soapCall(
@@ -1195,9 +1194,7 @@ private struct SetupWizardView: View {
                                 outgoingNumber: outgoing,
                                 internalNumber: internalNumber
                             ))
-                            consecutiveMisses = 0
                         } else {
-                            consecutiveMisses += 1
                         }
                     } catch {
                         do {
@@ -1221,15 +1218,11 @@ private struct SetupWizardView: View {
                                     outgoingNumber: outgoing,
                                     internalNumber: internalNumber
                                 ))
-                                consecutiveMisses = 0
                             } else {
-                                consecutiveMisses += 1
                             }
                         } catch {
-                            consecutiveMisses += 1
                         }
                     }
-                    if consecutiveMisses >= 4 && index >= 5 { break }
                 }
                 fritzSIPClients = clients
                 var reserved = Set(clients.map(\.index))

@@ -35,10 +35,9 @@ def get_configured_tams():
     if SETUP_FILE.exists():
         try:
             data = json.loads(SETUP_FILE.read_text(encoding="utf-8"))
-            values = data.get("tams", [])
-            tams = tuple(str(value) for value in values if str(value).isdigit() and int(value) >= 0)
-            if tams:
-                return tams
+            if "tams" in data:
+                values = data.get("tams", [])
+                return tuple(str(value) for value in values if str(value).isdigit() and int(value) >= 0)
         except Exception as error:
             print(f"CallWebhook Setup konnte nicht gelesen werden: {error}")
     return DEFAULT_TAMS

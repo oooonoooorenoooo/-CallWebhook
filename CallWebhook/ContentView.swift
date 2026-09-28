@@ -357,9 +357,13 @@ private struct SetupWizardView: View {
                         Button {
                             Task { await provisionMissingSIPClients() }
                         } label: {
-                            Label(isProvisioningSIP ? "Provisioniere …" : "SIP-Nebenstellen einrichten", systemImage: "gearshape.2.fill")
+                            Label(
+                                isProvisioningSIP ? "Provisioniere …" : (fritzSIPProvisioned ? "SIP-Nebenstellen eingerichtet" : "SIP-Nebenstellen einrichten"),
+                                systemImage: fritzSIPProvisioned ? "checkmark.circle.fill" : "gearshape.2.fill"
+                            )
+                            .foregroundStyle(fritzSIPProvisioned ? .green : .blue)
                         }
-                        .disabled(isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil || (sipLine3Enabled && sipClient3Index == nil))
+                        .disabled(fritzSIPProvisioned || isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil || (sipLine3Enabled && sipClient3Index == nil))
                         Text(sipProvisionStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -622,6 +626,13 @@ private struct SetupWizardView: View {
             setupCheck("Mailboxen", detail: mailboxSummary, ready: mailboxSelectionVerified)
             setupCheck("Asterisk + iPhone-SIP", detail: asteriskConfigStatus, ready: asteriskInstalled && setupSIP.registered)
         }
+    }
+
+    private var fritzSIPProvisioned: Bool {
+        let first = fritzSIPClients.contains { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }
+        let second = fritzSIPClients.contains { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
+        let third = !sipLine3Enabled || fritzSIPClients.contains { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }
+        return first && second && third
     }
 
     private var mailboxSummary: String {

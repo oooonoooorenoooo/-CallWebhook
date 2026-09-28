@@ -472,10 +472,16 @@ private struct SetupWizardView: View {
                 }
             }
 
-            Section {
-                Toggle("easybell für Mobilrufnummern verwenden", isOn: $easybellEnabled)
+            Section("easybell (optional)") {
+                Toggle("easybell für Leitung 1 und 2 verwenden", isOn: $easybellEnabled)
                 if easybellEnabled {
-                    Text("Leitung 1 und 2 können später über denselben easybell-Trunk mit unterschiedlichen CLIP-no-screening-Rufnummern geführt werden.")
+                    TextField("SIP-Benutzername", text: $easybellUsername)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("SIP-Passwort", text: $easybellPassword)
+                    TextField("Contact User / Stammrufnummer", text: $easybellContactUser)
+                        .keyboardType(.phonePad)
+                    Text("Registrar: voip.easybell.de. Das SIP-Kennwort wird ausschließlich sicher im iOS-Keychain gespeichert.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

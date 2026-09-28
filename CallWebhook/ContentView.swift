@@ -172,7 +172,7 @@ private struct SetupWizardView: View {
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
     @State private var asteriskProgressStep = 0
-    private let asteriskProgressTotal = 5
+    private let asteriskProgressTotal = 7
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
     @State private var isBootstrappingHA = false
@@ -448,23 +448,29 @@ private struct SetupWizardView: View {
                     systemImage: asteriskInstalled ? "checkmark.circle.fill" : (asteriskInstallFailed ? "xmark.circle.fill" : "arrow.trianglehead.2.clockwise.rotate.90")
                 )
                 .foregroundStyle(asteriskInstalled ? .green : (asteriskInstallFailed ? .red : .secondary))
-                HStack(spacing: 12) {
+                HStack(spacing: 14) {
                     ZStack {
                         ForEach(0..<asteriskProgressTotal, id: \.self) { index in
                             Circle()
-                                .trim(from: CGFloat(index) / CGFloat(asteriskProgressTotal) + 0.012,
-                                      to: CGFloat(index + 1) / CGFloat(asteriskProgressTotal) - 0.012)
-                                .stroke(index < asteriskProgressStep ? Color.green : Color.secondary.opacity(0.25),
-                                        style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                .trim(from: CGFloat(index) / CGFloat(asteriskProgressTotal) + 0.010,
+                                      to: CGFloat(index + 1) / CGFloat(asteriskProgressTotal) - 0.010)
+                                .stroke(index < asteriskProgressStep ? Color.green : Color.secondary.opacity(0.22),
+                                        style: StrokeStyle(lineWidth: 6, lineCap: .round))
                                 .rotationEffect(.degrees(-90))
                         }
+                        if asteriskInstalled {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.green)
+                        } else if asteriskInstallFailed {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.red)
+                        }
                     }
-                    .frame(width: 30, height: 30)
-                    Label(
-                        asteriskConfigStatus,
-                        systemImage: asteriskInstallFailed ? "xmark.circle.fill" : (asteriskInstalled ? "checkmark.circle.fill" : "circle.dashed")
-                    )
-                    .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
+                    .frame(width: 44, height: 44)
+                    Text(asteriskConfigStatus)
+                        .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
                 }
                 if asteriskInstallFailed {
                     Button {
@@ -762,7 +768,7 @@ private struct SetupWizardView: View {
             }
             var configVerified = false
             for _ in 0..<180 {
-                try await Task.sleep(nanoseconds: 500_000_000)
+                try await Task.sleep(nanoseconds: 200_000_000)
                 var statusRequest = URLRequest(url: statusURL)
                 statusRequest.timeoutInterval = 8
                 statusRequest.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")

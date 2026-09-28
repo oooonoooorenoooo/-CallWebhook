@@ -354,6 +354,11 @@ private struct SetupWizardView: View {
                             Text("callwhapp3: \(sipClient3Plan)")
                                 .font(.caption)
                         }
+                        if !fritzSIPProvisioned {
+                            Label("Beim Anlegen der SIP-Nebenstellen kann die FRITZ!Box eine Sicherheitsbestätigung verlangen. CallWebhook fordert dich dann auf, eine Taste direkt an der FRITZ!Box zu drücken, und setzt die Einrichtung danach automatisch fort.", systemImage: "hand.tap")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Button {
                             Task { await provisionMissingSIPClients() }
                         } label: {
@@ -410,6 +415,9 @@ private struct SetupWizardView: View {
                         .foregroundStyle(.green)
                 }
                 if haAuthenticated && !callWebhookHAReady {
+                    Label("Einmalige Einrichtung: Repository hinzufügen → „CallWebhook Bootstrap“ öffnen → Installieren → Starten. Der Bootstrap installiert das CallWebhook-Backend und startet Home Assistant anschließend automatisch neu. Danach zu CallWebhook zurückkehren und die Bootstrap-Installation prüfen.", systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Button {
                         openCallWebhookBootstrap()
                     } label: {

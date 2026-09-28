@@ -1713,7 +1713,22 @@ private struct SetupWizardView: View {
             homeAssistantStatus = "Home Assistant erreichbar"
             await checkCallWebhookHAIntegration(base: base)
         } catch {
-            homeAssistantStatus = "Nicht erreichbar: \(error.localizedDescription)"
+            homeAssistantStatus = "Lokalen Netzwerkzugriff bestätigen – prüfe automatisch erneut …"
+            for _ in 0..<5 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                do {
+                    let (_, retryResponse) = try await URLSession.shared.data(for: request)
+                    if let retryHTTP = retryResponse as? HTTPURLResponse, (200..<400).contains(retryHTTP.statusCode) {
+                        homeAssistantReachable = true
+                        homeAssistantStatus = "Home Assistant erreichbar"
+                        await checkCallWebhookHAIntegration(base: base)
+                        return
+                    }
+                } catch {
+                    continue
+                }
+            }
+            homeAssistantStatus = "Home Assistant nicht erreichbar – lokalen Netzwerkzugriff prüfen"
         }
     }
 

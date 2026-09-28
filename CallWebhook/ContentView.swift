@@ -1230,7 +1230,29 @@ private struct SetupWizardView: View {
                 }
             }
 
-            sipProvisionStatus = "CallWebhook-SIP-Nebenstellen bereit und Zugangsdaten sicher synchronisiert – FRITZ-Prüfung erneut ausführen"
+            await checkFritzBox()
+
+            let verified1 = fritzSIPClients.first {
+                ($0.username == "callwhapp1" || $0.phoneName == "callwhapp1")
+                    && (line1Number.isEmpty || $0.outgoingNumber == line1Number)
+            }
+            let expected2 = line2Number.isEmpty ? line1Number : line2Number
+            let verified2 = fritzSIPClients.first {
+                ($0.username == "callwhapp2" || $0.phoneName == "callwhapp2")
+                    && (expected2.isEmpty || $0.outgoingNumber == expected2)
+            }
+            let verified3 = !sipLine3Enabled || fritzSIPClients.contains {
+                ($0.username == "callwhapp3" || $0.phoneName == "callwhapp3")
+                    && (line3Number.isEmpty || $0.outgoingNumber == line3Number)
+            }
+
+            guard verified1 != nil, verified2 != nil, verified3 else {
+                sipProvisionStatus = "FRITZ-SIP wurde geschrieben, aber die Leitungszuordnung konnte nicht vollständig verifiziert werden"
+                return
+            }
+            sipProvisionStatus = sipLine3Enabled
+                ? "FRITZ-SIP verifiziert: callwhapp1, callwhapp2 und callwhapp3 mit korrekter Leitungszuordnung"
+                : "FRITZ-SIP verifiziert: callwhapp1 und callwhapp2 mit korrekter Leitungszuordnung"
         } catch {
             sipProvisionStatus = "Provisionierung abgebrochen: \(error.localizedDescription)"
         }

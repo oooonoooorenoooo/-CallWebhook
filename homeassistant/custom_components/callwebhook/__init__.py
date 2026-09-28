@@ -33,11 +33,24 @@ requested_dir = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
 _refresh_lock = asyncio.Lock()
 _asterisk_setup_state = {"state": "idle", "message": "Noch nicht gestartet", "result": None}
 
+async def _notify_asterisk_setup(hass, title, message):
+    try:
+        await hass.services.async_call(
+            "notify",
+            "mobile_app_iphone_von_reno",
+            {"title": title, "message": message},
+            blocking=False,
+        )
+    except Exception as error:
+        print(f"CallWebhook Diagnose-Push fehlgeschlagen: {error}")
+
 async def _run_asterisk_setup(hass, payload):
     global _asterisk_setup_state
     try:
         _asterisk_setup_state = {"state": "running", "message": "Asterisk-Repository und Store werden geprüft …", "result": None}
+        await _notify_asterisk_setup(hass, "CallWebhook", "Asterisk-Installation wird jetzt über Home Assistant gestartet.")
         actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
+        await _notify_asterisk_setup(hass, "CallWebhook", f"Asterisk ist installiert und gestartet ({actual_addon}).")
         _asterisk_setup_state["message"] = "Asterisk installiert – Konfiguration wird geschrieben …"
         actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
         files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), payload.get("extensions"), actual_addon, actual_path)
@@ -49,6 +62,7 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "result": result}
     except Exception as error:
         _asterisk_setup_state = {"state": "error", "message": str(error), "result": None}
+        await _notify_asterisk_setup(hass, "CallWebhook", f"Asterisk-Installation fehlgeschlagen: {error}")
 
 
 

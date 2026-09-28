@@ -170,6 +170,7 @@ private struct SetupWizardView: View {
     @State private var isInstallingAsterisk = false
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
+    @State private var isBootstrappingHA = false
     @State private var haAuthenticated = false
     @State private var isChecking = false
     @State private var easybellUsername = ""
@@ -361,6 +362,14 @@ private struct SetupWizardView: View {
                 if haAuthenticated {
                     Label("Autorisierung erfolgreich", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
+                }
+                if haAuthenticated && !callWebhookHAReady {
+                    Button {
+                        Task { await bootstrapCallWebhookBackend() }
+                    } label: {
+                        Label(isBootstrappingHA ? "Bootstrap läuft …" : "CallWebhook automatisch installieren", systemImage: "shippingbox.and.arrow.backward")
+                    }
+                    .disabled(isBootstrappingHA)
                 }
                 Button {
                     prepareAsteriskConfiguration()
@@ -1601,6 +1610,77 @@ private struct SetupWizardView: View {
         } catch {
             haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func bootstrapCallWebhookBackend() async {
+        guard !isBootstrappingHA else { return }
+        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.contains("://") { raw = "http://" + raw }
+        guard let base = URL(string: raw),
+              var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
+            callWebhookHAStatus = "Home Assistant muss zuerst autorisiert werden"
+            return
+        }
+        isBootstrappingHA = true
+        defer { isBootstrappingHA = false }
+        callWebhookHAStatus = "Installiere CallWebhook-Bootstrap …"
+
+        func supervisorRequest(_ path: String, method: String = "POST", body: [String: Any]? = nil) async throws -> (Data, HTTPURLResponse) {
+            guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw URLError(.badURL) }
+            var request = URLRequest(url: url)
+            request.httpMethod = method
+            request.timeoutInterval = 30
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if let body {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            }
+            var (data, response) = try await URLSession.shared.data(for: request)
+            var http = response as? HTTPURLResponse
+            if http?.statusCode == 401 {
+                token = try await HomeAssistantAuth.shared.refresh(instance: base)
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                (data, response) = try await URLSession.shared.data(for: request)
+                http = response as? HTTPURLResponse
+            }
+            guard let http else { throw URLError(.badServerResponse) }
+            return (data, http)
+        }
+
+        do {
+            let repoURL = "https://github.com/oooonoooorenoooo/-CallWebhook"
+            let (_, repoResponse) = try await supervisorRequest("/api/hassio/store/repositories", body: ["repository": repoURL])
+            guard (200..<300).contains(repoResponse.statusCode) || repoResponse.statusCode == 400 else {
+                callWebhookHAStatus = "Bootstrap-Repository konnte nicht hinzugefügt werden (HTTP \(repoResponse.statusCode))"
+                return
+            }
+
+            let (_, installResponse) = try await supervisorRequest("/api/hassio/addons/callwebhook_bootstrap/install")
+            guard (200..<300).contains(installResponse.statusCode) || installResponse.statusCode == 400 else {
+                callWebhookHAStatus = "Bootstrap-Add-on konnte nicht installiert werden (HTTP \(installResponse.statusCode))"
+                return
+            }
+
+            let (_, startResponse) = try await supervisorRequest("/api/hassio/addons/callwebhook_bootstrap/start")
+            guard (200..<300).contains(startResponse.statusCode) else {
+                callWebhookHAStatus = "Bootstrap-Add-on konnte nicht gestartet werden (HTTP \(startResponse.statusCode))"
+                return
+            }
+
+            callWebhookHAStatus = "Home Assistant startet neu – warte auf CallWebhook …"
+            for _ in 0..<30 {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                await checkCallWebhookHAIntegration(base: base)
+                if callWebhookHAReady {
+                    callWebhookHAStatus = "CallWebhook automatisch installiert und bereit"
+                    return
+                }
+            }
+            callWebhookHAStatus = "Bootstrap gestartet, CallWebhook ist nach dem Neustart noch nicht bereit"
+        } catch {
+            callWebhookHAStatus = "Bootstrap fehlgeschlagen: \(error.localizedDescription)"
         }
     }
 

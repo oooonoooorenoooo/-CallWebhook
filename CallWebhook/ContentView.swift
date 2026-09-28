@@ -499,24 +499,44 @@ private struct SetupWizardView: View {
         }
     }
 
+    private var fritzSIPVerified: Bool {
+        let expected2 = line2Number.isEmpty ? line1Number : line2Number
+        let first = fritzSIPClients.contains {
+            ($0.username == "callwhapp1" || $0.phoneName == "callwhapp1")
+                && (line1Number.isEmpty || $0.outgoingNumber == line1Number)
+        }
+        let second = fritzSIPClients.contains {
+            ($0.username == "callwhapp2" || $0.phoneName == "callwhapp2")
+                && (expected2.isEmpty || $0.outgoingNumber == expected2)
+        }
+        let third = !sipLine3Enabled || fritzSIPClients.contains {
+            ($0.username == "callwhapp3" || $0.phoneName == "callwhapp3")
+                && (line3Number.isEmpty || $0.outgoingNumber == line3Number)
+        }
+        return first && second && third
+    }
+
+    private var mailboxSelectionVerified: Bool {
+        guard !fritzTAMs.isEmpty else { return false }
+        let first = mailbox1TAM < 0 || fritzTAMs.contains { $0.index == mailbox1TAM }
+        let second = mailbox2TAM < 0 || fritzTAMs.contains { $0.index == mailbox2TAM }
+        return (mailbox1TAM >= 0 || mailbox2TAM >= 0) && first && second
+    }
+
     private var verification: some View {
         List {
-            setupCheck("FRITZ!Box", detail: fritzStatus, ready: fritzReachable)
-            setupCheck("Home Assistant", detail: homeAssistantStatus, ready: homeAssistantReachable)
+            setupCheck("FRITZ!Box", detail: fritzStatus, ready: fritzReachable && fritzAuthenticated && fritzVoIPAvailable)
+            setupCheck("Home Assistant", detail: callWebhookHAStatus, ready: homeAssistantReachable && haAuthenticated && callWebhookHAReady)
             setupCheck("Leitung 1", detail: "\(line1Label) – \(line1Number)", ready: !line1Number.isEmpty)
             setupCheck("Leitung 2", detail: sipLine2Enabled ? "\(line2Label) – \(line2Number)" : "Deaktiviert", ready: !sipLine2Enabled || !line2Number.isEmpty)
             setupCheck("Leitung 3", detail: sipLine3Enabled ? "\(line3Label) – \(line3Number)" : "Deaktiviert", ready: !sipLine3Enabled || !line3Number.isEmpty)
             setupCheck(
                 "FRITZ-SIP-Nebenstellen",
-                detail: fritzSIPClients.isEmpty ? "Keine vorhandene SIP-Nebenstelle erkannt" : fritzSIPClients.map(\.displayName).joined(separator: " · "),
-                ready: fritzAuthenticated
+                detail: fritzSIPClients.isEmpty ? "Keine CallWebhook-SIP-Nebenstellen verifiziert" : fritzSIPClients.map(\.displayName).joined(separator: " · "),
+                ready: fritzSIPVerified
             )
-            setupCheck(
-                "Mailboxen",
-                detail: mailboxSummary,
-                ready: fritzTAMs.isEmpty || mailbox1TAM >= 0 || mailbox2TAM >= 0
-            )
-            setupCheck("Asterisk", detail: asteriskConfigStatus, ready: asteriskInstalled)
+            setupCheck("Mailboxen", detail: mailboxSummary, ready: mailboxSelectionVerified)
+            setupCheck("Asterisk + iPhone-SIP", detail: asteriskConfigStatus, ready: asteriskInstalled && setupSIP.registered)
         }
     }
 
@@ -855,7 +875,17 @@ private struct SetupWizardView: View {
         case 2: return homeAssistantReachable
         case 3:
             return !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
-        case 4: return fritzReachable && homeAssistantReachable && asteriskInstalled
+        case 4:
+            return fritzReachable
+                && fritzAuthenticated
+                && fritzVoIPAvailable
+                && fritzSIPVerified
+                && homeAssistantReachable
+                && haAuthenticated
+                && callWebhookHAReady
+                && mailboxSelectionVerified
+                && asteriskInstalled
+                && setupSIP.registered
         default: return true
         }
     }

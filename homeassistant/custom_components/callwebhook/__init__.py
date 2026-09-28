@@ -31,6 +31,25 @@ ASTERISK_ADDON = "b35499aa_asterisk"
 requested_dir = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
 
 _refresh_lock = asyncio.Lock()
+_asterisk_setup_state = {"state": "idle", "message": "Noch nicht gestartet", "result": None}
+
+async def _run_asterisk_setup(hass, payload):
+    global _asterisk_setup_state
+    try:
+        _asterisk_setup_state = {"state": "running", "message": "Asterisk-Repository und Store werden geprüft …", "result": None}
+        actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
+        _asterisk_setup_state["message"] = "Asterisk installiert – Konfiguration wird geschrieben …"
+        actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
+        files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), payload.get("extensions"), actual_addon, actual_path)
+        configured_tams = await hass.async_add_executor_job(save_setup, payload.get("mailbox_tam_1"), payload.get("mailbox_tam_2"), payload.get("mailbox_tam_3"))
+        _asterisk_setup_state["message"] = "Asterisk-Konfiguration geschrieben – Neustart läuft …"
+        await hass.services.async_call("hassio", "addon_restart", {"addon": actual_addon}, blocking=True)
+        await hass.async_add_executor_job(ensure_asterisk_addon)
+        result = {"addon": actual_addon, "files": files, "config_verified": all(Path(path).exists() for path in files), "mailbox_tams": configured_tams}
+        _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "result": result}
+    except Exception as error:
+        _asterisk_setup_state = {"state": "error", "message": str(error), "result": None}
+
 
 
 def get_configured_tams():
@@ -700,48 +719,28 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
     requires_auth = True
 
     async def post(self, request):
+        global _asterisk_setup_state
         hass = request.app["hass"]
         try:
             payload = await request.json()
         except Exception:
             return self.json({"ok": False, "error": "Ungültiges JSON"}, status_code=400)
+        if _asterisk_setup_state.get("state") == "running":
+            return self.json({"ok": True, "state": "running"}, status_code=202)
+        _asterisk_setup_state = {"state": "running", "message": "Asterisk-Einrichtung wird gestartet …", "result": None}
+        hass.async_create_task(_run_asterisk_setup(hass, payload))
+        return self.json({"ok": True, "state": "started"}, status_code=202)
 
-        try:
-            actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
-            actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
-            files = await hass.async_add_executor_job(
-                install_asterisk_config,
-                payload.get("pjsip"),
-                payload.get("extensions"),
-                actual_addon,
-                actual_path,
-            )
-            configured_tams = await hass.async_add_executor_job(
-                save_setup,
-                payload.get("mailbox_tam_1"),
-                payload.get("mailbox_tam_2"),
-                payload.get("mailbox_tam_3"),
-            )
-            await hass.services.async_call(
-                "hassio",
-                "addon_restart",
-                {"addon": actual_addon},
-                blocking=True,
-            )
-            actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
-        except Exception as error:
-            return self.json({"ok": False, "error": str(error)}, status_code=500)
 
-        return self.json({
-            "ok": True,
-            "addon": actual_addon,
-            "files": files,
-            "config_verified": all(Path(path).exists() for path in files),
-            "mailbox_tams": configured_tams,
-            "mailbox_tam_1": payload.get("mailbox_tam_1"),
-            "mailbox_tam_2": payload.get("mailbox_tam_2"),
-            "mailbox_tam_3": payload.get("mailbox_tam_3"),
-        })
+class CallWebhookAsteriskSetupStatusView(HomeAssistantView):
+    url = "/api/callwebhook/setup/asterisk/status"
+    name = "api:callwebhook:setup:asterisk:status"
+    requires_auth = True
+
+    async def get(self, request):
+        state = dict(_asterisk_setup_state)
+        state["ok"] = state.get("state") != "error"
+        return self.json(state)
 
 
 class CallWebhookMailboxView(
@@ -948,6 +947,10 @@ async def async_setup(
 
     hass.http.register_view(
         CallWebhookAsteriskSetupView
+    )
+
+    hass.http.register_view(
+        CallWebhookAsteriskSetupStatusView
     )
 
     hass.http.register_view(

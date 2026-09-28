@@ -535,10 +535,12 @@ private struct SetupWizardView: View {
     }
 
     private var mailboxSelectionVerified: Bool {
-        guard !fritzTAMs.isEmpty else { return false }
+        if fritzTAMs.isEmpty {
+            return mailbox1TAM < 0 && mailbox2TAM < 0
+        }
         let first = mailbox1TAM < 0 || fritzTAMs.contains { $0.index == mailbox1TAM }
         let second = mailbox2TAM < 0 || fritzTAMs.contains { $0.index == mailbox2TAM }
-        return (mailbox1TAM >= 0 || mailbox2TAM >= 0) && first && second
+        return first && second
     }
 
     private var verification: some View {

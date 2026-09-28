@@ -3,6 +3,7 @@ from datetime import datetime
 import asyncio
 import json
 import os
+import secrets
 import time
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, parse_qs, quote
@@ -669,6 +670,18 @@ def ensure_asterisk_addon():
             raise RuntimeError(f"Supervisor hat die Asterisk-Installation nicht bestätigt (installed ist leer): {detail}")
 
     info_url = f"http://{host}/addons/{addon_slug}/info"
+
+    # TECH7Fox Asterisk requires ami_password before the app can start.
+    ami_password = secrets.token_urlsafe(32)
+    options = requests.post(
+        f"http://{host}/addons/{addon_slug}/options",
+        headers=headers,
+        json={"options": {"ami_password": ami_password}},
+        timeout=60,
+    )
+    if options.status_code not in (200, 201):
+        raise RuntimeError(f"Asterisk wurde installiert, aber die Pflichtkonfiguration konnte nicht gesetzt werden: HTTP {options.status_code} – {options.text}")
+
     start = requests.post(f"http://{host}/addons/{addon_slug}/start", headers=headers, json={}, timeout=120)
     if start.status_code not in (200, 201):
         raise RuntimeError(f"Asterisk {installed_version} ist installiert, konnte aber nicht gestartet werden: HTTP {start.status_code} – {start.text}")

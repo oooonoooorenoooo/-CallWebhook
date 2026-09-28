@@ -7,6 +7,7 @@ final class SIPService: ObservableObject {
 
     @Published private(set) var status = "SIP nicht verbunden"
     @Published private(set) var active = false
+    @Published private(set) var registered = false
 
     private var core: Core?
     private var iterateTimer: Timer?
@@ -33,6 +34,7 @@ final class SIPService: ObservableObject {
         iterateTimer?.invalidate()
         core?.stop()
         core = nil
+        registered = false
 
         let newCore = try Factory.Instance.createCore(configPath: "", factoryConfigPath: "", systemContext: nil)
         let auth = try Factory.Instance.createAuthInfo(
@@ -66,7 +68,9 @@ final class SIPService: ObservableObject {
         iterateTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in
             self?.core?.iterate()
             if let state = self?.core?.defaultAccount?.state {
-                self?.status = "SIP: \(String(describing: state))"
+                let stateText = String(describing: state)
+                self?.status = "SIP: \(stateText)"
+                self?.registered = stateText.lowercased().contains("ok")
             }
         }
     }

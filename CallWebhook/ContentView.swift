@@ -171,6 +171,8 @@ private struct SetupWizardView: View {
     @State private var asteriskInstalled = false
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
+    @State private var asteriskProgressStep = 0
+    private let asteriskProgressTotal = 5
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
     @State private var isBootstrappingHA = false
@@ -446,11 +448,24 @@ private struct SetupWizardView: View {
                     systemImage: asteriskInstalled ? "checkmark.circle.fill" : (asteriskInstallFailed ? "xmark.circle.fill" : "arrow.trianglehead.2.clockwise.rotate.90")
                 )
                 .foregroundStyle(asteriskInstalled ? .green : (asteriskInstallFailed ? .red : .secondary))
-                Label(
-                    asteriskConfigStatus,
-                    systemImage: asteriskInstallFailed ? "xmark.circle.fill" : (asteriskInstalled ? "checkmark.circle.fill" : "circle.dashed")
-                )
-                .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
+                HStack(spacing: 12) {
+                    ZStack {
+                        ForEach(0..<asteriskProgressTotal, id: \.self) { index in
+                            Circle()
+                                .trim(from: CGFloat(index) / CGFloat(asteriskProgressTotal) + 0.012,
+                                      to: CGFloat(index + 1) / CGFloat(asteriskProgressTotal) - 0.012)
+                                .stroke(index < asteriskProgressStep ? Color.green : Color.secondary.opacity(0.25),
+                                        style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                    }
+                    .frame(width: 30, height: 30)
+                    Label(
+                        asteriskConfigStatus,
+                        systemImage: asteriskInstallFailed ? "xmark.circle.fill" : (asteriskInstalled ? "checkmark.circle.fill" : "circle.dashed")
+                    )
+                    .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
+                }
                 if asteriskInstallFailed {
                     Button {
                         Task {
@@ -722,6 +737,7 @@ private struct SetupWizardView: View {
         ]
 
         do {
+            asteriskProgressStep = 0
             asteriskConfigStatus = "Installiere und konfiguriere Asterisk über Home Assistant …"
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             var (data, response) = try await URLSession.shared.data(for: request)
@@ -746,7 +762,7 @@ private struct SetupWizardView: View {
             }
             var configVerified = false
             for _ in 0..<180 {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
+                try await Task.sleep(nanoseconds: 500_000_000)
                 var statusRequest = URLRequest(url: statusURL)
                 statusRequest.timeoutInterval = 8
                 statusRequest.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
@@ -755,6 +771,7 @@ private struct SetupWizardView: View {
                     guard let statusHTTP = statusResponse as? HTTPURLResponse, (200..<300).contains(statusHTTP.statusCode),
                           let statusJSON = (try? JSONSerialization.jsonObject(with: statusData)) as? [String: Any] else { continue }
                     let state = statusJSON["state"] as? String ?? "running"
+                    asteriskProgressStep = min(statusJSON["progress_step"] as? Int ?? asteriskProgressStep, asteriskProgressTotal)
                     asteriskConfigStatus = statusJSON["message"] as? String ?? "Asterisk wird eingerichtet …"
                     if state == "error" {
                         asteriskInstalled = false
@@ -796,6 +813,7 @@ private struct SetupWizardView: View {
             for _ in 0..<15 {
                 if setupSIP.registered {
                     asteriskInstalled = true
+                    asteriskProgressStep = asteriskProgressTotal
                     asteriskConfigStatus = "Asterisk bereit – iPhone-SIP erfolgreich registriert"
                     break
                 }
@@ -2096,6 +2114,17 @@ private struct SetupWizardView: View {
         return response
     }
 
+    private func sendSetupPush(base: URL, token: String, message: String) async {
+        guard let url = URL(string: "/api/services/notify/mobile_app_iphone_von_reno", relativeTo: base)?.absoluteURL else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["title": "CallWebhook", "message": message])
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
     @MainActor
     private func installBootstrapAutomatically() async {
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2123,8 +2152,10 @@ private struct SetupWizardView: View {
             }
             guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap wurde im Supervisor-Store nicht gefunden"]) }
             callWebhookHAStatus = "CallWebhook Bootstrap wird installiert …"
+            await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap wird jetzt installiert.")
             _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)/install", data: ["background": false])
             callWebhookHAStatus = "CallWebhook Bootstrap wird gestartet …"
+            await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap ist installiert und wird jetzt ausgeführt.")
             _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
             callWebhookHAStatus = "Bootstrap gestartet – warte auf Home-Assistant-Neustart …"
             await waitForCallWebhookAfterRestart()

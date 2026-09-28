@@ -537,8 +537,8 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
 
     ASTERISK_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
     targets = {
-        ASTERISK_CUSTOM_DIR / "pjsip_callwebhook.conf": pjsip,
-        ASTERISK_CUSTOM_DIR / "extensions_callwebhook.conf": extensions,
+        ASTERISK_CUSTOM_DIR / "pjsip.conf": pjsip,
+        ASTERISK_CUSTOM_DIR / "extensions.conf": extensions,
     }
     backups = {}
     try:

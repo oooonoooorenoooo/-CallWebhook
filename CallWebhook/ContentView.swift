@@ -2011,7 +2011,8 @@ private struct SetupWizardView: View {
 
     private func resolveBootstrapSupervisorSlug(base: URL, token: String) async throws -> String {
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        components?.scheme = (components?.scheme == "https") ? "wss" : "ws"
+        let baseScheme = components?.scheme
+        components?.scheme = (baseScheme == "https") ? "wss" : "ws"
         components?.path = "/api/websocket"
         components?.query = nil
         guard let wsURL = components?.url else { throw URLError(.badURL) }

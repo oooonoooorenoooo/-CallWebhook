@@ -172,7 +172,8 @@ private struct SetupWizardView: View {
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
     @State private var bootstrapProgressStep = 0
-    private let bootstrapProgressTotal = 6
+    // Bootstrap uses seven observable phases so the segmented ring advances on every real setup milestone.
+    private let bootstrapProgressTotal = 7
     @State private var asteriskProgressStep = 0
     private let asteriskProgressTotal = 7
     @State private var setupHAToken = ""

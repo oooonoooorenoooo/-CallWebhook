@@ -550,6 +550,9 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
             temp = target.with_suffix(target.suffix + ".tmp")
             temp.write_text(content.rstrip() + "\n", encoding="utf-8")
             temp.replace(target)
+            written = target.read_text(encoding="utf-8")
+            if written != content.rstrip() + "\n":
+                raise RuntimeError(f"Asterisk-Konfiguration konnte nicht verifiziert werden: {target.name}")
     except Exception:
         for target, backup in backups.items():
             if backup.exists():
@@ -607,6 +610,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             "ok": True,
             "addon": ASTERISK_ADDON,
             "files": files,
+            "config_verified": all(Path(path).exists() for path in files),
             "mailbox_tam_1": payload.get("mailbox_tam_1"),
             "mailbox_tam_2": payload.get("mailbox_tam_2"),
         })

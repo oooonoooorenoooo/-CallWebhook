@@ -1,5 +1,5 @@
 name: Build signed IPA and TestFlight
-# Keep older runs from cancelling or replacing a newer TestFlight upload.
+# TestFlight retry after distribution certificate secret update
 
 on:
   workflow_dispatch:
@@ -61,11 +61,9 @@ jobs:
   testflight:
     needs: development
     runs-on: macos-26
-    # Do not cancel an in-progress TestFlight upload. The upload step below
-    # independently rejects stale commits by comparing against current main.
     concurrency:
       group: callwebhook-testflight-main
-      cancel-in-progress: false
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen

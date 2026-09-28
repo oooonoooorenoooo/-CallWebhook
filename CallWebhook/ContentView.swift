@@ -172,8 +172,7 @@ private struct SetupWizardView: View {
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
     @State private var bootstrapProgressStep = 0
-    // Bootstrap uses seven observable phases so the segmented ring advances on every real setup milestone.
-    private let bootstrapProgressTotal = 7
+    private let bootstrapProgressTotal = 5
     @State private var asteriskProgressStep = 0
     private let asteriskProgressTotal = 7
     @State private var setupHAToken = ""
@@ -431,12 +430,15 @@ private struct SetupWizardView: View {
                     } label: {
                         Label("CallWebhook Bootstrap automatisch einrichten", systemImage: "shippingbox.and.arrow.backward")
                     }
+                    .disabled(isBootstrappingHA || isWaitingForHARestart)
+                    Button("Notfall: Bootstrap-Repository öffnen") {
+                        openCallWebhookBootstrap()
+                    }
                     Button {
                         Task { await openResolvedCallWebhookBootstrapApp() }
                     } label: {
                         Label(isWaitingForHARestart ? "Warte auf Home Assistant …" : "CallWebhook Bootstrap direkt öffnen", systemImage: "arrow.up.forward.app")
                     }
-                    .disabled(isWaitingForHARestart)
                     Button {
                         Task { await checkHomeAssistant() }
                     } label: {
@@ -1940,22 +1942,13 @@ private struct SetupWizardView: View {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
             }
-            guard let bootstrapSlug = try? await resolveBootstrapSupervisorSlug(base: base, token: token),
-                  let bootstrapResponse = try? await supervisorWrite(base: base, token: token, endpoint: "/addons/\(bootstrapSlug)/info", method: "get"),
-                  let bootstrapInfo = bootstrapResponse["result"] as? [String: Any],
-                  let bootstrapState = bootstrapInfo["state"] as? String,
-                  ["started", "stopped"].contains(bootstrapState.lowercased()) else {
-                callWebhookHAReady = false
-                bootstrapProgressStep = 0
-                callWebhookHAStatus = "CallWebhook Bootstrap ist nicht installiert – Einrichtung erforderlich"
-                return
-            }
+            // A successful backend capability check is authoritative. The one-shot
+            // installer may already be stopped or absent from the current store.
             setupHAToken = token
             haAuthenticated = true
             callWebhookHAReady = true
-            bootstrapProgressStep = max(bootstrapProgressStep, 5)
             bootstrapProgressStep = bootstrapProgressTotal
-            callWebhookHAStatus = "CallWebhook Bootstrap vollständig verifiziert (API \(version))"
+            callWebhookHAStatus = "CallWebhook-Backend bereit (API \(version))"
             if step == 2 && !asteriskInstalled && !isInstallingAsterisk {
                 if !asteriskConfigReady { prepareAsteriskConfiguration() }
                 if asteriskConfigReady {
@@ -2013,121 +2006,43 @@ private struct SetupWizardView: View {
         callWebhookHAStatus = "Home Assistant ist noch nicht bereit – bitte Installation prüfen"
     }
 
-    @MainActor
-    private func openCallWebhookBootstrapGuided() async {
-        let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
-        UIPasteboard.general.string = repository
-        callWebhookHAStatus = "Repository in Home Assistant bestätigen. Danach öffnet CallWebhook automatisch die Bootstrap-App."
-        var add = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
-        add?.queryItems = [URLQueryItem(name: "repository_url", value: repository)]
-        if let url = add?.url {
-            await UIApplication.shared.open(url)
-        }
-
-        // Give the user time to confirm the repository, then resolve the real Supervisor slug.
-        try? await Task.sleep(nanoseconds: 4_000_000_000)
-        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let base = URL(string: "http://192.168.178.\(input):8123"),
-              var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else { return }
-
-        for _ in 0..<60 {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
-            guard let storeURL = URL(string: "/api/hassio/store/addons", relativeTo: base)?.absoluteURL else { return }
-            var request = URLRequest(url: storeURL)
-            request.timeoutInterval = 8
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            do {
-                var (data, response) = try await URLSession.shared.data(for: request)
-                var http = response as? HTTPURLResponse
-                if http?.statusCode == 401 {
-                    token = try await HomeAssistantAuth.shared.refresh(instance: base)
-                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                    (data, response) = try await URLSession.shared.data(for: request)
-                    http = response as? HTTPURLResponse
-                }
-                guard let http, (200..<300).contains(http.statusCode),
-                      let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-                let dataRoot = root["data"] as? [String: Any]
-                let addons = (dataRoot?["addons"] as? [[String: Any]])
-                    ?? (root["addons"] as? [[String: Any]])
-                    ?? []
-                if let bootstrap = addons.first(where: {
-                    let slug = ($0["slug"] as? String ?? "").lowercased()
-                    let name = ($0["name"] as? String ?? "").lowercased()
-                    let repo = ($0["repository"] as? String ?? "").lowercased()
-                    return slug.hasSuffix("_callwebhook_bootstrap")
-                        || name == "callwebhook bootstrap"
-                        || (repo.contains("callwebhook") && slug.contains("bootstrap"))
-                }), let slug = bootstrap["slug"] as? String, !slug.isEmpty {
-                    callWebhookHAStatus = "CallWebhook Bootstrap gefunden – öffne App-Seite …"
-                    if let direct = URL(string: "http://192.168.178.\(input):8123/hassio/addon/\(slug)/info") {
-                        await UIApplication.shared.open(direct)
-                    }
-                    return
-                }
-            } catch {
-                continue
-            }
-        }
-        callWebhookHAStatus = "Repository hinzugefügt, Bootstrap-App konnte noch nicht automatisch geöffnet werden."
-    }
+    private let bootstrapRepository = "https://github.com/oooonoooorenoooo/-CallWebhook"
 
     private func resolveBootstrapSupervisorSlug(base: URL, token: String) async throws -> String {
-        var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        let baseScheme = components?.scheme
-        components?.scheme = (baseScheme == "https") ? "wss" : "ws"
-        components?.path = "/api/websocket"
-        components?.query = nil
-        guard let wsURL = components?.url else { throw URLError(.badURL) }
-        let task = URLSession.shared.webSocketTask(with: wsURL)
-        task.resume()
-        defer { task.cancel(with: .goingAway, reason: nil) }
-        func receiveJSON() async throws -> [String: Any] {
-            let message = try await task.receive()
-            let data: Data
-            switch message {
-            case .string(let text): data = Data(text.utf8)
-            case .data(let value): data = value
-            @unknown default: throw URLError(.cannotDecodeContentData)
-            }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw URLError(.cannotDecodeContentData) }
-            return json
-        }
-        guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
-        try await task.send(.data(try JSONSerialization.data(withJSONObject: ["type": "auth", "access_token": token])))
-        guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        let command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": "/store", "method": "get", "timeout": 15]
-        try await task.send(.data(try JSONSerialization.data(withJSONObject: command)))
-        let response = try await receiveJSON()
-        guard (response["success"] as? Bool) == true else { throw URLError(.badServerResponse) }
-        let result = response["result"]
-        var candidates: [[String: Any]] = []
-        if let dict = result as? [String: Any] {
-            candidates = (dict["addons"] as? [[String: Any]]) ?? []
-        } else if let array = result as? [[String: Any]] {
-            candidates = array
-        }
-        guard let item = candidates.first(where: {
-            let slug = ($0["slug"] as? String ?? "").lowercased()
-            let name = ($0["name"] as? String ?? "").lowercased()
-            return slug.hasSuffix("_callwebhook_bootstrap") || slug == "callwebhook_bootstrap" || name == "callwebhook bootstrap"
-        }), let slug = item["slug"] as? String, !slug.isEmpty else {
-            throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "CallWebhook Bootstrap ist im App-Store noch nicht verfügbar"])
+        let response = try await supervisorWrite(base: base, token: token, endpoint: "/store", method: "get")
+        let store = response["result"] as? [String: Any] ?? [:]
+        let repositories = store["repositories"] as? [[String: Any]] ?? []
+        let repositorySlugs = Set(repositories.compactMap { item -> String? in
+            let source = (item["source"] as? String ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard source == bootstrapRepository || source == bootstrapRepository + ".git" else { return nil }
+            return item["slug"] as? String
+        })
+        let addons = (store["addons"] as? [[String: Any]]) ?? (store["apps"] as? [[String: Any]]) ?? []
+        guard let addon = addons.first(where: { item in
+            guard let slug = item["slug"] as? String,
+                  let repository = item["repository"] as? String else { return false }
+            return repositorySlugs.contains(repository) && slug == repository + "_callwebhook_bootstrap"
+        }), let slug = addon["slug"] as? String else {
+            throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "CallWebhook Bootstrap ist im registrierten Repository noch nicht verfügbar"])
         }
         return slug
     }
 
     private func supervisorWrite(base: URL, token: String, endpoint: String, method: String = "post", data: [String: Any] = [:]) async throws -> [String: Any] {
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        let baseScheme = components?.scheme
-        components?.scheme = (baseScheme == "https") ? "wss" : "ws"
+        components?.scheme = base.scheme == "https" ? "wss" : "ws"
         components?.path = "/api/websocket"
         components?.query = nil
         guard let wsURL = components?.url else { throw URLError(.badURL) }
         let task = URLSession.shared.webSocketTask(with: wsURL)
         task.resume()
-        defer { task.cancel(with: .goingAway, reason: nil) }
+        // URLSession receive() has no per-message deadline. Close the socket to
+        // unblock authentication/receive if HA restarts or the network disappears.
+        let timeout = Task {
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+            task.cancel(with: .goingAway, reason: nil)
+        }
+        defer { timeout.cancel(); task.cancel(with: .goingAway, reason: nil) }
         func receiveJSON() async throws -> [String: Any] {
             let message = try await task.receive()
             let raw: Data
@@ -2139,18 +2054,26 @@ private struct SetupWizardView: View {
             guard let json = try JSONSerialization.jsonObject(with: raw) as? [String: Any] else { throw URLError(.cannotDecodeContentData) }
             return json
         }
-        guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
-        try await task.send(.data(try JSONSerialization.data(withJSONObject: ["type": "auth", "access_token": token])))
-        guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.lowercased(), "timeout": 180]
-        if !data.isEmpty { command["data"] = data }
-        try await task.send(.data(try JSONSerialization.data(withJSONObject: command)))
-        let response = try await receiveJSON()
-        guard (response["success"] as? Bool) == true else {
-            let description = String(describing: response["error"] ?? response["result"] ?? "Supervisor request failed")
-            throw NSError(domain: "CallWebhook.Supervisor", code: 1, userInfo: [NSLocalizedDescriptionKey: description])
+        func sendJSON(_ value: [String: Any]) async throws {
+            let bytes = try JSONSerialization.data(withJSONObject: value)
+            // Home Assistant's WebSocket API requires JSON TEXT frames.
+            try await task.send(.string(String(decoding: bytes, as: UTF8.self)))
         }
-        return response
+        guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
+        try await sendJSON(["type": "auth", "access_token": token])
+        guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
+        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.lowercased(), "timeout": 25]
+        if !data.isEmpty { command["data"] = data }
+        try await sendJSON(command)
+        while true {
+            let response = try await receiveJSON()
+            guard response["id"] as? Int == 1 else { continue }
+            guard (response["success"] as? Bool) == true else {
+                let error = response["error"] as? [String: Any]
+                throw NSError(domain: "CallWebhook.Supervisor", code: 1, userInfo: [NSLocalizedDescriptionKey: error?["message"] as? String ?? "Supervisor-Anfrage fehlgeschlagen: \(endpoint)"])
+            }
+            return response
+        }
     }
 
     private func sendSetupPush(base: URL, token: String, message: String) async {
@@ -2166,50 +2089,72 @@ private struct SetupWizardView: View {
 
     @MainActor
     private func installBootstrapAutomatically() async {
+        guard !isBootstrappingHA else { return }
+        isBootstrappingHA = true
+        defer { isBootstrappingHA = false }
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let base = URL(string: "http://192.168.178.\(input):8123"),
-              let token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
+              let savedToken = SetupKeychain.get(account: "home-assistant-token"), !savedToken.isEmpty else {
             callWebhookHAStatus = "Home Assistant muss zuerst verbunden und autorisiert sein"
             return
         }
         do {
+            let token = (try? await HomeAssistantAuth.shared.refresh(instance: base)) ?? savedToken
             bootstrapProgressStep = 0
             callWebhookHAReady = false
-            callWebhookHAStatus = "CallWebhook Bootstrap wird automatisch vorbereitet …"
-            _ = try await supervisorWrite(
-                base: base, token: token, endpoint: "/store/repositories", data: ["repository": "https://github.com/oooonoooorenoooo/-CallWebhook"]
-            )
-            bootstrapProgressStep = 1
-        } catch {
-            // Already-added repository errors are harmless; slug discovery below is authoritative.
-            bootstrapProgressStep = 1
-        }
-        do {
-            var slug: String?
-            for attempt in 0..<240 {
-                if let found = try? await resolveBootstrapSupervisorSlug(base: base, token: token) {
-                    slug = found
-                    break
-                }
-                if attempt % 20 == 19 {
-                    _ = try? await supervisorWrite(base: base, token: token, endpoint: "/store/reload")
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
+            callWebhookHAStatus = "Bootstrap-Repository wird geprüft …"
+            let response = try await supervisorWrite(base: base, token: token, endpoint: "/store", method: "get")
+            let store = response["result"] as? [String: Any] ?? [:]
+            let repositories = store["repositories"] as? [[String: Any]] ?? []
+            if !repositories.contains(where: {
+                let source = ($0["source"] as? String ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                return source == bootstrapRepository || source == bootstrapRepository + ".git"
+            }) {
+                _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/repositories", data: ["repository": bootstrapRepository])
             }
-            guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap wurde im Supervisor-Store nicht gefunden"]) }
+            bootstrapProgressStep = 1
+            var slug: String?
+            let discoveryDeadline = Date().addingTimeInterval(90)
+            while Date() < discoveryDeadline {
+                try Task.checkCancellation()
+                do { slug = try await resolveBootstrapSupervisorSlug(base: base, token: token); break }
+                catch let error as NSError where error.domain == "CallWebhook.Bootstrap" && error.code == 404 {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+            guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap im Repository noch nicht gefunden. Notfall-Button öffnet die Repository-Einrichtung."] ) }
             bootstrapProgressStep = 2
-            callWebhookHAStatus = "CallWebhook Bootstrap wird installiert …"
-            await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap wird jetzt installiert.")
-            _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)/install", data: ["background": false])
+            let storeResponse = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)", method: "get")
+            let info = storeResponse["result"] as? [String: Any] ?? [:]
+            let installed = (info["installed"] as? Bool) == true || !(info["installed"] as? String ?? "").isEmpty
+            if !installed || (info["update_available"] as? Bool) == true {
+                callWebhookHAStatus = installed ? "Bootstrap wird aktualisiert …" : "Bootstrap wird installiert …"
+                await sendSetupPush(base: base, token: token, message: callWebhookHAStatus)
+                let action = installed ? "update" : "install"
+                _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)/\(action)", data: ["background": true])
+                let deadline = Date().addingTimeInterval(600)
+                var ready = false
+                while Date() < deadline {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    let check = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)", method: "get")
+                    let current = check["result"] as? [String: Any] ?? [:]
+                    let present = (current["installed"] as? Bool) == true || !(current["installed"] as? String ?? "").isEmpty
+                    if present && (current["update_available"] as? Bool) != true { ready = true; break }
+                }
+                guard ready else { throw URLError(.timedOut) }
+            }
             bootstrapProgressStep = 3
-            callWebhookHAStatus = "CallWebhook Bootstrap wird gestartet …"
-            await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap ist installiert und wird jetzt ausgeführt.")
-            _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
+            callWebhookHAStatus = "Bootstrap installiert – wird gestartet …"
+            let stateResponse = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/info", method: "get")
+            let state = stateResponse["result"] as? [String: Any] ?? [:]
+            if state["state"] as? String != "started" {
+                _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
+            }
             bootstrapProgressStep = 4
-            callWebhookHAStatus = "Bootstrap gestartet – warte auf Backend …"
+            await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap gestartet. Das Backend wird eingerichtet und Home Assistant neu gestartet.")
             await waitForCallWebhookAfterRestart()
         } catch {
-            callWebhookHAStatus = "Automatische Bootstrap-Installation nicht möglich: \(error.localizedDescription). Bitte CallWebhook Bootstrap im Home-Assistant-App-Store öffnen."
+            callWebhookHAStatus = "Bootstrap-Einrichtung fehlgeschlagen: \(error.localizedDescription). Der Notfall-Button öffnet die Repository-Einrichtung."
         }
     }
 
@@ -2217,48 +2162,27 @@ private struct SetupWizardView: View {
     private func openResolvedCallWebhookBootstrapApp() async {
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let base = URL(string: "http://192.168.178.\(input):8123"),
-              let token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
-            callWebhookHAStatus = "Home Assistant muss zuerst verbunden und autorisiert sein"
+              let token = SetupKeychain.get(account: "home-assistant-token") else {
+            openCallWebhookBootstrap()
             return
         }
         do {
-            callWebhookHAStatus = "Ermittle CallWebhook Bootstrap im App-Store …"
             let slug = try await resolveBootstrapSupervisorSlug(base: base, token: token)
-            var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_app/")
-            components?.queryItems = [URLQueryItem(name: "app", value: slug)]
-            if let url = components?.url {
-                callWebhookHAStatus = "CallWebhook Bootstrap gefunden – öffne App-Seite …"
-                await UIApplication.shared.open(url)
-                Task { await waitForCallWebhookAfterRestart() }
-            }
+            let url = base.appendingPathComponent("hassio/addon/\(slug)/info")
+            await UIApplication.shared.open(url)
         } catch {
-            callWebhookHAStatus = "Bootstrap-Seite konnte noch nicht geöffnet werden: \(error.localizedDescription)"
-        }
-    }
-
-    @MainActor
-    private func openCallWebhookBootstrapApp() {
-        let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
-        var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_app/")
-        components?.queryItems = [
-            URLQueryItem(name: "app", value: "callwebhook_bootstrap"),
-            URLQueryItem(name: "repository_url", value: repository)
-        ]
-        if let url = components?.url {
-            UIApplication.shared.open(url)
+            openCallWebhookBootstrap()
         }
     }
 
     @MainActor
     private func openCallWebhookBootstrap() {
-        let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
-        UIPasteboard.general.string = repository
-        callWebhookHAStatus = "Repository hinzufügen. Danach im App-Store einmal nach „CallWebhook Bootstrap“ suchen, installieren und starten. Home Assistant startet anschließend automatisch neu."
+        // Independent of authentication, store discovery and WebSocket transport.
+        UIPasteboard.general.string = bootstrapRepository
+        callWebhookHAStatus = "Repository bestätigen, CallWebhook Bootstrap installieren und starten. Anschließend hier die Installation prüfen."
         var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
-        components?.queryItems = [URLQueryItem(name: "repository_url", value: repository)]
-        if let url = components?.url {
-            UIApplication.shared.open(url)
-        }
+        components?.queryItems = [URLQueryItem(name: "repository_url", value: bootstrapRepository)]
+        if let url = components?.url { UIApplication.shared.open(url) }
     }
 
     private func persistSetup() {

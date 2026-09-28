@@ -15,7 +15,7 @@ DOMAIN = "callwebhook"
 BACKEND_API_VERSION = 2
 
 HOST = "192.168.178.1"
-TAMS = ("1", "2")
+DEFAULT_TAMS = ("1", "2")
 REFRESH_SECONDS = 30
 
 BASE_DIR = Path("/config/callwebhook")
@@ -23,11 +23,41 @@ MAILBOX_FILE = BASE_DIR / "mailbox.json"
 XML_FILE = BASE_DIR / "mailbox.xml"
 ARCHIVE_DIR = BASE_DIR / "archive"
 ARCHIVE_FILE = ARCHIVE_DIR / "archive.json"
+SETUP_FILE = BASE_DIR / "setup.json"
 SECRETS_FILE = Path("/config/secrets.yaml")
 ASTERISK_ADDON = "b35499aa_asterisk"
 ASTERISK_CUSTOM_DIR = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
 
 _refresh_lock = asyncio.Lock()
+
+
+def get_configured_tams():
+    if SETUP_FILE.exists():
+        try:
+            data = json.loads(SETUP_FILE.read_text(encoding="utf-8"))
+            values = data.get("tams", [])
+            tams = tuple(str(value) for value in values if str(value).isdigit() and int(value) >= 0)
+            if tams:
+                return tams
+        except Exception as error:
+            print(f"CallWebhook Setup konnte nicht gelesen werden: {error}")
+    return DEFAULT_TAMS
+
+
+def save_setup(mailbox_tam_1, mailbox_tam_2):
+    values = []
+    for value in (mailbox_tam_1, mailbox_tam_2):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number >= 0 and number not in values:
+            values.append(number)
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    temp = BASE_DIR / "setup.json.tmp"
+    temp.write_text(json.dumps({"tams": values}, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(SETUP_FILE)
+    return values
 
 
 def get_secret(name):
@@ -464,7 +494,7 @@ def fetch_fritz_mailbox_for_tam(target_tam):
 
 def fetch_fritz_mailbox():
     combined = []
-    for target_tam in TAMS:
+    for target_tam in get_configured_tams():
         combined.extend(fetch_fritz_mailbox_for_tam(target_tam))
     combined.sort(key=sort_key, reverse=True)
     valid_audio_files = {
@@ -597,6 +627,11 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
                 payload.get("addon"),
                 payload.get("custom_path"),
             )
+            configured_tams = await hass.async_add_executor_job(
+                save_setup,
+                payload.get("mailbox_tam_1"),
+                payload.get("mailbox_tam_2"),
+            )
             await hass.services.async_call(
                 "hassio",
                 "addon_restart",
@@ -611,6 +646,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             "addon": ASTERISK_ADDON,
             "files": files,
             "config_verified": all(Path(path).exists() for path in files),
+            "mailbox_tams": configured_tams,
             "mailbox_tam_1": payload.get("mailbox_tam_1"),
             "mailbox_tam_2": payload.get("mailbox_tam_2"),
         })

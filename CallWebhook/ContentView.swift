@@ -664,6 +664,19 @@ private struct SetupWizardView: View {
     }
 
     private func prepareAsteriskConfiguration() {
+        if easybellEnabled {
+            do {
+                try SetupKeychain.set(easybellUsername.trimmingCharacters(in: .whitespacesAndNewlines), account: "easybell-sip-username")
+                try SetupKeychain.set(easybellPassword, account: "easybell-sip-password")
+                try SetupKeychain.set(easybellContactUser.trimmingCharacters(in: .whitespacesAndNewlines), account: "easybell-contact-user")
+            } catch {
+                asteriskConfigReady = false
+                asteriskConfigStatus = "easybell-Zugangsdaten konnten nicht sicher gespeichert werden"
+                return
+            }
+        }
+        easybellPassword = ""
+
         guard let password1 = SetupKeychain.get(account: "fritz-sip-callwhapp1"),
               let password2 = SetupKeychain.get(account: "fritz-sip-callwhapp2") else {
             asteriskConfigReady = false

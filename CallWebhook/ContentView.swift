@@ -1366,6 +1366,7 @@ private struct SetupWizardView: View {
             let auth = FritzAuthDelegate(username: fritzUser, password: fritzPassword)
             let session = URLSession(configuration: .ephemeral, delegate: auth, delegateQueue: nil)
             defer { session.finishTasksAndInvalidate() }
+            var secondFactorToken: String? = nil
 
             if client1 == nil || secret1Missing {
                 let password = randomSIPPassword()

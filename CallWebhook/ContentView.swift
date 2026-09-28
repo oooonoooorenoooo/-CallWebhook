@@ -1169,35 +1169,48 @@ private struct SetupWizardView: View {
 
 
             do {
-                let response = try await soapCall(
+                var resolvedNumbers: [String] = []
+                if let countXML = try? await soapCall(
                     session: session,
                     base: base,
                     serviceType: voipService.type,
                     controlURL: voipService.controlURL,
-                    action: "GetExistingVoIPNumbers",
+                    action: "X_AVM-DE_GetNumberOfVoIPAccounts",
                     arguments: []
-                )
-                let existingEntries = extractSOAPValue("NewExistingVoIPNumbers", from: response)
-                    .split(whereSeparator: { $0 == "," || $0 == ";" || $0 == "\n" })
-                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                var resolvedNumbers: [String] = []
-                for entry in existingEntries {
-                    if let accountIndex = Int(entry) {
-                        if let account = try? await soapCall(
-                            session: session,
-                            base: base,
-                            serviceType: voipService.type,
-                            controlURL: voipService.controlURL,
-                            action: "X_AVM-DE_GetVoIPAccount",
-                            arguments: [("NewVoIPAccountIndex", String(accountIndex))]
-                        ) {
-                            let number = extractSOAPValue("NewVoIPNumber", from: account)
-                            if !number.isEmpty { resolvedNumbers.append(number) }
+                ) {
+                    let countText = extractSOAPValue("NewNumberOfVoIPAccounts", from: countXML)
+                    let accountCount = Int(countText) ?? 0
+                    if accountCount > 0 {
+                        for accountIndex in 0..<accountCount {
+                            if let account = try? await soapCall(
+                                session: session,
+                                base: base,
+                                serviceType: voipService.type,
+                                controlURL: voipService.controlURL,
+                                action: "X_AVM-DE_GetVoIPAccount",
+                                arguments: [("NewVoIPAccountIndex", String(accountIndex))]
+                            ) {
+                                let number = extractSOAPValue("NewVoIPNumber", from: account)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !number.isEmpty { resolvedNumbers.append(number) }
+                            }
                         }
-                    } else {
-                        resolvedNumbers.append(entry)
                     }
+                }
+                // Compatibility fallback for FRITZ!OS variants without the account-count action.
+                if resolvedNumbers.isEmpty {
+                    let response = try await soapCall(
+                        session: session,
+                        base: base,
+                        serviceType: voipService.type,
+                        controlURL: voipService.controlURL,
+                        action: "GetExistingVoIPNumbers",
+                        arguments: []
+                    )
+                    resolvedNumbers = extractSOAPValue("NewExistingVoIPNumbers", from: response)
+                        .split(whereSeparator: { $0 == "," || $0 == ";" || $0 == "\n" })
+                        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
                 }
                 fritzVoIPNumbers = Array(NSOrderedSet(array: resolvedNumbers)) as? [String] ?? resolvedNumbers
                 fritzAuthenticated = true

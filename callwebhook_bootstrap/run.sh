@@ -8,8 +8,14 @@ curl -fsSL "$BASE/manifest.json" -o "$TARGET/manifest.json"
 if ! grep -Eq '^[[:space:]]*callwebhook:[[:space:]]*$' /config/configuration.yaml; then
   printf '\ncallwebhook:\n' >> /config/configuration.yaml
 fi
-echo "CallWebhook backend installed. Requesting Home Assistant restart..."
-curl -fsS -X POST -H "Authorization: Bearer ${SUPERVISOR_TOKEN:-}" -H "Content-Type: application/json" http://supervisor/core/restart >/dev/null || {
-  echo "Automatic Home Assistant restart unavailable; backend files were installed successfully."
-  exit 0
-}
+echo "CallWebhook backend files installed successfully."
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+  echo "Requesting Home Assistant restart..."
+  if curl -fsS -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H "Content-Type: application/json" http://supervisor/core/restart >/dev/null; then
+    echo "Home Assistant restart requested."
+  else
+    echo "Automatic restart was not accepted. Please restart Home Assistant manually."
+  fi
+else
+  echo "Home Assistant must now be restarted manually to load CallWebhook."
+fi

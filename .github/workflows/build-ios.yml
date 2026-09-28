@@ -49,6 +49,9 @@ jobs:
           xcodebuild -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -derivedDataPath build DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Development" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" build
           APP_PATH="build/Build/Products/Release-iphoneos/CallWebhook.app"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH" > "$RUNNER_TEMP/development-entitlements.plist" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.calling-app' "$RUNNER_TEMP/development-entitlements.plist")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$APP_PATH/Info.plist")" = "voip"
           rm -rf Payload
           mkdir Payload
           cp -R "$APP_PATH" Payload/
@@ -114,7 +117,10 @@ jobs:
           security cms -D -i "$APP_PATH/embedded.mobileprovision" > "$PROFILE_PLIST"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.dialing-app' "$APP_ENTITLEMENTS")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.dialing-app' "$PROFILE_PLIST")" = "true"
-          echo "TESTFLIGHT_DEFAULT_DIALER_SIGNING_OK=true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.calling-app' "$APP_ENTITLEMENTS")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.calling-app' "$PROFILE_PLIST")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$APP_PATH/Info.plist")" = "voip"
+          echo "TESTFLIGHT_DEFAULT_DIALER_AND_CALLING_SIGNING_OK=true"
       - name: Export App Store IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

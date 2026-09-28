@@ -5,6 +5,7 @@ import ContactsUI
 import LiveCommunicationKit
 import AVKit
 import Security
+import Intents
 
 private final class FritzAuthDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let username: String
@@ -85,6 +86,7 @@ struct ContentView: View {
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
+    @State private var selectedTab = 0
 
     var body: some View {
         Group {
@@ -96,25 +98,54 @@ struct ContentView: View {
                 }
             }
         }
+        .onOpenURL { url in
+            guard url.scheme?.lowercased() == "tel" else { return }
+            let raw = String(url.absoluteString.dropFirst(4))
+            showIncomingNumber(raw.removingPercentEncoding ?? raw)
+        }
+        .onContinueUserActivity("INStartCallIntent") { activity in
+            if let intent = activity.interaction?.intent as? INStartCallIntent,
+               let number = intent.contacts?.first?.personHandle?.value {
+                showIncomingNumber(number)
+            }
+        }
+        .onContinueUserActivity("INStartAudioCallIntent") { activity in
+            if let intent = activity.interaction?.intent as? INStartAudioCallIntent,
+               let number = intent.contacts?.first?.personHandle?.value {
+                showIncomingNumber(number)
+            }
+        }
+    }
+
+    private func showIncomingNumber(_ value: String) {
+        let number = value.filter { "+*#0123456789".contains($0) }
+        guard !number.isEmpty else { return }
+        dialer.number = number
+        selectedTab = 3
     }
 
     private var mainTabs: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             ContactsView(dialer: dialer)
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
+                .tag(0)
 
             CallsView(dialer: dialer)
                 .tabItem { Label("Anrufe", systemImage: "clock.fill") }
+                .tag(1)
 
             MailboxView(dialer: dialer)
                 .tabItem { Label("Mailbox", systemImage: "recordingtape") }
+                .tag(2)
 
             DialPadView(dialer: dialer, primaryPhoneNumber: primaryPhoneNumber, secondaryPhoneNumber: secondaryPhoneNumber, sipLine2Enabled: sipLine2Enabled, sipLine3Enabled: sipLine3Enabled)
                 .environmentObject(monitor)
                 .tabItem { Label("Zifferblatt", systemImage: "circle.grid.3x3.fill") }
+                .tag(3)
 
             ExtrasView()
                 .tabItem { Label("Extras", systemImage: "ellipsis.circle.fill") }
+                .tag(4)
         }
         .tint(.blue)
     }
@@ -3169,6 +3200,16 @@ private struct ExtrasView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Standard-Anruf-App") {
+                    Text("In den iPhone-Einstellungen unter Apps → Standard-Apps → Anrufen CallWebhook auswählen.")
+                        .font(.caption)
+                    Button("iPhone-App-Einstellungen öffnen") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                }
+
                 DisclosureGroup("Asterisk / VoIP", isExpanded: $showSIP) {
                     Toggle("Anrufe über Asterisk", isOn: $sipEnabled)
                     TextField("Asterisk Host", text: $sipHost)

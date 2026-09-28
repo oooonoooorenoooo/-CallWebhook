@@ -522,13 +522,21 @@ private struct SetupWizardView: View {
                 }
             }
 
-            Section("easybell (optional)") {
-                Toggle("easybell für Leitung 1 und 2 verwenden", isOn: $easybellEnabled)
+            Section("Rufnummer bei ausgehenden Anrufen") {
+                Toggle("Eigene Mobilfunknummer anzeigen", isOn: $easybellEnabled)
+                Text(easybellEnabled
+                     ? "Dafür wird ein geeigneter easybell-Telefonie-/SIP-Tarif benötigt. CLIP no screening selbst ist bei easybell kostenlos."
+                     : "Ohne diese Option wird kein easybell-Zugang für die Mobilfunknummer benötigt.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if easybellEnabled {
-                    TextField("SIP-Benutzername", text: $easybellUsername)
+                    Text("Es darf nur eine Rufnummer übertragen werden, die dir zugeteilt ist bzw. deren Zuteilungsnehmer du bist.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("easybell SIP-Benutzername", text: $easybellUsername)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    SecureField("SIP-Passwort", text: $easybellPassword)
+                    SecureField("easybell SIP-Passwort", text: $easybellPassword)
                     TextField("Contact User / Stammrufnummer", text: $easybellContactUser)
                         .keyboardType(.phonePad)
                     Text("Registrar: voip.easybell.de. Das SIP-Kennwort wird ausschließlich sicher im iOS-Keychain gespeichert.")

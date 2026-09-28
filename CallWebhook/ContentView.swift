@@ -552,7 +552,12 @@ private struct SetupWizardView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
-        request.setValue("Bearer \(setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
+        guard var haToken = SetupKeychain.get(account: "home-assistant-token"), !haToken.isEmpty else {
+            asteriskInstalled = false
+            asteriskConfigStatus = "Home Assistant noch nicht autorisiert"
+            return
+        }
+        request.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let body: [String: Any] = [
@@ -566,8 +571,16 @@ private struct SetupWizardView: View {
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
+            var (data, response) = try await URLSession.shared.data(for: request)
+            var http = response as? HTTPURLResponse
+            if http?.statusCode == 401 {
+                haToken = try await HomeAssistantAuth.shared.refresh(instance: base)
+                setupHAToken = haToken
+                request.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
+                (data, response) = try await URLSession.shared.data(for: request)
+                http = response as? HTTPURLResponse
+            }
+            guard let http else {
                 throw URLError(.badServerResponse)
             }
             guard (200..<300).contains(http.statusCode) else {
@@ -583,7 +596,7 @@ private struct SetupWizardView: View {
                 asteriskConfigStatus = "Home Assistant hat die Installation nicht bestätigt"
                 return
             }
-            try? SetupKeychain.set(setupHAToken, account: "home-assistant-token")
+            try? SetupKeychain.set(haToken, account: "home-assistant-token")
             guard let iosPassword = SetupKeychain.get(account: "asterisk-sip-callwebhook-ios"),
                   let host = base.host else {
                 asteriskInstalled = false
@@ -1396,21 +1409,32 @@ private struct SetupWizardView: View {
     @MainActor
     private func checkCallWebhookHAIntegration(base: URL) async {
         callWebhookHAReady = false
-        let token = setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else {
-            callWebhookHAStatus = "HA-Token eingeben und erneut prüfen"
-            return
-        }
         guard let url = URL(string: "/api/callwebhook/setup/status", relativeTo: base)?.absoluteURL else {
             callWebhookHAStatus = "CallWebhook-Endpunkt konnte nicht gebildet werden"
             return
         }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 8
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
+            callWebhookHAStatus = "Home Assistant noch nicht autorisiert"
+            haAuthenticated = false
+            return
+        }
+
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 8
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            var (data, response) = try await URLSession.shared.data(for: request)
+            var http = response as? HTTPURLResponse
+
+            if http?.statusCode == 401 {
+                token = try await HomeAssistantAuth.shared.refresh(instance: base)
+                setupHAToken = token
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                (data, response) = try await URLSession.shared.data(for: request)
+                http = response as? HTTPURLResponse
+            }
+
+            guard let http else {
                 callWebhookHAStatus = "CallWebhook-Integration antwortet nicht"
                 return
             }
@@ -1419,7 +1443,8 @@ private struct SetupWizardView: View {
                 return
             }
             if http.statusCode == 401 {
-                callWebhookHAStatus = "HA-Token nicht autorisiert"
+                haAuthenticated = false
+                callWebhookHAStatus = "Home-Assistant-Autorisierung abgelaufen – erneut verbinden"
                 return
             }
             guard (200..<300).contains(http.statusCode),
@@ -1434,10 +1459,12 @@ private struct SetupWizardView: View {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
             }
+            setupHAToken = token
+            haAuthenticated = true
             callWebhookHAReady = true
             callWebhookHAStatus = "CallWebhook-HA-Integration bereit (API \(version))"
-            try? SetupKeychain.set(token, account: "home-assistant-token")
         } catch {
+            haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
         }
     }

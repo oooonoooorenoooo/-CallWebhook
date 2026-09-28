@@ -172,6 +172,9 @@ private struct SetupWizardView: View {
     @State private var isAuthenticatingHA = false
     @State private var haAuthenticated = false
     @State private var isChecking = false
+    @State private var easybellUsername = ""
+    @State private var easybellPassword = ""
+    @State private var easybellContactUser = ""
     @ObservedObject private var setupSIP = SIPService.shared
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false

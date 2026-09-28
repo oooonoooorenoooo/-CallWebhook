@@ -125,7 +125,7 @@ private struct SetupWizardView: View {
     let onFinished: () -> Void
 
     @State private var step = 0
-    @State private var fritzHost = "fritz.box"
+    @State private var fritzHost = "192.168.178.1"
     @State private var fritzUser = ""
     @State private var fritzPassword = ""
     @State private var homeAssistantURL = ""
@@ -1499,8 +1499,14 @@ private struct SetupWizardView: View {
 
     @MainActor
     private func authenticateHomeAssistant() async {
-        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !raw.contains("://") { raw = "http://" + raw }
+        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var raw = input
+        if !raw.contains("://") {
+            raw = "http://" + raw
+            if let parsed = URL(string: raw), parsed.port == nil {
+                raw += ":8123"
+            }
+        }
         guard let base = URL(string: raw) else {
             homeAssistantStatus = "Ungültige Home-Assistant-Adresse"
             return

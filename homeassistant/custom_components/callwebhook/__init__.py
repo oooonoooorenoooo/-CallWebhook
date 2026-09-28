@@ -12,10 +12,11 @@ import requests
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 3
+BACKEND_API_VERSION = 4
+BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
 DEFAULT_TAMS = ("1", "2")
@@ -41,6 +42,15 @@ async def _run_asterisk_setup(hass, payload):
         def report_progress(step, message):
             _asterisk_setup_state["progress_step"] = step
             _asterisk_setup_state["message"] = message
+        deadline = time.monotonic() + 300
+        while True:
+            readiness = await setup_readiness(hass)
+            if readiness["ready_for_asterisk"]:
+                break
+            report_progress(0, readiness["message"])
+            if time.monotonic() >= deadline:
+                raise RuntimeError(readiness["message"] + " – Bereitschaft nach 5 Minuten nicht bestätigt")
+            await asyncio.sleep(0.5)
         actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon, report_progress)
         _asterisk_setup_state["progress_step"] = 5
         _asterisk_setup_state["message"] = "Asterisk läuft – Konfiguration wird geschrieben …"
@@ -781,14 +791,52 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
     raise RuntimeError("Bootstrap hat das Schreiben der Asterisk-Konfiguration nicht bestätigt")
 
 
+def bootstrap_state():
+    # Installed add-ons are authoritative here; a store refresh is not needed
+    # to tell whether the one-shot installer has finished its previous job.
+    listing = supervisor_request("GET", "/addons", timeout=5)
+    addons = listing.get("addons", listing.get("apps", []))
+    candidates = [item for item in addons
+        if str(item.get("slug", "")).endswith("_callwebhook_bootstrap")]
+    if len(candidates) != 1:
+        return "missing" if not candidates else "ambiguous"
+    info = supervisor_request("GET", f"/addons/{candidates[0]['slug']}/info", timeout=5)
+    return info.get("state", "unknown")
+
+
+async def setup_readiness(hass):
+    # hass.is_running also includes STARTING, so it is intentionally not used.
+    if hass.state is not CoreState.running:
+        return {"home_assistant_state": str(hass.state), "ready_for_asterisk": False,
+                "bootstrap_state": "waiting", "message": "Home Assistant fährt noch hoch …"}
+    try:
+        state = await hass.async_add_executor_job(bootstrap_state)
+    except Exception:
+        return {"home_assistant_state": str(hass.state), "ready_for_asterisk": False,
+                "bootstrap_state": "unknown", "message": "Home Assistant läuft – Bootstrap-Abschluss wird geprüft …"}
+    ready = state == "stopped"
+    messages = {
+        "stopped": "Home Assistant vollständig gestartet und Bootstrap abgeschlossen",
+        "started": "Home Assistant läuft – Bootstrap schließt den vorherigen Auftrag ab …",
+        "missing": "Bootstrap ist nicht installiert – bitte Bootstrap einrichten",
+        "error": "Bootstrap meldet einen Fehler – bitte Bootstrap-Protokoll prüfen",
+    }
+    return {"home_assistant_state": str(hass.state), "bootstrap_state": state,
+            "ready_for_asterisk": ready,
+            "message": messages.get(state, "Bootstrap-Abschluss wird geprüft …")}
+
+
 class CallWebhookSetupStatusView(HomeAssistantView):
     url = "/api/callwebhook/setup/status"
     name = "api:callwebhook:setup:status"
     requires_auth = True
 
     async def get(self, request):
+        readiness = await setup_readiness(request.app["hass"])
         return self.json({
             "ok": True,
+            "boot_id": BACKEND_BOOT_ID,
+            **readiness,
             "domain": DOMAIN,
             "api_version": BACKEND_API_VERSION,
             "asterisk_provisioning": True,
@@ -812,7 +860,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
         if _asterisk_setup_state.get("state") == "running":
             return self.json({"ok": True, "state": "running"}, status_code=202)
         _asterisk_setup_state = {"state": "running", "message": "Asterisk-Einrichtung wird gestartet …", "progress_step": 0, "progress_total": 7, "result": None}
-        hass.async_create_task(_run_asterisk_setup(hass, payload))
+        hass.async_create_background_task(_run_asterisk_setup(hass, payload), "CallWebhook Asterisk setup")
         return self.json({"ok": True, "state": "started"}, status_code=202)
 
 
@@ -1057,7 +1105,7 @@ async def async_setup(
         CallWebhookArchiveAudioView
     )
 
-    hass.async_create_task(
+    hass.async_create_background_task(
         mailbox_refresh_loop(
             hass
         ),

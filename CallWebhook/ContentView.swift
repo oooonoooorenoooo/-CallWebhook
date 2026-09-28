@@ -209,6 +209,7 @@ private struct SetupWizardView: View {
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
     @State private var isBootstrappingHA = false
+    @State private var bootstrapPreviousBootID: String?
     @State private var isWaitingForHARestart = false
     @State private var haAuthenticated = false
     @State private var isChecking = false
@@ -1970,20 +1971,26 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 3,
+            guard version >= 4,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
             }
-            // A successful backend capability check is authoritative. The one-shot
-            // installer may already be stopped or absent from the current store.
             setupHAToken = token
             haAuthenticated = true
+            if let previous = bootstrapPreviousBootID, json["boot_id"] as? String == previous {
+                callWebhookHAStatus = "Warte auf den neuen Home-Assistant-Start …"
+                return
+            }
+            guard json["ready_for_asterisk"] as? Bool == true else {
+                callWebhookHAStatus = json["message"] as? String ?? "Home Assistant und Bootstrap werden noch vorbereitet …"
+                return
+            }
+            bootstrapPreviousBootID = nil
             callWebhookHAReady = true
             bootstrapProgressStep = bootstrapProgressTotal
             callWebhookHAStatus = "CallWebhook-Backend bereit (API \(version))"
         } catch {
-            haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
         }
     }
@@ -2001,16 +2008,11 @@ private struct SetupWizardView: View {
             return
         }
 
-        for _ in 0..<960 {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
+        let restartDeadline = Date().addingTimeInterval(600)
+        while Date() < restartDeadline {
             do {
-                var request = URLRequest(url: base.appendingPathComponent("manifest.json"))
-                request.timeoutInterval = 2
-                let (_, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { continue }
-                homeAssistantReachable = true
-                homeAssistantStatus = "Home Assistant erreichbar"
+                try await Task.sleep(nanoseconds: 500_000_000)
+                try Task.checkCancellation()
                 await checkCallWebhookHAIntegration(base: base)
                 if callWebhookHAReady {
                     callWebhookHAStatus = "CallWebhook-HA-Integration bereit"
@@ -2028,7 +2030,7 @@ private struct SetupWizardView: View {
                     return
                 }
             } catch {
-                continue
+                if Task.isCancelled { return }
             }
         }
         callWebhookHAStatus = "Home Assistant ist noch nicht bereit – bitte Installation prüfen"
@@ -2105,17 +2107,6 @@ private struct SetupWizardView: View {
         }
     }
 
-    private func sendSetupPush(base: URL, token: String, message: String) async {
-        guard let url = URL(string: "/api/services/notify/mobile_app_iphone_von_reno", relativeTo: base)?.absoluteURL else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 8
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["title": "CallWebhook", "message": message])
-        _ = try? await URLSession.shared.data(for: request)
-    }
-
     @MainActor
     private func installBootstrapAutomatically() async {
         guard !isBootstrappingHA else { return }
@@ -2160,7 +2151,6 @@ private struct SetupWizardView: View {
             let installed = (info["installed"] as? Bool) == true || !(info["installed"] as? String ?? "").isEmpty
             if !installed || (info["update_available"] as? Bool) == true {
                 callWebhookHAStatus = installed ? "Bootstrap wird aktualisiert …" : "Bootstrap wird installiert …"
-                await sendSetupPush(base: base, token: token, message: callWebhookHAStatus)
                 let action = installed ? "update" : "install"
                 _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)/\(action)", data: ["background": true])
                 let deadline = Date().addingTimeInterval(600)
@@ -2179,10 +2169,17 @@ private struct SetupWizardView: View {
             let stateResponse = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/info", method: "get")
             let state = stateResponse["result"] as? [String: Any] ?? [:]
             if state["state"] as? String != "started" {
+                bootstrapPreviousBootID = nil
+                var statusRequest = URLRequest(url: base.appendingPathComponent("api/callwebhook/setup/status"))
+                statusRequest.timeoutInterval = 8
+                statusRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                if let (bytes, _) = try? await URLSession.shared.data(for: statusRequest),
+                   let status = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+                    bootstrapPreviousBootID = status["boot_id"] as? String
+                }
                 _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
             }
             bootstrapProgressStep = 4
-            await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap gestartet. Das Backend wird eingerichtet und Home Assistant neu gestartet.")
             await waitForCallWebhookAfterRestart()
         } catch {
             callWebhookHAStatus = "Bootstrap-Einrichtung fehlgeschlagen: \(error.localizedDescription). Der Notfall-Button öffnet die Repository-Einrichtung."

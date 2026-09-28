@@ -127,6 +127,7 @@ private struct SetupWizardView: View {
     @State private var line1Number = ""
     @State private var line2Number = ""
     @State private var line3Number = ""
+    @State private var line3ManualNumber = false
     @State private var fritzReachable = false
     @State private var fritzStatus = "Noch nicht geprüft"
     @State private var fritzVoIPAvailable = false
@@ -384,7 +385,29 @@ private struct SetupWizardView: View {
                 Toggle("Aktiv", isOn: $sipLine3Enabled)
                 if sipLine3Enabled {
                     TextField("Bezeichnung", text: $line3Label)
-                    fritzNumberPicker("FRITZ!-Festnetzrufnummer", selection: $line3Number)
+                    if line3ManualNumber || fritzVoIPNumbers.isEmpty {
+                        TextField("FRITZ!-Festnetzrufnummer", text: $line3Number)
+                            .keyboardType(.phonePad)
+                        if !fritzVoIPNumbers.isEmpty {
+                            Button("Erkannte Rufnummer auswählen") {
+                                line3ManualNumber = false
+                                if !fritzVoIPNumbers.contains(line3Number) {
+                                    line3Number = fritzVoIPNumbers.first ?? ""
+                                }
+                            }
+                        }
+                    } else {
+                        Picker("FRITZ!-Festnetzrufnummer", selection: $line3Number) {
+                            Text("Bitte wählen").tag("")
+                            ForEach(fritzVoIPNumbers, id: \.self) { number in
+                                Text(number).tag(number)
+                            }
+                        }
+                        Button("Andere Festnetzrufnummer eingeben") {
+                            line3ManualNumber = true
+                            line3Number = ""
+                        }
+                    }
                     TextField("Asterisk-Präfix", text: $sipLine3Prefix)
                         .keyboardType(.numbersAndPunctuation)
                     Text("Direkter FRITZ!Box-Pfad ohne CLIP no screening")

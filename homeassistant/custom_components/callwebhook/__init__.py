@@ -699,8 +699,11 @@ def ensure_asterisk_addon():
             "log_level": "info",
         }
     current_options["ami_password"] = secrets.token_urlsafe(32)
-    if current_options.get("auto_add") and not current_options.get("auto_add_secret"):
-        current_options["auto_add_secret"] = secrets.token_urlsafe(24)
+    # CallWebhook provisions its own PJSIP endpoints; TECH7Fox person auto-add and
+    # ingress registration are optional and would make first start depend on HA API availability.
+    current_options["auto_add"] = False
+    current_options["register_ingress_entry"] = False
+    current_options["auto_add_secret"] = ""
     options = requests.post(
         f"http://{host}/addons/{addon_slug}/options",
         headers=headers,

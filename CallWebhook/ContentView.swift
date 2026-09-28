@@ -943,6 +943,13 @@ private struct SetupWizardView: View {
         """ : ""
 
         let pjsip = """
+        [global]
+
+        [transport-udp]
+        type=transport
+        protocol=udp
+        bind=0.0.0.0:5060
+
         [callwebhook-ios-auth]
         type=auth
         auth_type=userpass

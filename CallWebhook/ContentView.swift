@@ -178,6 +178,8 @@ private struct SetupWizardView: View {
     @State private var fritzVoIPNumbers: [String] = []
     @State private var fritzTAMCount = 0
     @State private var fritzTAMs: [FritzTAM] = []
+    @State private var isSavingMailboxes = false
+    @State private var mailboxSaveError: String?
     @State private var mailbox1TAM = -1
     @State private var mailbox2TAM = -1
     @State private var mailbox3TAM = -1
@@ -272,10 +274,17 @@ private struct SetupWizardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .disabled(isSavingMailboxes)
+
+                if let mailboxSaveError {
+                    Text(mailboxSaveError).foregroundStyle(.red).padding(.horizontal)
+                }
+                if isSavingMailboxes { ProgressView("Anrufbeantworter-Zuordnung wird gespeichert …") }
 
                 HStack {
                     if step > 0 {
-                        Button("Zurück") { step -= 1 }
+                        Button("Zurück") { mailboxSaveError = nil; step -= 1 }
+                            .disabled(isSavingMailboxes)
                             .buttonStyle(.bordered)
                     }
                     Spacer()
@@ -283,12 +292,14 @@ private struct SetupWizardView: View {
                         if step == titles.count - 1 {
                             persistSetup()
                             onFinished()
+                        } else if step == 3 {
+                            Task { if await saveMailboxSelection() { step += 1 } }
                         } else {
                             step += 1
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canContinue)
+                    .disabled(!canContinue || isSavingMailboxes || (step == 3 && !mailboxSelectionVerified))
                 }
                 .padding()
             }
@@ -582,6 +593,7 @@ private struct SetupWizardView: View {
             Section("Leitung 1") {
                 TextField("Bezeichnung", text: $line1Label)
                 fritzNumberPicker("Absenderrufnummer", selection: $line1Number)
+                fritzMailboxPicker(selection: $mailbox1TAM)
                 Text(easybellEnabled ? "easybell / CLIP no screening" : "FRITZ!Box")
                     .foregroundStyle(.secondary)
             }
@@ -590,6 +602,7 @@ private struct SetupWizardView: View {
                 if sipLine2Enabled {
                     TextField("Bezeichnung", text: $line2Label)
                     fritzNumberPicker("Absenderrufnummer", selection: $line2Number)
+                    fritzMailboxPicker(selection: $mailbox2TAM)
                     TextField("Asterisk-Präfix", text: $sipLine2Prefix)
                         .keyboardType(.numbersAndPunctuation)
                 }
@@ -628,42 +641,13 @@ private struct SetupWizardView: View {
                             line3Number = ""
                         }
                     }
+                    fritzMailboxPicker(selection: $mailbox3TAM)
                     TextField("Asterisk-Präfix", text: $sipLine3Prefix)
                         .keyboardType(.numbersAndPunctuation)
                     Text("Direkter FRITZ!Box-Pfad ohne CLIP no screening")
                         .foregroundStyle(.secondary)
                 }
             }
-            if !fritzTAMs.isEmpty {
-                Section("Anrufbeantworter je Leitung") {
-                    Picker("\(line1Label) · \(line1Number.isEmpty ? "Rufnummer wählen" : line1Number)", selection: $mailbox1TAM) {
-                        Text("Nicht verwenden").tag(-1)
-                        ForEach(fritzTAMs) { tam in
-                            Text(tam.displayName).tag(tam.index)
-                        }
-                    }
-                    if sipLine2Enabled {
-                        Picker("\(line2Label) · \(line2Number.isEmpty ? "Rufnummer wählen" : line2Number)", selection: $mailbox2TAM) {
-                            Text("Nicht verwenden").tag(-1)
-                            ForEach(fritzTAMs) { tam in
-                                Text(tam.displayName).tag(tam.index)
-                            }
-                        }
-                    }
-                    if sipLine3Enabled {
-                        Picker("\(line3Label) · \(line3Number.isEmpty ? "Rufnummer wählen" : line3Number)", selection: $mailbox3TAM) {
-                            Text("Nicht verwenden").tag(-1)
-                            ForEach(fritzTAMs) { tam in
-                                Text(tam.displayName).tag(tam.index)
-                            }
-                        }
-                    }
-                    Text("Hier wird erst nach der Rufnummernauswahl festgelegt, welcher FRITZ!Box-Anrufbeantworter zu welcher CallWebhook-Leitung gehört.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
             Section("Rufnummer bei ausgehenden Anrufen") {
                 Toggle("Eigene Mobilfunknummer anzeigen", isOn: $easybellEnabled)
                 Text(easybellEnabled
@@ -725,13 +709,70 @@ private struct SetupWizardView: View {
         return first && second && third
     }
 
+    @ViewBuilder
+    private func fritzMailboxPicker(selection: Binding<Int>) -> some View {
+        Picker("Anrufbeantworter", selection: selection) {
+            Text("Nicht verwenden").tag(-1)
+            ForEach(fritzTAMs) { tam in
+                Text("\(tam.index + 1) · \(tam.displayName)").tag(tam.index)
+            }
+            if selection.wrappedValue >= 0 && !fritzTAMs.contains(where: { $0.index == selection.wrappedValue }) {
+                Text("Bisheriger Anrufbeantworter nicht verfügbar").tag(selection.wrappedValue)
+            }
+        }
+        if fritzTAMs.isEmpty {
+            Text("Keine aktiven Anrufbeantworter erkannt. In der FRITZ!Box einrichten und anschließend erneut auslesen.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     private var mailboxSelectionVerified: Bool {
-        guard !fritzTAMs.isEmpty else { return false }
-        let first = mailbox1TAM >= 0 && fritzTAMs.contains { $0.index == mailbox1TAM }
-        let second = !sipLine2Enabled || (mailbox2TAM >= 0 && fritzTAMs.contains { $0.index == mailbox2TAM })
-        let third = !sipLine3Enabled || (mailbox3TAM >= 0 && fritzTAMs.contains { $0.index == mailbox3TAM })
-        let selected = [mailbox1TAM, sipLine2Enabled ? mailbox2TAM : -1, sipLine3Enabled ? mailbox3TAM : -1].filter { $0 >= 0 }
-        return first && second && third && Set(selected).count == selected.count
+        let selected = [mailbox1TAM, sipLine2Enabled ? mailbox2TAM : -1, sipLine3Enabled ? mailbox3TAM : -1]
+        return selected.allSatisfy { value in
+            value == -1 || fritzTAMs.contains { $0.index == value }
+        }
+    }
+
+    @MainActor
+    private func saveMailboxSelection() async -> Bool {
+        guard !isSavingMailboxes, mailboxSelectionVerified else { return false }
+        isSavingMailboxes = true
+        mailboxSaveError = nil
+        defer { isSavingMailboxes = false }
+        do {
+            let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let base = URL(string: "http://192.168.178.\(input):8123"),
+                  let url = URL(string: "/api/callwebhook/setup/mailboxes", relativeTo: base)?.absoluteURL,
+                  var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
+                throw URLError(.userAuthenticationRequired)
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 15
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let assignments = ["mailbox_tam_1": mailbox1TAM,
+                               "mailbox_tam_2": sipLine2Enabled ? mailbox2TAM : -1,
+                               "mailbox_tam_3": sipLine3Enabled ? mailbox3TAM : -1]
+            request.httpBody = try JSONSerialization.data(withJSONObject: assignments)
+            var (data, response) = try await URLSession.shared.data(for: request)
+            if (response as? HTTPURLResponse)?.statusCode == 401 {
+                token = try await HomeAssistantAuth.shared.refresh(instance: base)
+                setupHAToken = token
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                (data, response) = try await URLSession.shared.data(for: request)
+            }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  result["ok"] as? Bool == true,
+                  result["assignments"] as? [String: Int] == assignments else {
+                throw URLError(.badServerResponse)
+            }
+            return true
+        } catch {
+            mailboxSaveError = "Anrufbeantworter-Zuordnung nicht gespeichert: \(error.localizedDescription). Bitte erneut auf Weiter tippen."
+            return false
+        }
     }
 
     private var verification: some View {
@@ -762,8 +803,8 @@ private struct SetupWizardView: View {
         if fritzTAMs.isEmpty { return "Keine FRITZ!-Mailbox erkannt" }
         var names: [String] = []
         if let tam = fritzTAMs.first(where: { $0.index == mailbox1TAM }) { names.append("\(line1Label): \(tam.displayName)") }
-        if let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("\(line2Label): \(tam.displayName)") }
-        if let tam = fritzTAMs.first(where: { $0.index == mailbox3TAM }) { names.append("\(line3Label): \(tam.displayName)") }
+        if sipLine2Enabled, let tam = fritzTAMs.first(where: { $0.index == mailbox2TAM }) { names.append("\(line2Label): \(tam.displayName)") }
+        if sipLine3Enabled, let tam = fritzTAMs.first(where: { $0.index == mailbox3TAM }) { names.append("\(line3Label): \(tam.displayName)") }
         return names.isEmpty ? "Nicht verwendet" : names.joined(separator: " · ")
     }
 
@@ -1987,7 +2028,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 4,
+            guard version >= 5,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

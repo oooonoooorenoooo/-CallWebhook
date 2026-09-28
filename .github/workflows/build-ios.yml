@@ -11,6 +11,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Test Home Assistant setup
+        run: python3 -m unittest discover -s tests -v
       - name: Test FRITZ phone-number list parsing
         run: |
           swiftc CallWebhook/FritzPhoneNumbers.swift tests/FritzPhoneNumbersTests.swift -o "$RUNNER_TEMP/fritz-number-tests"

@@ -15,7 +15,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 4
+BACKEND_API_VERSION = 5
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -94,7 +94,7 @@ def save_setup(mailbox_tam_1, mailbox_tam_2, mailbox_tam_3=None):
             values.append(number)
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     temp = BASE_DIR / "setup.json.tmp"
-    temp.write_text(json.dumps({"tams": values}, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.write_text(json.dumps({"tams": values, "assignments": {f"mailbox_tam_{index}": value for index, value in enumerate((mailbox_tam_1, mailbox_tam_2, mailbox_tam_3), 1)}}, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(SETUP_FILE)
     return values
 
@@ -845,6 +845,30 @@ class CallWebhookSetupStatusView(HomeAssistantView):
         })
 
 
+class CallWebhookMailboxSetupView(HomeAssistantView):
+    url = "/api/callwebhook/setup/mailboxes"
+    name = "api:callwebhook:setup:mailboxes"
+    requires_auth = True
+
+    async def post(self, request):
+        try:
+            payload = await request.json()
+            keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
+            if not isinstance(payload, dict) or any(
+                type(payload.get(key)) is not int or not -1 <= payload[key] <= 9
+                for key in keys
+            ):
+                raise ValueError("Ungültige Anrufbeantworter-Zuordnung")
+        except (ValueError, TypeError):
+            return self.json({"ok": False, "error": "Ungültige Anrufbeantworter-Zuordnung"}, status_code=400)
+        if _asterisk_setup_state.get("state") == "running":
+            return self.json({"ok": False, "error": "Asterisk-Einrichtung läuft noch"}, status_code=409)
+        hass = request.app["hass"]
+        async with _refresh_lock:
+            await hass.async_add_executor_job(save_setup, *(payload[key] for key in keys))
+        return self.json({"ok": True, "assignments": {key: payload[key] for key in keys}})
+
+
 class CallWebhookAsteriskSetupView(HomeAssistantView):
     url = "/api/callwebhook/setup/asterisk"
     name = "api:callwebhook:setup:asterisk"
@@ -1076,6 +1100,8 @@ async def async_setup(
     hass.http.register_view(
         CallWebhookSetupStatusView
     )
+
+    hass.http.register_view(CallWebhookMailboxSetupView)
 
     hass.http.register_view(
         CallWebhookAsteriskSetupView

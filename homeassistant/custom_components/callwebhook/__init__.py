@@ -613,34 +613,51 @@ def ensure_asterisk_addon():
     if not addon_slug:
         raise RuntimeError("Asterisk-Repository ist vorhanden, aber Supervisor liefert noch keinen Asterisk-App-Slug")
 
-    info_url = f"http://{host}/addons/{addon_slug}/info"
-    installed = requests.get(info_url, headers=headers, timeout=30)
-    if installed.status_code == 404:
+    store_info_url = f"http://{host}/store/addons/{addon_slug}"
+    availability = requests.get(f"{store_info_url}/availability", headers=headers, timeout=30)
+    if availability.status_code >= 400:
+        raise RuntimeError(f"Asterisk ist auf diesem Home-Assistant-System nicht installierbar: HTTP {availability.status_code} – {availability.text}")
+
+    store_info = requests.get(store_info_url, headers=headers, timeout=30)
+    if store_info.status_code >= 400:
+        raise RuntimeError(f"Asterisk-Store-Status konnte nicht gelesen werden: HTTP {store_info.status_code} – {store_info.text}")
+    try:
+        store_data = store_info.json().get("data", {})
+    except ValueError:
+        store_data = {}
+    installed_version = store_data.get("installed")
+
+    if not installed_version:
         install = requests.post(
-            f"http://{host}/store/addons/{addon_slug}/install",
+            f"{store_info_url}/install",
             headers=headers,
             json={"background": False},
             timeout=300,
         )
         if install.status_code >= 400:
             raise RuntimeError(f"Asterisk konnte nicht installiert werden: HTTP {install.status_code} – {install.text}")
-    elif installed.status_code >= 400:
-        raise RuntimeError(f"Asterisk-Status konnte nicht geprüft werden: HTTP {installed.status_code} – {installed.text}")
 
-    # Never claim installation success until Supervisor confirms the installed app exists.
-    confirmed = None
-    for _ in range(30):
-        confirmed = requests.get(info_url, headers=headers, timeout=30)
-        if confirmed.status_code < 300:
-            break
-        time.sleep(2)
-    if confirmed is None or confirmed.status_code >= 300:
-        detail = "" if confirmed is None else f"HTTP {confirmed.status_code} – {confirmed.text}"
-        raise RuntimeError(f"Asterisk-Installation wurde von Supervisor nicht bestätigt: {detail}")
+        installed_version = None
+        last_store_response = None
+        for _ in range(60):
+            last_store_response = requests.get(store_info_url, headers=headers, timeout=30)
+            if last_store_response.status_code < 300:
+                try:
+                    current = last_store_response.json().get("data", {})
+                    installed_version = current.get("installed")
+                except ValueError:
+                    installed_version = None
+                if installed_version:
+                    break
+            time.sleep(2)
+        if not installed_version:
+            detail = "" if last_store_response is None else f"HTTP {last_store_response.status_code} – {last_store_response.text}"
+            raise RuntimeError(f"Supervisor hat die Asterisk-Installation nicht bestätigt (installed ist leer): {detail}")
 
+    info_url = f"http://{host}/addons/{addon_slug}/info"
     start = requests.post(f"http://{host}/addons/{addon_slug}/start", headers=headers, json={}, timeout=120)
     if start.status_code not in (200, 201):
-        raise RuntimeError(f"Asterisk ist installiert, konnte aber nicht gestartet werden: HTTP {start.status_code} – {start.text}")
+        raise RuntimeError(f"Asterisk {installed_version} ist installiert, konnte aber nicht gestartet werden: HTTP {start.status_code} – {start.text}")
     for _ in range(45):
         state = requests.get(info_url, headers=headers, timeout=30)
         if state.status_code < 300:
@@ -654,7 +671,7 @@ def ensure_asterisk_addon():
             except ValueError:
                 pass
         time.sleep(2)
-    raise RuntimeError("Asterisk ist installiert, wurde aber innerhalb von 90 Sekunden nicht gestartet")
+    raise RuntimeError(f"Asterisk {installed_version} ist installiert, wurde aber innerhalb von 90 Sekunden nicht gestartet")
 
 def install_asterisk_config(pjsip, extensions, addon, custom_path):
     if not addon or not addon.endswith("_asterisk"):

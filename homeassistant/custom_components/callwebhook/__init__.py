@@ -32,27 +32,32 @@ ASTERISK_ADDON = "b35499aa_asterisk"
 requested_dir = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
 
 _refresh_lock = asyncio.Lock()
-_asterisk_setup_state = {"state": "idle", "message": "Noch nicht gestartet", "progress_step": 0, "progress_total": 5, "result": None}
+_asterisk_setup_state = {"state": "idle", "message": "Noch nicht gestartet", "progress_step": 0, "progress_total": 7, "result": None}
 
 async def _run_asterisk_setup(hass, payload):
     global _asterisk_setup_state
     try:
-        _asterisk_setup_state = {"state": "running", "message": "Asterisk-Repository und Store werden geprüft …", "progress_step": 0, "progress_total": 5, "result": None}
-        actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
-        _asterisk_setup_state["progress_step"] = 2
-        _asterisk_setup_state["message"] = "Asterisk installiert – Konfiguration wird geschrieben …"
+        _asterisk_setup_state = {"state": "running", "message": "Asterisk-Repository und Store werden geprüft …", "progress_step": 0, "progress_total": 7, "result": None}
+        def report_progress(step, message):
+            _asterisk_setup_state["progress_step"] = step
+            _asterisk_setup_state["message"] = message
+        actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon, report_progress)
+        _asterisk_setup_state["progress_step"] = 5
+        _asterisk_setup_state["message"] = "Asterisk läuft – Konfiguration wird geschrieben …"
         actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
         files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), payload.get("extensions"), actual_addon, actual_path)
-        _asterisk_setup_state["progress_step"] = 3
+        _asterisk_setup_state["progress_step"] = 6
         configured_tams = await hass.async_add_executor_job(save_setup, payload.get("mailbox_tam_1"), payload.get("mailbox_tam_2"), payload.get("mailbox_tam_3"))
         _asterisk_setup_state["message"] = "Asterisk-Konfiguration geschrieben – Neustart läuft …"
         await hass.services.async_call("hassio", "addon_restart", {"addon": actual_addon}, blocking=True)
-        _asterisk_setup_state["progress_step"] = 4
-        await hass.async_add_executor_job(ensure_asterisk_addon)
+        _asterisk_setup_state["progress_step"] = 6
+        _asterisk_setup_state["message"] = "Asterisk wird neu gestartet und abschließend geprüft …"
+        await hass.services.async_call("hassio", "addon_start", {"addon": actual_addon}, blocking=True)
+        _asterisk_setup_state["progress_step"] = 7
         result = {"addon": actual_addon, "files": files, "config_verified": all(Path(path).exists() for path in files), "mailbox_tams": configured_tams}
-        _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "progress_step": 5, "progress_total": 5, "result": result}
+        _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "progress_step": 5, "progress_total": 7, "result": result}
     except Exception as error:
-        _asterisk_setup_state = {"state": "error", "message": str(error), "progress_step": _asterisk_setup_state.get("progress_step", 0), "progress_total": 5, "result": None}
+        _asterisk_setup_state = {"state": "error", "message": str(error), "progress_step": _asterisk_setup_state.get("progress_step", 0), "progress_total": 7, "result": None}
 
 
 
@@ -568,7 +573,10 @@ async def mailbox_refresh_loop(
 
 
 
-def ensure_asterisk_addon():
+def ensure_asterisk_addon(progress=None):
+    def progress_update(step, message):
+        if progress:
+            progress(step, message)
     host = os.environ.get("SUPERVISOR", "supervisor")
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
@@ -584,6 +592,7 @@ def ensure_asterisk_addon():
     )
     if repo.status_code not in (200, 201, 400, 409):
         raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
+    progress_update(1, "Asterisk-Repository bereit – Store wird aktualisiert …")
 
     # Force Supervisor to refresh the store, then discover the real generated app slug.
     requests.post(f"http://{host}/store/reload", headers=headers, json={}, timeout=120)
@@ -616,6 +625,7 @@ def ensure_asterisk_addon():
         time.sleep(2)
     if not addon_slug:
         raise RuntimeError("Asterisk-Repository ist vorhanden, aber Supervisor liefert noch keinen Asterisk-App-Slug")
+    progress_update(2, "Asterisk im Store gefunden – Installation wird geprüft …")
 
     store_info_url = f"http://{host}/store/addons/{addon_slug}"
     availability = requests.get(f"{store_info_url}/availability", headers=headers, timeout=30)
@@ -657,6 +667,7 @@ def ensure_asterisk_addon():
         if not installed_version:
             detail = "" if last_store_response is None else f"HTTP {last_store_response.status_code} – {last_store_response.text}"
             raise RuntimeError(f"Supervisor hat die Asterisk-Installation nicht bestätigt (installed ist leer): {detail}")
+    progress_update(3, "Asterisk installiert – Pflichtkonfiguration wird gesetzt …")
 
     info_url = f"http://{host}/addons/{addon_slug}/info"
 
@@ -701,6 +712,7 @@ def ensure_asterisk_addon():
     )
     if options.status_code not in (200, 201):
         raise RuntimeError(f"Asterisk wurde installiert, aber die Pflichtkonfiguration konnte nicht gesetzt werden: HTTP {options.status_code} – {options.text}")
+    progress_update(4, "Asterisk konfiguriert – Add-on wird gestartet …")
 
     start = requests.post(f"http://{host}/addons/{addon_slug}/start", headers=headers, json={}, timeout=120)
     if start.status_code not in (200, 201):
@@ -712,6 +724,7 @@ def ensure_asterisk_addon():
                 data = state.json().get("data", {})
                 current = str(data.get("state", "")).lower()
                 if current == "started":
+                    progress_update(5, "Asterisk gestartet – CallWebhook-Konfiguration folgt …")
                     return addon_slug
                 if current in ("error", "failed"):
                     raise RuntimeError(f"Asterisk meldet nach dem Start den Zustand {current}")
@@ -805,7 +818,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             return self.json({"ok": False, "error": "Ungültiges JSON"}, status_code=400)
         if _asterisk_setup_state.get("state") == "running":
             return self.json({"ok": True, "state": "running"}, status_code=202)
-        _asterisk_setup_state = {"state": "running", "message": "Asterisk-Einrichtung wird gestartet …", "progress_step": 0, "progress_total": 5, "result": None}
+        _asterisk_setup_state = {"state": "running", "message": "Asterisk-Einrichtung wird gestartet …", "progress_step": 0, "progress_total": 7, "result": None}
         hass.async_create_task(_run_asterisk_setup(hass, payload))
         return self.json({"ok": True, "state": "started"}, status_code=202)
 

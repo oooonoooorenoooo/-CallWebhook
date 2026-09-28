@@ -608,6 +608,59 @@ private struct SetupWizardView: View {
         ]
 
         do {
+            func supervisorRequest(_ path: String, method: String = "POST", body: [String: Any]? = nil) async throws -> (Data, HTTPURLResponse) {
+                guard let supervisorURL = URL(string: path, relativeTo: base)?.absoluteURL else { throw URLError(.badURL) }
+                var supervisor = URLRequest(url: supervisorURL)
+                supervisor.httpMethod = method
+                supervisor.timeoutInterval = 60
+                supervisor.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
+                if let body {
+                    supervisor.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    supervisor.httpBody = try JSONSerialization.data(withJSONObject: body)
+                }
+                var (data, response) = try await URLSession.shared.data(for: supervisor)
+                var http = response as? HTTPURLResponse
+                if http?.statusCode == 401 {
+                    haToken = try await HomeAssistantAuth.shared.refresh(instance: base)
+                    setupHAToken = haToken
+                    supervisor.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
+                    (data, response) = try await URLSession.shared.data(for: supervisor)
+                    http = response as? HTTPURLResponse
+                }
+                guard let http else { throw URLError(.badServerResponse) }
+                return (data, http)
+            }
+
+            asteriskConfigStatus = "Prüfe Asterisk-Add-on …"
+            let (_, infoResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/info", method: "GET")
+            if infoResponse.statusCode == 404 {
+                asteriskConfigStatus = "Installiere Asterisk-Repository …"
+                let (_, repoResponse) = try await supervisorRequest(
+                    "/api/hassio/store/repositories",
+                    body: ["repository": "https://github.com/TECH7Fox/asterisk-hass-addons"]
+                )
+                guard (200..<300).contains(repoResponse.statusCode) || repoResponse.statusCode == 400 else {
+                    asteriskConfigStatus = "Asterisk-Repository konnte nicht hinzugefügt werden (HTTP \(repoResponse.statusCode))"
+                    return
+                }
+                asteriskConfigStatus = "Installiere Asterisk …"
+                let (_, installResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/install")
+                guard (200..<300).contains(installResponse.statusCode) else {
+                    asteriskConfigStatus = "Asterisk konnte nicht installiert werden (HTTP \(installResponse.statusCode))"
+                    return
+                }
+            } else if !(200..<300).contains(infoResponse.statusCode) {
+                asteriskConfigStatus = "Asterisk-Status konnte nicht geprüft werden (HTTP \(infoResponse.statusCode))"
+                return
+            }
+
+            let (_, startResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/start")
+            guard (200..<300).contains(startResponse.statusCode) || startResponse.statusCode == 400 else {
+                asteriskConfigStatus = "Asterisk konnte nicht gestartet werden (HTTP \(startResponse.statusCode))"
+                return
+            }
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             var (data, response) = try await URLSession.shared.data(for: request)
             var http = response as? HTTPURLResponse
@@ -647,7 +700,7 @@ private struct SetupWizardView: View {
             let defaults = UserDefaults.standard
             defaults.set(true, forKey: "sipEnabled")
             defaults.set("callwebhook-ios", forKey: "sipUsername")
-            defaults.set(iosPassword, forKey: "sipPassword")
+            defaults.removeObject(forKey: "sipPassword")
             defaults.set(host, forKey: "sipHost")
 
             asteriskInstalled = false

@@ -883,7 +883,13 @@ private struct SetupWizardView: View {
         case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated
         case 2: return homeAssistantReachable
         case 3:
-            return !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
+            let linesReady = !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
+            let easybellReady = !easybellEnabled || (
+                !easybellUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !easybellPassword.isEmpty
+                    && !easybellContactUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+            return linesReady && easybellReady
         case 4:
             return fritzReachable
                 && fritzAuthenticated

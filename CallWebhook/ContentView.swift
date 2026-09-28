@@ -427,9 +427,13 @@ private struct SetupWizardView: View {
                 Button {
                     prepareAsteriskConfiguration()
                 } label: {
-                    Label("Asterisk-Konfiguration vorbereiten", systemImage: "server.rack")
+                    Label(
+                        asteriskConfigReady ? "Asterisk-Konfiguration vorbereitet" : "Asterisk-Konfiguration vorbereiten",
+                        systemImage: asteriskConfigReady ? "checkmark.circle.fill" : "server.rack"
+                    )
+                    .foregroundStyle(asteriskConfigReady ? .green : .blue)
                 }
-                .disabled(!homeAssistantReachable)
+                .disabled(asteriskConfigReady || !homeAssistantReachable)
                 Label(asteriskConfigStatus, systemImage: asteriskConfigReady ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(asteriskConfigReady ? .green : .secondary)
                 Button {

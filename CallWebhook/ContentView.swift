@@ -31,7 +31,7 @@ private final class FritzAuthDelegate: NSObject, URLSessionTaskDelegate, @unchec
     }
 }
 
-private enum SetupKeychain {
+enum SetupKeychain {
     private static let service = "de.reno.CallWebhook.setup"
 
     static func set(_ value: String, account: String) throws {

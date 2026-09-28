@@ -551,63 +551,84 @@ def ensure_asterisk_addon():
     if not token:
         raise RuntimeError("Home Assistant Supervisor-Token ist intern nicht verfügbar")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    info_url = f"http://{host}/addons/{ASTERISK_ADDON}/info"
-    info = requests.get(info_url, headers=headers, timeout=30)
-    if info.status_code == 404:
-        repo = requests.post(
-            f"http://{host}/store/repositories",
-            headers=headers,
-            json={"repository": "https://github.com/TECH7Fox/asterisk-hass-addons"},
-            timeout=120,
-        )
-        if repo.status_code not in (200, 201, 400, 409):
-            raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
-        # A newly added custom repository is indexed asynchronously by Supervisor.
-        # Wait until the Asterisk app is visible in the store before installing it.
-        store_info = None
-        for _ in range(30):
-            store_info = requests.get(
-                f"http://{host}/store/addons/{ASTERISK_ADDON}",
-                headers=headers,
-                timeout=30,
-            )
-            if store_info.status_code < 300:
-                break
-            time.sleep(2)
-        if store_info is None or store_info.status_code >= 300:
-            detail = "" if store_info is None else f"HTTP {store_info.status_code} – {store_info.text}"
-            raise RuntimeError(f"Asterisk-Repository wurde hinzugefügt, aber Asterisk ist noch nicht im Store verfügbar: {detail}")
+    repository_url = "https://github.com/TECH7Fox/asterisk-hass-addons"
+
+    repo = requests.post(
+        f"http://{host}/store/repositories",
+        headers=headers,
+        json={"repository": repository_url},
+        timeout=120,
+    )
+    if repo.status_code not in (200, 201, 400, 409):
+        raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
+
+    # Force Supervisor to refresh the store, then discover the real generated app slug.
+    requests.post(f"http://{host}/store/reload", headers=headers, json={}, timeout=120)
+    addon_slug = None
+    addon_info = None
+    for _ in range(45):
+        listing = requests.get(f"http://{host}/store/addons", headers=headers, timeout=30)
+        if listing.status_code < 300:
+            try:
+                payload = listing.json()
+                candidates = payload.get("data", payload)
+                if isinstance(candidates, dict):
+                    candidates = candidates.get("addons", [])
+                for item in candidates if isinstance(candidates, list) else []:
+                    repo_value = str(item.get("repository", ""))
+                    name_value = str(item.get("name", ""))
+                    slug_value = str(item.get("slug", ""))
+                    if (
+                        "TECH7Fox/asterisk-hass-addons" in repo_value
+                        or name_value.lower() == "asterisk"
+                        or slug_value.lower().endswith("_asterisk")
+                    ):
+                        addon_slug = slug_value
+                        addon_info = item
+                        break
+            except (ValueError, TypeError):
+                pass
+        if addon_slug:
+            break
+        time.sleep(2)
+    if not addon_slug:
+        raise RuntimeError("Asterisk-Repository ist vorhanden, aber Supervisor liefert noch keinen Asterisk-App-Slug")
+
+    info_url = f"http://{host}/addons/{addon_slug}/info"
+    installed = requests.get(info_url, headers=headers, timeout=30)
+    if installed.status_code == 404:
         install = requests.post(
-            f"http://{host}/store/addons/{ASTERISK_ADDON}/install",
+            f"http://{host}/store/addons/{addon_slug}/install",
             headers=headers,
             json={"background": False},
-            timeout=180,
+            timeout=300,
         )
         if install.status_code >= 400:
             raise RuntimeError(f"Asterisk konnte nicht installiert werden: HTTP {install.status_code} – {install.text}")
-    elif info.status_code >= 400:
-        raise RuntimeError(f"Asterisk-Status konnte nicht geprüft werden: HTTP {info.status_code} – {info.text}")
-    start = requests.post(f"http://{host}/addons/{ASTERISK_ADDON}/start", headers=headers, json={}, timeout=120)
+    elif installed.status_code >= 400:
+        raise RuntimeError(f"Asterisk-Status konnte nicht geprüft werden: HTTP {installed.status_code} – {installed.text}")
+
+    start = requests.post(f"http://{host}/addons/{addon_slug}/start", headers=headers, json={}, timeout=120)
     if start.status_code not in (200, 201, 400):
         raise RuntimeError(f"Asterisk konnte nicht gestartet werden: HTTP {start.status_code} – {start.text}")
-    for _ in range(30):
+    for _ in range(45):
         state = requests.get(info_url, headers=headers, timeout=30)
         if state.status_code < 300:
             try:
                 data = state.json().get("data", {})
                 if str(data.get("state", "")).lower() == "started":
-                    return
+                    return addon_slug
             except ValueError:
                 pass
         time.sleep(2)
-    raise RuntimeError("Asterisk wurde installiert, ist aber nach 60 Sekunden noch nicht bereit")
-
+    raise RuntimeError("Asterisk wurde installiert, ist aber nach 90 Sekunden noch nicht bereit")
 
 def install_asterisk_config(pjsip, extensions, addon, custom_path):
-    if addon != ASTERISK_ADDON:
+    if not addon or not addon.endswith("_asterisk"):
         raise RuntimeError("Unbekanntes Asterisk-Add-on")
     requested_dir = Path(custom_path)
-    if requested_dir != ASTERISK_CUSTOM_DIR:
+    expected_dir = Path(f"/addon_configs/{addon}/asterisk/custom")
+    if requested_dir != expected_dir:
         raise RuntimeError("Unzulässiger Asterisk-Konfigurationspfad")
     try:
         ASTERISK_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)

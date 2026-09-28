@@ -18,3 +18,15 @@ Sources checked 2026-09-28:
 - https://www.o2online.de/ratgeber/hacks-tipps/rufumleitung-iphone/
 - https://www.o2online.de/content/dam/o2/documents/preislisten/o2-prepaid-preisliste-mobilfunk.pdf
 - https://github.com/home-assistant/core/blob/dev/homeassistant/components/input_boolean/__init__.py
+
+## Emergency routing
+
+Emergency numbers 112/110 and other recognized national short numbers bypass SIP in both DialerModel entry points and, independently, in SIPService before setup or prefixing. Other two/three-digit public short numbers and the listed 116 assistance numbers also use cellular routing so national services resolve at the handset location. Internal FRITZ extension notation such as `**621` is preserved. This does not label all short numbers as emergency numbers.
+
+The explicit call button opens Apple's `telephony:` scheme, never `tel:`, without a preset SIM or a SIP fallback. The system handles network and emergency behavior. Incoming default-app intents show a cellular-call button even before setup. Startup also offers 112 without completing the wizard. Tests exercise routing only; no test emergency calls are placed.
+
+Sources:
+- https://www.bundesnetzagentur.de/DE/Fachthemen/Telekommunikation/Unternehmenspflichten/Notruf/110_112/110und112-node.html
+- https://europa.eu/youreurope/citizens/travel/security-and-emergencies/emergency/index_en.htm
+- https://www.service-public.fr/particuliers/vosdroits/F33954
+- https://www.oesterreich.gv.at/de/themen/notfaelle_unfaelle_und_kriminalitaet/notrufnummern

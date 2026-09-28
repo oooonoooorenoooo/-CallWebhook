@@ -79,6 +79,17 @@ final class SIPService: ObservableObject {
     }
 
     func call(_ number: String, line: Int = 1) throws {
+        // Defense in depth for future callers bypassing DialerModel. This check
+        // MUST precede configuration, registration and any line-prefix addition.
+        if let cellularNumber = CellularRouting.cellularOnlyNumber(number) {
+            status = "\(cellularNumber) wird über iOS-Mobilfunk gewählt …"
+            SystemCellularDialer.call(cellularNumber) { opened in
+                Task { @MainActor in
+                    self.status = opened ? "An iOS-Mobilfunk übergeben" : "iPhone-Notruffunktion verwenden – Mobilfunkübergabe fehlgeschlagen"
+                }
+            }
+            return
+        }
         if core == nil {
             try configureAndStart()
         }

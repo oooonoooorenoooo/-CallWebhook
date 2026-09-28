@@ -24,6 +24,10 @@ final class DialerModel: ObservableObject {
     func call(line: Int) {
         let value = number.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        if let cellularNumber = CellularRouting.cellularOnlyNumber(value) {
+            callSystemNumber(cellularNumber)
+            return
+        }
         if MobileForwarding.isNetworkCode(value) {
             openCellularNetworkCode(value)
             return
@@ -42,6 +46,10 @@ final class DialerModel: ObservableObject {
     func call(_ phoneNumber: String) {
         let value = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        if let cellularNumber = CellularRouting.cellularOnlyNumber(value) {
+            callSystemNumber(cellularNumber)
+            return
+        }
         if MobileForwarding.isNetworkCode(value) {
             openCellularNetworkCode(value)
             return
@@ -69,6 +77,17 @@ final class DialerModel: ObservableObject {
                 status = "Mobilfunkanruf gestartet"
             } catch {
                 status = "Fehler: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func callSystemNumber(_ number: String) {
+        status = "\(number) wird über iOS-Mobilfunk gewählt …"
+        SystemCellularDialer.call(number) { opened in
+            Task { @MainActor in
+                self.status = opened
+                    ? "\(number) an die iOS-Mobilfunktelefonie übergeben"
+                    : "iOS konnte nicht geöffnet werden. Für einen Notruf die Notruffunktion des iPhones verwenden."
             }
         }
     }

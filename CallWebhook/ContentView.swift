@@ -106,12 +106,14 @@ struct ContentView: View {
             NavigationStack {
                 Form {
                     Text(dialer.number).font(.system(.title3, design: .monospaced)).textSelection(.enabled)
-                    Text("Mobilfunk-Steuercode: Die SIM muss zur Handynummer der einzurichtenden Leitung gehören. Bitte die SIM im Systemdialog prüfen.")
+                    Text(CellularRouting.cellularOnlyNumber(dialer.number) != nil
+                        ? "Diese Nummer wird über die Mobilfunktelefonie des iPhones gewählt. Home Assistant und Asterisk werden dafür nicht benötigt."
+                        : "Mobilfunk-Steuercode: Die SIM muss zur Handynummer der einzurichtenden Leitung gehören. Bitte die SIM im Systemdialog prüfen.")
                     Button("Über Mobilfunk wählen") { dialer.call(dialer.number) }
                     Button("Code kopieren") { UIPasteboard.general.string = dialer.number }
                     Text(dialer.status).font(.caption)
                 }
-                .navigationTitle("Mobilfunk-Steuercode")
+                .navigationTitle(CellularRouting.cellularOnlyNumber(dialer.number) != nil ? "Mobilfunkanruf" : "Mobilfunk-Steuercode")
                 .toolbar { Button("Zurück") { showNetworkCode = false } }
             }
         }
@@ -135,10 +137,10 @@ struct ContentView: View {
     }
 
     private func showIncomingNumber(_ value: String) {
-        let number = value.filter { "+*#0123456789".contains($0) }
+        let number = CellularRouting.cellularOnlyNumber(value) ?? value.filter { "+*#0123456789,;".contains($0) }
         guard !number.isEmpty else { return }
         dialer.number = number
-        if MobileForwarding.isNetworkCode(number) { showNetworkCode = true }
+        if CellularRouting.cellularOnlyNumber(number) != nil || MobileForwarding.isNetworkCode(number) { showNetworkCode = true }
         selectedTab = 3
     }
 
@@ -3195,7 +3197,9 @@ private struct DialPadView: View {
                 }
 
                 HStack(spacing: 18) {
-                    if sipEnabled {
+                    if CellularRouting.cellularOnlyNumber(dialer.number) != nil {
+                        callButton(line: nil)
+                    } else if sipEnabled {
                         sipCallButton(line: 1)
                         if sipLine2Enabled { sipCallButton(line: 2) }
                         if sipLine3Enabled { sipCallButton(line: 3) }

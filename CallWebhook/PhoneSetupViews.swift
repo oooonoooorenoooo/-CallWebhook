@@ -9,6 +9,7 @@ struct DefaultPhoneAppsView: View {
     @State private var dialingConfirmed = false
     @State private var availableSIMs = 0
     @State private var settingsError: String?
+    @State private var emergencyError: String?
 
     var body: some View {
         NavigationStack {
@@ -35,6 +36,14 @@ struct DefaultPhoneAppsView: View {
                 Button("Weiter") { onContinue() }
                     .disabled(!callingConfirmed || !dialingConfirmed)
                 Button("Später einrichten") { onContinue() }
+                Section("Notruf") {
+                    Button("112 über Mobilfunk wählen") {
+                        SystemCellularDialer.call("112") { opened in
+                            if !opened { emergencyError = "Bitte die Notruffunktion des iPhones verwenden." }
+                        }
+                    }
+                    if let emergencyError { Text(emergencyError).foregroundStyle(.red) }
+                }
             }
             .navigationTitle("Standard-Apps")
         }

@@ -21,6 +21,10 @@ jobs:
         run: |
           swiftc CallWebhook/MobileProviders.swift tests/MobileForwardingTests.swift -o "$RUNNER_TEMP/mobile-forwarding-tests"
           "$RUNNER_TEMP/mobile-forwarding-tests"
+      - name: Test emergency cellular routing without placing calls
+        run: |
+          swiftc CallWebhook/CellularRouting.swift tests/CellularRoutingTests.swift -o "$RUNNER_TEMP/cellular-routing-tests"
+          "$RUNNER_TEMP/cellular-routing-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Install development signing

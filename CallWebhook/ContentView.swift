@@ -1525,7 +1525,18 @@ private struct SetupWizardView: View {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
-            throw NSError(domain: "CallWebhook.TR064", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "TR-064 HTTP \(http.statusCode)"])
+            let responseText = String(data: data, encoding: .utf8) ?? ""
+            let errorCode = firstXMLValue("errorCode", in: responseText) ?? "?"
+            let errorDescription = firstXMLValue("errorDescription", in: responseText) ?? "keine Beschreibung"
+            let argumentNames = arguments.map(\.0).joined(separator: ", ")
+            throw NSError(
+                domain: "CallWebhook.TR064",
+                code: http.statusCode,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "TR-064 HTTP \(http.statusCode) · AVM \(errorCode): \(errorDescription) · \(action) [\(argumentNames)]"
+                ]
+            )
         }
         guard let text = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeContentData) }
         return text

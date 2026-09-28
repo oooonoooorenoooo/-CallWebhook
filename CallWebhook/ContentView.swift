@@ -591,9 +591,12 @@ private struct SetupWizardView: View {
             }
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let ok = (json?["ok"] as? Bool) ?? false
-            guard ok else {
+            let configVerified = (json?["config_verified"] as? Bool) ?? false
+            guard ok && configVerified else {
                 asteriskInstalled = false
-                asteriskConfigStatus = "Home Assistant hat die Installation nicht bestätigt"
+                asteriskConfigStatus = ok
+                    ? "Asterisk-Konfiguration wurde geschrieben, aber nicht verifiziert"
+                    : "Home Assistant hat die Installation nicht bestätigt"
                 return
             }
             try? SetupKeychain.set(haToken, account: "home-assistant-token")

@@ -15,7 +15,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 2
+BACKEND_API_VERSION = 3
 
 HOST = "192.168.178.1"
 DEFAULT_TAMS = ("1", "2")
@@ -52,9 +52,9 @@ async def _run_asterisk_setup(hass, payload):
         await hass.services.async_call("hassio", "addon_restart", {"addon": actual_addon}, blocking=True)
         _asterisk_setup_state["progress_step"] = 6
         _asterisk_setup_state["message"] = "Asterisk wird neu gestartet und abschließend geprüft …"
-        await hass.services.async_call("hassio", "addon_start", {"addon": actual_addon}, blocking=True)
+        await hass.async_add_executor_job(wait_for_asterisk_started, actual_addon)
         _asterisk_setup_state["progress_step"] = 7
-        result = {"addon": actual_addon, "files": files, "config_verified": all(Path(path).exists() for path in files), "mailbox_tams": configured_tams}
+        result = {"addon": actual_addon, "files": files, "config_verified": True, "mailbox_tams": configured_tams}
         _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "progress_step": 7, "progress_total": 7, "result": result}
     except Exception as error:
         _asterisk_setup_state = {"state": "error", "message": str(error), "progress_step": _asterisk_setup_state.get("progress_step", 0), "progress_total": 7, "result": None}
@@ -584,47 +584,27 @@ def ensure_asterisk_addon(progress=None):
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     repository_url = "https://github.com/TECH7Fox/asterisk-hass-addons"
 
-    repo = requests.post(
-        f"http://{host}/store/repositories",
-        headers=headers,
-        json={"repository": repository_url},
-        timeout=120,
-    )
-    if repo.status_code not in (200, 201, 400, 409):
-        raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
-    progress_update(1, "Asterisk-Repository bereit – Store wird aktualisiert …")
-
-    # Force Supervisor to refresh the store, then discover the real generated app slug.
-    requests.post(f"http://{host}/store/reload", headers=headers, json={}, timeout=120)
+    store = supervisor_request("GET", "/store")
+    def repository_ids(value):
+        return {item["slug"] for item in value.get("repositories", [])
+            if item.get("source", "").rstrip("/").removesuffix(".git").lower() == repository_url.lower()}
+    if not repository_ids(store):
+        supervisor_request("POST", "/store/repositories", {"repository": repository_url}, timeout=120)
+    progress_update(1, "Asterisk-Repository bestätigt – Store wird geprüft …")
     addon_slug = None
-    addon_info = None
-    for _ in range(45):
-        listing = requests.get(f"http://{host}/store/addons", headers=headers, timeout=30)
-        if listing.status_code < 300:
-            try:
-                payload = listing.json()
-                candidates = payload.get("data", payload)
-                if isinstance(candidates, dict):
-                    candidates = candidates.get("addons", [])
-                for item in candidates if isinstance(candidates, list) else []:
-                    repo_value = str(item.get("repository", ""))
-                    name_value = str(item.get("name", ""))
-                    slug_value = str(item.get("slug", ""))
-                    if (
-                        "TECH7Fox/asterisk-hass-addons" in repo_value
-                        or name_value.lower() == "asterisk"
-                        or slug_value.lower().endswith("_asterisk")
-                    ):
-                        addon_slug = slug_value
-                        addon_info = item
-                        break
-            except (ValueError, TypeError):
-                pass
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        store = supervisor_request("GET", "/store")
+        repositories = repository_ids(store)
+        for item in store.get("addons", store.get("apps", [])):
+            if item.get("repository") in repositories and item.get("slug") == item.get("repository", "") + "_asterisk":
+                addon_slug = item["slug"]
+                break
         if addon_slug:
             break
-        time.sleep(2)
+        time.sleep(0.5)
     if not addon_slug:
-        raise RuntimeError("Asterisk-Repository ist vorhanden, aber Supervisor liefert noch keinen Asterisk-App-Slug")
+        raise RuntimeError("Asterisk wurde im bestätigten TECH7Fox-Repository noch nicht gefunden")
     progress_update(2, "Asterisk im Store gefunden – Installation wird geprüft …")
 
     store_info_url = f"http://{host}/store/addons/{addon_slug}"
@@ -653,7 +633,7 @@ def ensure_asterisk_addon(progress=None):
 
         installed_version = None
         last_store_response = None
-        for _ in range(60):
+        for _ in range(240):
             last_store_response = requests.get(store_info_url, headers=headers, timeout=30)
             if last_store_response.status_code < 300:
                 try:
@@ -663,7 +643,7 @@ def ensure_asterisk_addon(progress=None):
                     installed_version = None
                 if installed_version:
                     break
-            time.sleep(2)
+            time.sleep(0.5)
         if not installed_version:
             detail = "" if last_store_response is None else f"HTTP {last_store_response.status_code} – {last_store_response.text}"
             raise RuntimeError(f"Supervisor hat die Asterisk-Installation nicht bestätigt (installed ist leer): {detail}")
@@ -679,6 +659,7 @@ def ensure_asterisk_addon(progress=None):
         info_data = installed_info.json().get("data", {})
         current_options = dict(info_data.get("options") or {})
     except (ValueError, TypeError):
+        info_data = {}
         current_options = {}
     if not current_options:
         current_options = {
@@ -698,7 +679,7 @@ def ensure_asterisk_addon(progress=None):
             "mailbox_google_api_key": "",
             "log_level": "info",
         }
-    current_options["ami_password"] = secrets.token_urlsafe(32)
+    current_options["ami_password"] = current_options.get("ami_password") or secrets.token_urlsafe(32)
     # CallWebhook provisions its own PJSIP endpoints; TECH7Fox person auto-add and
     # ingress registration are optional and would make first start depend on HA API availability.
     current_options["auto_add"] = False
@@ -714,10 +695,9 @@ def ensure_asterisk_addon(progress=None):
         raise RuntimeError(f"Asterisk wurde installiert, aber die Pflichtkonfiguration konnte nicht gesetzt werden: HTTP {options.status_code} – {options.text}")
     progress_update(4, "Asterisk konfiguriert – Add-on wird gestartet …")
 
-    start = requests.post(f"http://{host}/addons/{addon_slug}/start", headers=headers, json={}, timeout=120)
-    if start.status_code not in (200, 201):
-        raise RuntimeError(f"Asterisk {installed_version} ist installiert, konnte aber nicht gestartet werden: HTTP {start.status_code} – {start.text}")
-    for _ in range(45):
+    if info_data.get("state") != "started":
+        supervisor_request("POST", f"/addons/{addon_slug}/start", {}, timeout=120)
+    for _ in range(180):
         state = requests.get(info_url, headers=headers, timeout=30)
         if state.status_code < 300:
             try:
@@ -730,62 +710,75 @@ def ensure_asterisk_addon(progress=None):
                     raise RuntimeError(f"Asterisk meldet nach dem Start den Zustand {current}")
             except ValueError:
                 pass
-        time.sleep(2)
+        time.sleep(0.5)
     raise RuntimeError(f"Asterisk {installed_version} ist installiert, wurde aber innerhalb von 90 Sekunden nicht gestartet")
 
-def install_asterisk_config(pjsip, extensions, addon, custom_path):
-    if not addon or not addon.endswith("_asterisk"):
-        raise RuntimeError("Unbekanntes Asterisk-Add-on")
-    requested_dir = Path(custom_path)
-    expected_dir = Path(f"/addon_configs/{addon}/asterisk/custom")
-    if requested_dir != expected_dir:
-        raise RuntimeError("Unzulässiger Asterisk-Konfigurationspfad")
-    try:
-        requested_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as error:
-        raise RuntimeError(
-            "Asterisk-Konfigurationsordner konnte nicht angelegt werden: "
-            f"{requested_dir}: {error}"
-        ) from error
-    if not requested_dir.is_dir():
-        raise RuntimeError(
-            "Asterisk-Konfigurationspfad ist kein Verzeichnis: "
-            f"{requested_dir}"
-        )
-    if not isinstance(pjsip, str) or not pjsip.strip():
-        raise RuntimeError("pjsip-Konfiguration fehlt")
-    if not isinstance(extensions, str) or not extensions.strip():
-        raise RuntimeError("extensions-Konfiguration fehlt")
-    required_pjsip = ("[fritz1-auth]", "[fritz1-endpoint]", "[fritz2-auth]", "[fritz2-endpoint]")
-    required_extensions = ("[from-callwebhook-ios]",)
-    if not all(token in pjsip for token in required_pjsip):
-        raise RuntimeError("pjsip-Konfiguration unvollständig")
-    if not all(token in extensions for token in required_extensions):
-        raise RuntimeError("extensions-Konfiguration unvollständig")
+def supervisor_request(method, endpoint, payload=None, timeout=30):
+    host = os.environ.get("SUPERVISOR", "supervisor")
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        raise RuntimeError("Supervisor-Token fehlt")
+    response = requests.request(method, f"http://{host}{endpoint}",
+        headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=timeout)
+    response.raise_for_status()
+    body = response.json()
+    if body.get("result") == "error":
+        raise RuntimeError(body.get("message", "Supervisor-Anfrage fehlgeschlagen"))
+    return body.get("data", {})
 
-    targets = {
-        requested_dir / "pjsip.conf": pjsip,
-        requested_dir / "extensions.conf": extensions,
-    }
-    backups = {}
-    try:
-        for target, content in targets.items():
-            if target.exists():
-                backup = target.with_suffix(target.suffix + ".bak")
-                backup.write_bytes(target.read_bytes())
-                backups[target] = backup
-            temp = target.with_suffix(target.suffix + ".tmp")
-            temp.write_text(content.rstrip() + "\n", encoding="utf-8")
-            temp.replace(target)
-            written = target.read_text(encoding="utf-8")
-            if written != content.rstrip() + "\n":
-                raise RuntimeError(f"Asterisk-Konfiguration konnte nicht verifiziert werden: {target.name}")
-    except Exception:
-        for target, backup in backups.items():
-            if backup.exists():
-                backup.replace(target)
-        raise
-    return [str(path) for path in targets]
+
+def wait_for_asterisk_started(addon):
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        info = supervisor_request("GET", f"/addons/{addon}/info")
+        if info.get("state") == "started":
+            return
+        if info.get("state") in ("error", "failed"):
+            raise RuntimeError("Asterisk konnte nach der Konfiguration nicht starten")
+        time.sleep(0.5)
+    raise RuntimeError("Asterisk-Neustart wurde nicht bestätigt")
+
+
+def install_asterisk_config(pjsip, extensions, addon, custom_path):
+    if not isinstance(pjsip, str) or not isinstance(extensions, str):
+        raise RuntimeError("Asterisk-Konfiguration fehlt")
+    store = supervisor_request("GET", "/store")
+    repositories = {item["slug"] for item in store.get("repositories", [])
+        if item.get("source", "").rstrip("/").removesuffix(".git") == "https://github.com/oooonoooorenoooo/-CallWebhook"}
+    bootstrap = next((item for item in store.get("addons", store.get("apps", []))
+        if item.get("repository") in repositories
+        and item.get("slug") == item.get("repository", "") + "_callwebhook_bootstrap"), None)
+    if not bootstrap or not bootstrap.get("installed"):
+        raise RuntimeError("Bootstrap muss zum Schreiben der Asterisk-Konfiguration installiert sein")
+    if bootstrap.get("update_available"):
+        raise RuntimeError("Bootstrap bitte zuerst in der App aktualisieren")
+    slug = bootstrap["slug"]
+    # Bootstrap has the actual Supervisor all_addon_configs mount. Core does not.
+    deadline = time.monotonic() + 60
+    while supervisor_request("GET", f"/addons/{slug}/info").get("state") == "started":
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Bootstrap führt noch einen Auftrag aus")
+        time.sleep(0.5)
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    request_path = BASE_DIR / "provision-request.json"
+    result_path = BASE_DIR / "provision-result.json"
+    job_id = secrets.token_hex(16)
+    result_path.unlink(missing_ok=True)
+    temporary = request_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"job_id": job_id, "addon": addon, "pjsip": pjsip, "extensions": extensions}))
+    temporary.chmod(0o600)
+    temporary.replace(request_path)
+    supervisor_request("POST", f"/addons/{slug}/start", {}, timeout=120)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if result_path.exists():
+            result = json.loads(result_path.read_text())
+            if result.get("job_id") == job_id:
+                if not result.get("ok") or not result.get("config_verified"):
+                    raise RuntimeError(result.get("error", "Konfiguration konnte nicht verifiziert werden"))
+                return result["files"]
+        time.sleep(0.25)
+    raise RuntimeError("Bootstrap hat das Schreiben der Asterisk-Konfiguration nicht bestätigt")
 
 
 class CallWebhookSetupStatusView(HomeAssistantView):

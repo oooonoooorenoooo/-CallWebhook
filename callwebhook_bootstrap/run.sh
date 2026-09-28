@@ -1,5 +1,9 @@
 #!/usr/bin/with-contenv bash
 set -euo pipefail
+umask 077
+if [ -f /homeassistant/callwebhook/provision-request.json ]; then
+  exec python3 /provision.py
+fi
 TARGET=/homeassistant/custom_components/callwebhook
 BASE=https://raw.githubusercontent.com/oooonoooorenoooo/-CallWebhook/main/homeassistant/custom_components/callwebhook
 mkdir -p "$TARGET" /homeassistant/callwebhook

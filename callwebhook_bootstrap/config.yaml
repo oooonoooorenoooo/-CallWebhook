@@ -1,5 +1,5 @@
 name: CallWebhook Bootstrap
-version: "1.1.8"
+version: "1.2.0"
 slug: callwebhook_bootstrap
 description: Installs and repairs the CallWebhook Home Assistant backend
 url: https://github.com/oooonoooorenoooo/-CallWebhook
@@ -12,6 +12,7 @@ arch:
   - armv7
 map:
   - homeassistant_config:rw
+  - all_addon_configs:rw
 hassio_api: true
 hassio_role: manager
 options: {}

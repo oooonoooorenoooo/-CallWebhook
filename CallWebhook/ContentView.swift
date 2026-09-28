@@ -790,8 +790,9 @@ private struct SetupWizardView: View {
                 throw URLError(.badURL)
             }
             var configVerified = false
-            for _ in 0..<180 {
-                try await Task.sleep(nanoseconds: 200_000_000)
+            let provisioningDeadline = Date().addingTimeInterval(900)
+            while Date() < provisioningDeadline {
+                try await Task.sleep(nanoseconds: 250_000_000)
                 var statusRequest = URLRequest(url: statusURL)
                 statusRequest.timeoutInterval = 8
                 statusRequest.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
@@ -800,7 +801,7 @@ private struct SetupWizardView: View {
                     guard let statusHTTP = statusResponse as? HTTPURLResponse, (200..<300).contains(statusHTTP.statusCode),
                           let statusJSON = (try? JSONSerialization.jsonObject(with: statusData)) as? [String: Any] else { continue }
                     let state = statusJSON["state"] as? String ?? "running"
-                    asteriskProgressStep = min(statusJSON["progress_step"] as? Int ?? asteriskProgressStep, asteriskProgressTotal)
+                    asteriskProgressStep = min(statusJSON["progress_step"] as? Int ?? asteriskProgressStep, asteriskProgressTotal - 1)
                     asteriskConfigStatus = statusJSON["message"] as? String ?? "Asterisk wird eingerichtet …"
                     if state == "error" {
                         asteriskInstalled = false
@@ -991,6 +992,7 @@ private struct SetupWizardView: View {
 
         let pjsip = """
         [global]
+        type=global
 
         [transport-udp]
         type=transport
@@ -1003,7 +1005,7 @@ private struct SetupWizardView: View {
         username=callwebhook-ios
         password=\(iosPassword)
 
-        [callwebhook-ios-aor]
+        [callwebhook-ios]
         type=aor
         max_contacts=1
         remove_existing=yes
@@ -1015,7 +1017,7 @@ private struct SetupWizardView: View {
         disallow=all
         allow=alaw,ulaw
         auth=callwebhook-ios-auth
-        aors=callwebhook-ios-aor
+        aors=callwebhook-ios
         direct_media=no
         force_rport=yes
         rewrite_contact=yes
@@ -1937,7 +1939,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 2,
+            guard version >= 3,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
@@ -1949,12 +1951,6 @@ private struct SetupWizardView: View {
             callWebhookHAReady = true
             bootstrapProgressStep = bootstrapProgressTotal
             callWebhookHAStatus = "CallWebhook-Backend bereit (API \(version))"
-            if step == 2 && !asteriskInstalled && !isInstallingAsterisk {
-                if !asteriskConfigReady { prepareAsteriskConfiguration() }
-                if asteriskConfigReady {
-                    Task { await installAsteriskConfiguration() }
-                }
-            }
         } catch {
             haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
@@ -1998,6 +1994,7 @@ private struct SetupWizardView: View {
                         if step == 2 { step = 3 }
                         return
                     }
+                    return
                 }
             } catch {
                 continue
@@ -2038,8 +2035,9 @@ private struct SetupWizardView: View {
         task.resume()
         // URLSession receive() has no per-message deadline. Close the socket to
         // unblock authentication/receive if HA restarts or the network disappears.
+        let requestTimeout: Double = method.lowercased() == "get" ? 25 : 120
         let timeout = Task {
-            try await Task.sleep(nanoseconds: 30_000_000_000)
+            try await Task.sleep(nanoseconds: UInt64(requestTimeout + 5) * 1_000_000_000)
             task.cancel(with: .goingAway, reason: nil)
         }
         defer { timeout.cancel(); task.cancel(with: .goingAway, reason: nil) }
@@ -2062,7 +2060,7 @@ private struct SetupWizardView: View {
         guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
         try await sendJSON(["type": "auth", "access_token": token])
         guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.lowercased(), "timeout": 25]
+        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.lowercased(), "timeout": requestTimeout]
         if !data.isEmpty { command["data"] = data }
         try await sendJSON(command)
         while true {
@@ -2113,6 +2111,8 @@ private struct SetupWizardView: View {
                 _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/repositories", data: ["repository": bootstrapRepository])
             }
             bootstrapProgressStep = 1
+            callWebhookHAStatus = "Bootstrap-Repository bestätigt – Store wird aktualisiert …"
+            _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/reload")
             var slug: String?
             let discoveryDeadline = Date().addingTimeInterval(90)
             while Date() < discoveryDeadline {

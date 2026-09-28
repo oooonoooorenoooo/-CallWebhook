@@ -659,8 +659,28 @@ private struct SetupWizardView: View {
                 asteriskConfigStatus = "Asterisk konnte nicht gestartet werden (HTTP \(startResponse.statusCode))"
                 return
             }
-            try await Task.sleep(nanoseconds: 3_000_000_000)
 
+            asteriskConfigStatus = "Asterisk startet – warte auf Bereitschaft …"
+            var asteriskReady = false
+            for _ in 0..<30 {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                let (infoData, readyResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/info", method: "GET")
+                guard (200..<300).contains(readyResponse.statusCode) else { continue }
+                if let infoJSON = (try? JSONSerialization.jsonObject(with: infoData)) as? [String: Any],
+                   let data = infoJSON["data"] as? [String: Any],
+                   let state = data["state"] as? String,
+                   state.lowercased() == "started" {
+                    asteriskReady = true
+                    break
+                }
+            }
+            guard asteriskReady else {
+                asteriskInstalled = false
+                asteriskConfigStatus = "Asterisk wurde installiert, ist aber nach 60 Sekunden noch nicht bereit"
+                return
+            }
+
+            asteriskConfigStatus = "Asterisk bereit – übertrage CallWebhook-Konfiguration …"
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             var (data, response) = try await URLSession.shared.data(for: request)
             var http = response as? HTTPURLResponse

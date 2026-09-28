@@ -1271,15 +1271,15 @@ private struct SetupWizardView: View {
                             let name = extractSOAPValue("NewName", from: tamResponse)
                             let enableValue = extractSOAPValue("NewEnable", from: tamResponse).lowercased()
                             let enabled = enableValue == "1" || enableValue == "true"
-                            discovered.append(FritzTAM(index: index, name: name, enabled: enabled))
+                            if enabled {
+                                discovered.append(FritzTAM(index: index, name: name, enabled: true))
+                            }
                         } catch {
                             if index > 1 { break }
                         }
                     }
                     fritzTAMs = discovered
                     fritzTAMCount = discovered.count
-                    if mailbox1TAM < 0, let first = discovered.first { mailbox1TAM = first.index }
-                    if mailbox2TAM < 0, discovered.count > 1 { mailbox2TAM = discovered[1].index }
                 }
 
                 fritzStatus = "FRITZ-Anmeldung erfolgreich – Telefonie ausgelesen"

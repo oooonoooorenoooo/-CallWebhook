@@ -551,6 +551,15 @@ private struct SetupWizardView: View {
             asteriskInstalled = true
             asteriskConfigStatus = "Asterisk installiert und von Home Assistant bestätigt"
             try? SetupKeychain.set(setupHAToken, account: "home-assistant-token")
+            if let iosPassword = SetupKeychain.get(account: "asterisk-sip-callwebhook-ios") {
+                let defaults = UserDefaults.standard
+                defaults.set(true, forKey: "sipEnabled")
+                defaults.set("callwebhook-ios", forKey: "sipUsername")
+                defaults.set(iosPassword, forKey: "sipPassword")
+                if let host = base.host {
+                    defaults.set(host, forKey: "sipHost")
+                }
+            }
         } catch {
             asteriskInstalled = false
             asteriskConfigStatus = "Asterisk-Installation fehlgeschlagen: \(error.localizedDescription)"
@@ -569,6 +578,21 @@ private struct SetupWizardView: View {
             .replacingOccurrences(of: "http://", with: "")
             .replacingOccurrences(of: "https://", with: "")
             .components(separatedBy: ":").first ?? "fritz.box"
+
+        let iosPassword: String
+        if let saved = SetupKeychain.get(account: "asterisk-sip-callwebhook-ios"), !saved.isEmpty {
+            iosPassword = saved
+        } else {
+            let generated = randomSIPPassword()
+            do {
+                try SetupKeychain.set(generated, account: "asterisk-sip-callwebhook-ios")
+                iosPassword = generated
+            } catch {
+                asteriskConfigReady = false
+                asteriskConfigStatus = "iPhone-SIP-Zugang konnte nicht sicher gespeichert werden"
+                return
+            }
+        }
 
         let password3 = sipLine3Enabled ? SetupKeychain.get(account: "fritz-sip-callwhapp3") : nil
         if sipLine3Enabled && password3 == nil {
@@ -614,6 +638,30 @@ private struct SetupWizardView: View {
         """ : ""
 
         let pjsip = """
+        [callwebhook-ios-auth]
+        type=auth
+        auth_type=userpass
+        username=callwebhook-ios
+        password=\(iosPassword)
+
+        [callwebhook-ios-aor]
+        type=aor
+        max_contacts=1
+        remove_existing=yes
+
+        [callwebhook-ios]
+        type=endpoint
+        transport=transport-udp
+        context=from-callwebhook-ios
+        disallow=all
+        allow=alaw,ulaw
+        auth=callwebhook-ios-auth
+        aors=callwebhook-ios-aor
+        direct_media=no
+        force_rport=yes
+        rewrite_contact=yes
+        rtp_symmetric=yes
+
         [fritz1-auth]
         type=auth
         auth_type=userpass

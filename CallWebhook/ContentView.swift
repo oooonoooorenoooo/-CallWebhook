@@ -1113,6 +1113,8 @@ private struct SetupWizardView: View {
             let auth = FritzAuthDelegate(username: fritzUser, password: fritzPassword)
             let session = URLSession(configuration: .ephemeral, delegate: auth, delegateQueue: nil)
             defer { session.finishTasksAndInvalidate() }
+            var secondFactorToken: String? = nil
+
 
             do {
                 let response = try await soapCall(
@@ -1371,7 +1373,13 @@ private struct SetupWizardView: View {
                 do {
                     let targetIndex = client1?.index ?? index1
                     let args = try setClientArguments(index: targetIndex, username: "callwhapp1", password: password, outgoing: line1Number)
-                    _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                    do {
+                        _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+                    } catch {
+                        guard isSecondFactorRequired(error) else { throw error }
+                        secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: descriptionXML)
+                        _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+                    }
                 } catch {
                     SetupKeychain.delete(account: "fritz-sip-callwhapp1")
                     throw error
@@ -1385,7 +1393,13 @@ private struct SetupWizardView: View {
                     let targetIndex = client2?.index ?? index2
                     let number2 = line2Number.isEmpty ? line1Number : line2Number
                     let args = try setClientArguments(index: targetIndex, username: "callwhapp2", password: password, outgoing: number2)
-                    _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                    do {
+                        _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+                    } catch {
+                        guard isSecondFactorRequired(error) else { throw error }
+                        secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: descriptionXML)
+                        _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+                    }
                 } catch {
                     SetupKeychain.delete(account: "fritz-sip-callwhapp2")
                     throw error
@@ -1401,7 +1415,13 @@ private struct SetupWizardView: View {
                 do {
                     let targetIndex = client3?.index ?? plannedIndex3
                     let args = try setClientArguments(index: targetIndex, username: "callwhapp3", password: password, outgoing: line3Number)
-                    _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                    do {
+                        _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+                    } catch {
+                        guard isSecondFactorRequired(error) else { throw error }
+                        secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: descriptionXML)
+                        _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+                    }
                 } catch {
                     SetupKeychain.delete(account: "fritz-sip-callwhapp3")
                     throw error
@@ -1434,6 +1454,45 @@ private struct SetupWizardView: View {
         } catch {
             sipProvisionStatus = "Provisionierung abgebrochen: \(error.localizedDescription)"
         }
+    }
+
+    @MainActor
+    private func beginFritzSecondFactor(session: URLSession, base: String, descriptionXML: String) async throws -> String {
+        guard let authService = extractTR064Services(from: descriptionXML).first(where: {
+            $0.type.localizedCaseInsensitiveContains("X_AVM-DE_Auth")
+        }) else {
+            throw NSError(domain: "CallWebhook.TR064", code: 866, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box verlangt eine Bestätigung, bietet aber X_AVM-DE_Auth nicht an"])
+        }
+
+        _ = try? await soapCall(session: session, base: base, serviceType: authService.type, controlURL: authService.controlURL, action: "SetConfig", arguments: [("NewAction", "stop")])
+        let start = try await soapCall(session: session, base: base, serviceType: authService.type, controlURL: authService.controlURL, action: "SetConfig", arguments: [("NewAction", "start")])
+        let token = extractSOAPValue("NewToken", from: start)
+        let methods = extractSOAPValue("NewMethods", from: start)
+        guard !token.isEmpty else {
+            throw NSError(domain: "CallWebhook.TR064", code: 866, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box hat keinen 2FA-Token geliefert"])
+        }
+
+        sipProvisionStatus = methods.localizedCaseInsensitiveContains("button")
+            ? "FRITZ!Box-Bestätigung erforderlich: Bitte jetzt eine Taste an der FRITZ!Box drücken …"
+            : "FRITZ!Box-Bestätigung erforderlich (\(methods.isEmpty ? "2FA" : methods)) …"
+
+        for _ in 0..<60 {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            let stateXML = try await soapCall(session: session, base: base, serviceType: authService.type, controlURL: authService.controlURL, action: "GetState", arguments: [], secondFactorToken: token)
+            let state = extractSOAPValue("NewState", from: stateXML).lowercased()
+            if state == "authenticated" {
+                sipProvisionStatus = "FRITZ!Box bestätigt – SIP-Nebenstellen werden eingerichtet …"
+                return token
+            }
+            if !state.isEmpty && state != "waitingforauth" {
+                throw NSError(domain: "CallWebhook.TR064", code: 866, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box-Bestätigung beendet: \(state)"])
+            }
+        }
+        throw NSError(domain: "CallWebhook.TR064", code: 866, userInfo: [NSLocalizedDescriptionKey: "Zeitüberschreitung bei der FRITZ!Box-Bestätigung"])
+    }
+
+    private func isSecondFactorRequired(_ error: Error) -> Bool {
+        error.localizedDescription.contains("AVM 866")
     }
 
     private func setClientArguments(index: Int, username: String, password: String, outgoing: String) throws -> [(String, String)] {
@@ -1497,7 +1556,8 @@ private struct SetupWizardView: View {
         serviceType: String,
         controlURL: String,
         action: String,
-        arguments: [(String, String)]
+        arguments: [(String, String)],
+        secondFactorToken: String? = nil
     ) async throws -> String {
         let normalizedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
         let path = controlURL.hasPrefix("/") ? controlURL : "/" + controlURL
@@ -1506,9 +1566,13 @@ private struct SetupWizardView: View {
         }
 
         let argsXML = arguments.map { "<\($0.0)>\(xmlEscaped($0.1))</\($0.0)>" }.joined()
+        let tokenHeader = secondFactorToken.map {
+            "<s:Header><avm:token xmlns:avm=\"avm.de\" s:mustUnderstand=\"1\">\(xmlEscaped($0))</avm:token></s:Header>"
+        } ?? ""
         let envelope = """
         <?xml version="1.0" encoding="utf-8"?>
         <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          \(tokenHeader)
           <s:Body>
             <u:\(action) xmlns:u="\(serviceType)">\(argsXML)</u:\(action)>
           </s:Body>

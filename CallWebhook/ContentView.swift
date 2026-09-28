@@ -2185,12 +2185,15 @@ private struct SetupWizardView: View {
         }
         do {
             var slug: String?
-            for _ in 0..<120 {
+            for attempt in 0..<240 {
                 if let found = try? await resolveBootstrapSupervisorSlug(base: base, token: token) {
                     slug = found
                     break
                 }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if attempt % 20 == 19 {
+                    _ = try? await supervisorWrite(base: base, token: token, endpoint: "/store/reload")
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
             }
             guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap wurde im Supervisor-Store nicht gefunden"]) }
             bootstrapProgressStep = 2

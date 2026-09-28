@@ -28,7 +28,7 @@ ARCHIVE_FILE = ARCHIVE_DIR / "archive.json"
 SETUP_FILE = BASE_DIR / "setup.json"
 SECRETS_FILE = Path("/config/secrets.yaml")
 ASTERISK_ADDON = "b35499aa_asterisk"
-ASTERISK_CUSTOM_DIR = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
+requested_dir = Path("/addon_configs/b35499aa_asterisk/asterisk/custom")
 
 _refresh_lock = asyncio.Lock()
 
@@ -631,16 +631,16 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
     if requested_dir != expected_dir:
         raise RuntimeError("Unzulässiger Asterisk-Konfigurationspfad")
     try:
-        ASTERISK_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+        requested_dir.mkdir(parents=True, exist_ok=True)
     except Exception as error:
         raise RuntimeError(
             "Asterisk-Konfigurationsordner konnte nicht angelegt werden: "
-            f"{ASTERISK_CUSTOM_DIR}: {error}"
+            f"{requested_dir}: {error}"
         ) from error
-    if not ASTERISK_CUSTOM_DIR.is_dir():
+    if not requested_dir.is_dir():
         raise RuntimeError(
             "Asterisk-Konfigurationspfad ist kein Verzeichnis: "
-            f"{ASTERISK_CUSTOM_DIR}"
+            f"{requested_dir}"
         )
     if not isinstance(pjsip, str) or not pjsip.strip():
         raise RuntimeError("pjsip-Konfiguration fehlt")
@@ -654,8 +654,8 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
         raise RuntimeError("extensions-Konfiguration unvollständig")
 
     targets = {
-        ASTERISK_CUSTOM_DIR / "pjsip.conf": pjsip,
-        ASTERISK_CUSTOM_DIR / "extensions.conf": extensions,
+        requested_dir / "pjsip.conf": pjsip,
+        requested_dir / "extensions.conf": extensions,
     }
     backups = {}
     try:
@@ -707,13 +707,14 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             return self.json({"ok": False, "error": "Ungültiges JSON"}, status_code=400)
 
         try:
-            await hass.async_add_executor_job(ensure_asterisk_addon)
+            actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
+            actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
             files = await hass.async_add_executor_job(
                 install_asterisk_config,
                 payload.get("pjsip"),
                 payload.get("extensions"),
-                payload.get("addon"),
-                payload.get("custom_path"),
+                actual_addon,
+                actual_path,
             )
             configured_tams = await hass.async_add_executor_job(
                 save_setup,
@@ -723,16 +724,16 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             await hass.services.async_call(
                 "hassio",
                 "addon_restart",
-                {"addon": ASTERISK_ADDON},
+                {"addon": actual_addon},
                 blocking=True,
             )
-            await hass.async_add_executor_job(ensure_asterisk_addon)
+            actual_addon = await hass.async_add_executor_job(ensure_asterisk_addon)
         except Exception as error:
             return self.json({"ok": False, "error": str(error)}, status_code=500)
 
         return self.json({
             "ok": True,
-            "addon": ASTERISK_ADDON,
+            "addon": actual_addon,
             "files": files,
             "config_verified": all(Path(path).exists() for path in files),
             "mailbox_tams": configured_tams,

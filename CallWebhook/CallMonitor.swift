@@ -16,19 +16,21 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
         didSet { UserDefaults.standard.set(haTriggerMode, forKey: "haTriggerMode") }
     }
     @Published var haToken = "" {
-        didSet { UserDefaults.standard.set(haToken, forKey: "haToken") }
+        didSet {
+            if !haToken.isEmpty { try? SetupKeychain.set(haToken, account: "home-assistant-token") }
+            UserDefaults.standard.removeObject(forKey: "haToken")
+        }
     }
 
     private let observer = CXCallObserver()
-    private let baseURL = "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa"
-    private let entityID = "input_boolean.iphone_call_active"
-    private let fritzEntityID = "sensor.fritz_box_5690_pro_anrufmonitor_telefonbuch"
-    private let onURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_on_4d7a21")!
-    private let offURL = URL(string: "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa/api/webhook/iphone_call_off_8c3f62")!
+    private var stateTask: Task<Void, Never>?
+    private var baseURL: URL? { HomeAssistantConnection.configuredBase }
+    private var entityID: String { UserDefaults.standard.string(forKey: "haCallEntityID") ?? "input_boolean.iphone_call_active" }
+    private var fritzEntityID: String { UserDefaults.standard.string(forKey: "haFritzCallEntityID") ?? "sensor.fritz_box_5690_pro_anrufmonitor_telefonbuch" }
 
     override init() {
         super.init()
-        haToken = UserDefaults.standard.string(forKey: "haToken") ?? ""
+        haToken = SetupKeychain.get(account: "home-assistant-token") ?? UserDefaults.standard.string(forKey: "haToken") ?? ""
         observer.setDelegate(self, queue: .main)
         append("CXCallObserver aktiv")
         evaluateAndSend(force: true)
@@ -54,51 +56,22 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     func sendCurrentState() { evaluateAndSend(force: true) }
 
     func refreshHAState() {
-        guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            haState = "Token fehlt"; fritzCallState = "Token fehlt"; return
+        guard let base = baseURL else { haState = "HA noch nicht eingerichtet"; return }
+        Task {
+            do {
+                let (data, code) = try await HomeAssistantConnection.request(base: base, path: "api/states/\(entityID)")
+                guard code == 200, let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let state = object["state"] as? String else { throw URLError(.badServerResponse) }
+                haState = state.uppercased()
+                let (fritzData, fritzCode) = try await HomeAssistantConnection.request(base: base, path: "api/states/\(fritzEntityID)")
+                if fritzCode == 200, let object = try JSONSerialization.jsonObject(with: fritzData) as? [String: Any] {
+                    fritzCallState = object["state"] as? String ?? "Unbekannt"
+                } else { fritzCallState = "FRITZ!-Anrufmonitor nicht eingerichtet" }
+            } catch {
+                haState = "HA nicht erreichbar / Anmeldung prüfen"
+                append("HA-Abfrage: \(error.localizedDescription)")
+            }
         }
-        guard let url = URL(string: "\(baseURL)/api/states/\(entityID)") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(haToken.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            let code = (response as? HTTPURLResponse)?.statusCode
-            Task { @MainActor in
-                guard let self else { return }
-                if let error { self.haState = "nicht erreichbar"; self.append("HA-Abfrage Fehler: \(error.localizedDescription)"); return }
-                guard code == 200, let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let state = object["state"] as? String else {
-                    self.haState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"; self.append("HA-Abfrage: \(self.haState)"); return
-                }
-                self.haState = state.uppercased(); self.append("HA-Status: \(self.haState)")
-            }
-        }.resume()
-        refreshFritzCallState()
-    }
-
-    private func refreshFritzCallState() {
-        guard !haToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let url = URL(string: "\(baseURL)/api/states/\(fritzEntityID)") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(haToken.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            let code = (response as? HTTPURLResponse)?.statusCode
-            Task { @MainActor in
-                guard let self else { return }
-                if error != nil { self.fritzCallState = "nicht erreichbar"; return }
-                guard code == 200, let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let state = object["state"] as? String else {
-                    self.fritzCallState = code == 401 ? "Token ungültig" : "Fehler HTTP \(code.map(String.init) ?? "?")"; return
-                }
-                switch state {
-                case "idle": self.fritzCallState = "Bereit"
-                case "ringing": self.fritzCallState = "Klingelt"
-                case "dialing": self.fritzCallState = "Wählt"
-                case "talking": self.fritzCallState = "Gespräch verbunden"
-                default: self.fritzCallState = state
-                }
-            }
-        }.resume()
     }
 
     private func evaluateAndSend(force: Bool = false, call: CXCall? = nil) {
@@ -106,30 +79,25 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
         guard force || nowActive != active else { return }
         active = nowActive
         lastEvent = nowActive ? (haTriggerMode == "ringing" ? "Telefon aktiv" : "Gespräch verbunden") : "Kein Telefonat"
-        post(nowActive ? onURL : offURL, label: nowActive ? "ON" : "OFF")
-    }
-
-    private func post(_ url: URL, label: String) {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data("{}".utf8)
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            let code = (response as? HTTPURLResponse)?.statusCode
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    self.backgroundLastEvent = "\(label) Fehler"
-                    self.append("\(label) Fehler: \(error.localizedDescription)")
-                } else {
-                    self.backgroundLastEvent = "\(label) HTTP \(code.map(String.init) ?? "?")"
-                    self.append("\(label) Webhook gesendet (HTTP \(code.map(String.init) ?? "?"))")
-                    if let code, (200...299).contains(code) {
-                        try? await Task.sleep(for: .milliseconds(500)); self.refreshHAState()
-                    }
-                }
+        guard let base = baseURL else { haState = "HA noch nicht eingerichtet"; return }
+        // Serialize state changes so a slow ON cannot overwrite a later OFF.
+        let previous = stateTask
+        let entity = entityID
+        stateTask = Task {
+            await previous?.value
+            do {
+                let (_, code) = try await HomeAssistantConnection.request(base: base,
+                    path: "api/services/input_boolean/\(nowActive ? "turn_on" : "turn_off")",
+                    method: "POST", body: ["entity_id": entity])
+                guard (200..<300).contains(code) else { throw URLError(.badServerResponse) }
+                backgroundLastEvent = "Anrufstatus \(nowActive ? "ON" : "OFF") übertragen"
+                haState = nowActive ? "ON" : "OFF"
+                append(backgroundLastEvent)
+            } catch {
+                haState = "Anrufstatus nicht übertragen"
+                append("HA-Anrufstatus: \(error.localizedDescription)")
             }
-        }.resume()
+        }
     }
 
     private func append(_ text: String) {

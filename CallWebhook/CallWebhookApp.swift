@@ -15,6 +15,7 @@ struct CallWebhookApp: App {
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
                         connectSIPIfConfigured()
+                        monitor.sendCurrentState()
                     }
                 }
         }

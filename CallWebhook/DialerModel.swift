@@ -1,5 +1,6 @@
 import Foundation
 import LiveCommunicationKit
+import UIKit
 
 @MainActor
 final class DialerModel: ObservableObject {
@@ -23,6 +24,10 @@ final class DialerModel: ObservableObject {
     func call(line: Int) {
         let value = number.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        if MobileForwarding.isNetworkCode(value) {
+            openCellularNetworkCode(value)
+            return
+        }
         status = "Anruf wird gestartet …"
         lastDialedNumber = value
         UserDefaults.standard.set(value, forKey: "lastDialedNumber")
@@ -37,6 +42,10 @@ final class DialerModel: ObservableObject {
     func call(_ phoneNumber: String) {
         let value = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        if MobileForwarding.isNetworkCode(value) {
+            openCellularNetworkCode(value)
+            return
+        }
         status = "Anruf wird gestartet …"
         lastDialedNumber = value
         UserDefaults.standard.set(value, forKey: "lastDialedNumber")
@@ -60,6 +69,22 @@ final class DialerModel: ObservableObject {
                 status = "Mobilfunkanruf gestartet"
             } catch {
                 status = "Fehler: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func openCellularNetworkCode(_ code: String) {
+        // Explicit call-button fallback. Never send carrier MMI through Asterisk or tel:
+        // (tel: would route back into this app when it is the default calling app).
+        var components = URLComponents()
+        components.scheme = "telephony"
+        components.path = code
+        guard let url = components.url else { return }
+        UIApplication.shared.open(url) { opened in
+            Task { @MainActor in
+                self.status = opened
+                    ? "An Mobilfunk übergeben – SIM prüfen und Netzbestätigung abwarten"
+                    : "iOS lehnt den Steuercode ab. In der Telefon-App auf der passenden SIM eingeben: \(code)"
             }
         }
     }

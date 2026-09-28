@@ -87,15 +87,32 @@ struct ContentView: View {
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
     @State private var selectedTab = 0
+    @State private var phoneDefaultsReviewed = false
+    @State private var showNetworkCode = false
 
     var body: some View {
         Group {
-            if setupCompleted {
+            if !phoneDefaultsReviewed {
+                DefaultPhoneAppsView { phoneDefaultsReviewed = true }
+            } else if setupCompleted {
                 mainTabs
             } else {
                 SetupWizardView {
                     setupCompleted = true
                 }
+            }
+        }
+        .sheet(isPresented: $showNetworkCode) {
+            NavigationStack {
+                Form {
+                    Text(dialer.number).font(.system(.title3, design: .monospaced)).textSelection(.enabled)
+                    Text("Mobilfunk-Steuercode: Die SIM muss zur Handynummer der einzurichtenden Leitung gehören. Bitte die SIM im Systemdialog prüfen.")
+                    Button("Über Mobilfunk wählen") { dialer.call(dialer.number) }
+                    Button("Code kopieren") { UIPasteboard.general.string = dialer.number }
+                    Text(dialer.status).font(.caption)
+                }
+                .navigationTitle("Mobilfunk-Steuercode")
+                .toolbar { Button("Zurück") { showNetworkCode = false } }
             }
         }
         .onOpenURL { url in
@@ -121,6 +138,7 @@ struct ContentView: View {
         let number = value.filter { "+*#0123456789".contains($0) }
         guard !number.isEmpty else { return }
         dialer.number = number
+        if MobileForwarding.isNetworkCode(number) { showNetworkCode = true }
         selectedTab = 3
     }
 
@@ -162,6 +180,18 @@ private struct SetupWizardView: View {
     @State private var fritzUserChoice: Bool? = nil
     @State private var homeAssistantURL = "26"
     @State private var easybellEnabled = false
+    @AppStorage("primaryPhoneNumber") private var primaryMobileNumber = ""
+    @AppStorage("secondaryPhoneNumber") private var secondaryMobileNumber = ""
+    @AppStorage("setupAreaCode") private var setupAreaCode = ""
+    @AppStorage("line1MobileProvider") private var line1MobileProvider = ""
+    @AppStorage("line2MobileProvider") private var line2MobileProvider = ""
+    @AppStorage("line1CellularServiceID") private var line1CellularServiceID = ""
+    @AppStorage("line2CellularServiceID") private var line2CellularServiceID = ""
+    @AppStorage("line1ForwardingConfirmed") private var line1ForwardingConfirmed = ""
+    @AppStorage("line2ForwardingConfirmed") private var line2ForwardingConfirmed = ""
+    @State private var callHelperReady = false
+    @State private var isCreatingCallHelper = false
+    @State private var callHelperStatus = "Anrufstatus-Schalter wird im letzten HA-Schritt angelegt"
     @State private var line1Label = "Mobil 1"
     @State private var line2Label = "Mobil 2"
     @State private var line3Label = "Festnetz"
@@ -552,6 +582,14 @@ private struct SetupWizardView: View {
                 Label("Der Home-Assistant-Token wird ausschließlich sicher im iOS-Keychain gespeichert.", systemImage: "lock.shield")
                     .foregroundStyle(.secondary)
             }
+            Section("Anrufstatus-Schalter") {
+                setupCheck("Home-Assistant-Helfer", detail: callHelperStatus, ready: callHelperReady)
+                if isCreatingCallHelper { ProgressView() }
+                if asteriskInstalled && !callHelperReady {
+                    Button("Anrufstatus-Schalter anlegen / prüfen") { Task { await ensureCallHelper() } }
+                        .disabled(isCreatingCallHelper)
+                }
+            }
             Section("Automatisch einzurichten") {
                 Label(
                     callWebhookHAReady ? "CallWebhook-Integration bereit" : "CallWebhook-Integration ausstehend",
@@ -578,6 +616,7 @@ private struct SetupWizardView: View {
     private var lines: some View {
         Form {
             Section("Hinterlegte FRITZ!Box-Rufnummern") {
+                TextField("Ortsvorwahl, falls Rufnummern ohne Vorwahl", text: $setupAreaCode).keyboardType(.phonePad)
                 ForEach(Array(fritzVoIPNumbers.enumerated()), id: \.element) { index, number in
                     LabeledContent("Rufnummer \(index + 1)", value: number)
                 }
@@ -594,6 +633,8 @@ private struct SetupWizardView: View {
                 TextField("Bezeichnung", text: $line1Label)
                 fritzNumberPicker("Absenderrufnummer", selection: $line1Number)
                 fritzMailboxPicker(selection: $mailbox1TAM)
+                MobileForwardingView(line: 1, mobile: $primaryMobileNumber, provider: $line1MobileProvider,
+                    destination: line1Number, serviceID: $line1CellularServiceID, confirmedConfiguration: $line1ForwardingConfirmed)
                 Text(easybellEnabled ? "easybell / CLIP no screening" : "FRITZ!Box")
                     .foregroundStyle(.secondary)
             }
@@ -603,6 +644,8 @@ private struct SetupWizardView: View {
                     TextField("Bezeichnung", text: $line2Label)
                     fritzNumberPicker("Absenderrufnummer", selection: $line2Number)
                     fritzMailboxPicker(selection: $mailbox2TAM)
+                    MobileForwardingView(line: 2, mobile: $secondaryMobileNumber, provider: $line2MobileProvider,
+                        destination: line2Number, serviceID: $line2CellularServiceID, confirmedConfiguration: $line2ForwardingConfirmed)
                     TextField("Asterisk-Präfix", text: $sipLine2Prefix)
                         .keyboardType(.numbersAndPunctuation)
                 }
@@ -644,7 +687,7 @@ private struct SetupWizardView: View {
                     fritzMailboxPicker(selection: $mailbox3TAM)
                     TextField("Asterisk-Präfix", text: $sipLine3Prefix)
                         .keyboardType(.numbersAndPunctuation)
-                    Text("Direkter FRITZ!Box-Pfad ohne CLIP no screening")
+                    Text("Reine Festnetzleitung – keine Mobilfunk-Rufumleitung. Direkter FRITZ!Box-Pfad ohne CLIP no screening.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -775,6 +818,35 @@ private struct SetupWizardView: View {
         }
     }
 
+    private var forwardingReady: Bool {
+        let target1 = MobileForwarding.destination(number: line1Number, areaCode: setupAreaCode)
+        let target2 = MobileForwarding.destination(number: line2Number, areaCode: setupAreaCode)
+        let first = MobileForwarding.activationCode(mobile: primaryMobileNumber, destination: target1, provider: line1MobileProvider) != nil
+            && line1ForwardingConfirmed == [primaryMobileNumber, line1MobileProvider, target1, line1CellularServiceID].joined(separator: "|")
+        let second = !sipLine2Enabled || (MobileForwarding.activationCode(mobile: secondaryMobileNumber, destination: target2, provider: line2MobileProvider) != nil
+            && line2ForwardingConfirmed == [secondaryMobileNumber, line2MobileProvider, target2, line2CellularServiceID].joined(separator: "|"))
+        return first && second
+    }
+
+    @MainActor
+    private func ensureCallHelper() async {
+        guard !isCreatingCallHelper else { return }
+        isCreatingCallHelper = true
+        callHelperReady = false
+        callHelperStatus = "Anrufstatus-Schalter wird angelegt und geprüft …"
+        defer { isCreatingCallHelper = false }
+        do {
+            let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let base = URL(string: "http://192.168.178.\(input):8123") else { throw URLError(.badURL) }
+            let entity = try await HomeAssistantConnection.ensureCallHelper(base: base)
+            UserDefaults.standard.set(homeAssistantURL, forKey: "setupHomeAssistantURL")
+            callHelperReady = true
+            callHelperStatus = "\(entity) ist bereit"
+        } catch {
+            callHelperStatus = "Schalter konnte nicht angelegt werden: \(error.localizedDescription). HA-Administratorrechte erforderlich."
+        }
+    }
+
     private var verification: some View {
         List {
             setupCheck("FRITZ!Box", detail: fritzStatus, ready: fritzReachable && fritzAuthenticated && fritzVoIPAvailable)
@@ -787,6 +859,8 @@ private struct SetupWizardView: View {
                 detail: fritzSIPClients.isEmpty ? "Keine CallWebhook-SIP-Nebenstellen verifiziert" : fritzSIPClients.map(\.displayName).joined(separator: " · "),
                 ready: fritzSIPVerified
             )
+            setupCheck("Anrufstatus-Schalter", detail: callHelperStatus, ready: callHelperReady)
+            setupCheck("Mobilfunk-Rufumleitungen", detail: forwardingReady ? "Aktivierung vom Benutzer nach Netzbestätigung bestätigt" : "Aktivierung für die Mobilfunkleitungen noch bestätigen", ready: forwardingReady)
             setupCheck("Mailboxen", detail: mailboxSummary, ready: mailboxSelectionVerified)
             setupCheck("Asterisk + iPhone-SIP", detail: asteriskConfigStatus, ready: asteriskInstalled && setupSIP.registered)
         }
@@ -937,6 +1011,8 @@ private struct SetupWizardView: View {
             }
             if !asteriskInstalled {
                 asteriskConfigStatus = "Asterisk läuft, aber iPhone-SIP wurde nicht registriert: \(setupSIP.status)"
+            } else {
+                await ensureCallHelper()
             }
         } catch {
             asteriskInstalled = false
@@ -1236,7 +1312,7 @@ private struct SetupWizardView: View {
     private var canContinue: Bool {
         switch step {
         case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated
-        case 2: return homeAssistantReachable && haAuthenticated && callWebhookHAReady && asteriskInstalled
+        case 2: return homeAssistantReachable && haAuthenticated && callWebhookHAReady && asteriskInstalled && callHelperReady
         case 3:
             let linesReady = !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
             let easybellReady = !easybellEnabled || (
@@ -1244,7 +1320,7 @@ private struct SetupWizardView: View {
                     && !easybellPassword.isEmpty
                     && !easybellContactUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             )
-            return linesReady && easybellReady
+            return linesReady && easybellReady && forwardingReady
         case 4:
             return fritzReachable
                 && fritzAuthenticated
@@ -1254,6 +1330,8 @@ private struct SetupWizardView: View {
                 && haAuthenticated
                 && callWebhookHAReady
                 && mailboxSelectionVerified
+                && callHelperReady
+                && forwardingReady
                 && asteriskInstalled
                 && setupSIP.registered
         default: return true
@@ -2079,7 +2157,7 @@ private struct SetupWizardView: View {
                     if asteriskConfigReady && !asteriskInstalled && !isInstallingAsterisk {
                         await installAsteriskConfiguration()
                     }
-                    if asteriskInstalled {
+                    if asteriskInstalled && callHelperReady {
                         callWebhookHAStatus = "CallWebhook und Asterisk bereit – Einrichtung wird fortgesetzt"
                         if step == 2 { step = 3 }
                         return

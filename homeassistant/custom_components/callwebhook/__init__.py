@@ -45,9 +45,9 @@ def get_configured_tams():
     return DEFAULT_TAMS
 
 
-def save_setup(mailbox_tam_1, mailbox_tam_2):
+def save_setup(mailbox_tam_1, mailbox_tam_2, mailbox_tam_3=None):
     values = []
-    for value in (mailbox_tam_1, mailbox_tam_2):
+    for value in (mailbox_tam_1, mailbox_tam_2, mailbox_tam_3):
         try:
             number = int(value)
         except (TypeError, ValueError):
@@ -720,6 +720,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
                 save_setup,
                 payload.get("mailbox_tam_1"),
                 payload.get("mailbox_tam_2"),
+                payload.get("mailbox_tam_3"),
             )
             await hass.services.async_call(
                 "hassio",
@@ -739,6 +740,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             "mailbox_tams": configured_tams,
             "mailbox_tam_1": payload.get("mailbox_tam_1"),
             "mailbox_tam_2": payload.get("mailbox_tam_2"),
+            "mailbox_tam_3": payload.get("mailbox_tam_3"),
         })
 
 

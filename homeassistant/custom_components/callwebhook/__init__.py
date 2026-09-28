@@ -55,7 +55,7 @@ async def _run_asterisk_setup(hass, payload):
         await hass.services.async_call("hassio", "addon_start", {"addon": actual_addon}, blocking=True)
         _asterisk_setup_state["progress_step"] = 7
         result = {"addon": actual_addon, "files": files, "config_verified": all(Path(path).exists() for path in files), "mailbox_tams": configured_tams}
-        _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "progress_step": 5, "progress_total": 7, "result": result}
+        _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "progress_step": 7, "progress_total": 7, "result": result}
     except Exception as error:
         _asterisk_setup_state = {"state": "error", "message": str(error), "progress_step": _asterisk_setup_state.get("progress_step", 0), "progress_total": 7, "result": None}
 

@@ -171,6 +171,8 @@ private struct SetupWizardView: View {
     @State private var asteriskInstalled = false
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
+    @State private var bootstrapProgressStep = 0
+    private let bootstrapProgressTotal = 5
     @State private var asteriskProgressStep = 0
     private let asteriskProgressTotal = 7
     @State private var setupHAToken = ""
@@ -441,8 +443,26 @@ private struct SetupWizardView: View {
                     }
                     .disabled(isChecking)
                 }
-                Label(callWebhookHAStatus, systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
-                    .foregroundStyle(callWebhookHAReady ? .green : .orange)
+                HStack(spacing: 14) {
+                    ZStack {
+                        ForEach(0..<bootstrapProgressTotal, id: \.self) { index in
+                            Circle()
+                                .trim(from: CGFloat(index) / CGFloat(bootstrapProgressTotal) + 0.014,
+                                      to: CGFloat(index + 1) / CGFloat(bootstrapProgressTotal) - 0.014)
+                                .stroke(index < bootstrapProgressStep ? Color.green : Color.secondary.opacity(0.22),
+                                        style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                        if callWebhookHAReady {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                    Text(callWebhookHAStatus)
+                        .foregroundStyle(callWebhookHAReady ? .green : .secondary)
+                }
                 Label(
                     asteriskInstalled ? "Asterisk automatisch eingerichtet" : (isInstallingAsterisk ? "Asterisk wird automatisch eingerichtet …" : (asteriskInstallFailed ? "Asterisk-Einrichtung fehlgeschlagen" : "Asterisk wird automatisch eingerichtet")),
                     systemImage: asteriskInstalled ? "checkmark.circle.fill" : (asteriskInstallFailed ? "xmark.circle.fill" : "arrow.trianglehead.2.clockwise.rotate.90")
@@ -1919,10 +1939,21 @@ private struct SetupWizardView: View {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
             }
+            guard let bootstrapSlug = try? await resolveBootstrapSupervisorSlug(base: base, token: token),
+                  let bootstrapResponse = try? await supervisorWrite(base: base, token: token, endpoint: "/addons/\(bootstrapSlug)/info", method: "get"),
+                  let bootstrapInfo = bootstrapResponse["result"] as? [String: Any],
+                  let bootstrapState = bootstrapInfo["state"] as? String,
+                  ["started", "stopped"].contains(bootstrapState.lowercased()) else {
+                callWebhookHAReady = false
+                bootstrapProgressStep = 0
+                callWebhookHAStatus = "CallWebhook Bootstrap ist nicht installiert – Einrichtung erforderlich"
+                return
+            }
             setupHAToken = token
             haAuthenticated = true
             callWebhookHAReady = true
-            callWebhookHAStatus = "CallWebhook-HA-Integration bereit (API \(version))"
+            bootstrapProgressStep = bootstrapProgressTotal
+            callWebhookHAStatus = "CallWebhook Bootstrap vollständig verifiziert (API \(version))"
             if step == 2 && !asteriskInstalled && !isInstallingAsterisk {
                 if !asteriskConfigReady { prepareAsteriskConfiguration() }
                 if asteriskConfigReady {
@@ -1948,8 +1979,8 @@ private struct SetupWizardView: View {
             return
         }
 
-        for _ in 0..<120 {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        for _ in 0..<960 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             do {
                 var request = URLRequest(url: base.appendingPathComponent("manifest.json"))
@@ -2140,12 +2171,16 @@ private struct SetupWizardView: View {
             return
         }
         do {
+            bootstrapProgressStep = 0
+            callWebhookHAReady = false
             callWebhookHAStatus = "CallWebhook Bootstrap wird automatisch vorbereitet …"
             _ = try await supervisorWrite(
                 base: base, token: token, endpoint: "/store/repositories", data: ["repository": "https://github.com/oooonoooorenoooo/-CallWebhook"]
             )
+            bootstrapProgressStep = 1
         } catch {
             // Already-added repository errors are harmless; slug discovery below is authoritative.
+            bootstrapProgressStep = 1
         }
         do {
             var slug: String?
@@ -2157,12 +2192,15 @@ private struct SetupWizardView: View {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
             guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap wurde im Supervisor-Store nicht gefunden"]) }
+            bootstrapProgressStep = 2
             callWebhookHAStatus = "CallWebhook Bootstrap wird installiert …"
             await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap wird jetzt installiert.")
             _ = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)/install", data: ["background": false])
+            bootstrapProgressStep = 3
             callWebhookHAStatus = "CallWebhook Bootstrap wird gestartet …"
             await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap ist installiert und wird jetzt ausgeführt.")
             _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
+            bootstrapProgressStep = 4
             callWebhookHAStatus = "Bootstrap gestartet – warte auf Home-Assistant-Neustart …"
             await waitForCallWebhookAfterRestart()
         } catch {

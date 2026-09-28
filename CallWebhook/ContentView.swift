@@ -703,7 +703,7 @@ private struct SetupWizardView: View {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 180
+        request.timeoutInterval = 15
         guard var haToken = SetupKeychain.get(account: "home-assistant-token"), !haToken.isEmpty else {
             asteriskInstalled = false
             asteriskConfigStatus = "Home Assistant noch nicht autorisiert"
@@ -1924,9 +1924,18 @@ private struct SetupWizardView: View {
                 homeAssistantStatus = "Home Assistant erreichbar"
                 await checkCallWebhookHAIntegration(base: base)
                 if callWebhookHAReady {
-                    callWebhookHAStatus = "CallWebhook-HA-Integration bereit – Einrichtung wird fortgesetzt"
-                    if step == 2 { step = 3 }
-                    return
+                    callWebhookHAStatus = "CallWebhook-HA-Integration bereit"
+                    if !asteriskConfigReady {
+                        prepareAsteriskConfiguration()
+                    }
+                    if asteriskConfigReady && !asteriskInstalled && !isInstallingAsterisk {
+                        await installAsteriskConfiguration()
+                    }
+                    if asteriskInstalled {
+                        callWebhookHAStatus = "CallWebhook und Asterisk bereit – Einrichtung wird fortgesetzt"
+                        if step == 2 { step = 3 }
+                        return
+                    }
                 }
             } catch {
                 continue

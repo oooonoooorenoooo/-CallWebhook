@@ -442,27 +442,27 @@ private struct SetupWizardView: View {
                 }
                 Label(callWebhookHAStatus, systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
                     .foregroundStyle(callWebhookHAReady ? .green : .orange)
-                Button {
-                    prepareAsteriskConfiguration()
-                } label: {
-                    Label(
-                        asteriskConfigReady ? "Asterisk-Konfiguration vorbereitet" : "Asterisk-Konfiguration vorbereiten",
-                        systemImage: asteriskConfigReady ? "checkmark.circle.fill" : "server.rack"
-                    )
-                    .foregroundStyle(asteriskConfigReady ? .green : .blue)
-                }
-                .disabled(asteriskConfigReady || !homeAssistantReachable)
+                Label(
+                    asteriskInstalled ? "Asterisk automatisch eingerichtet" : (isInstallingAsterisk ? "Asterisk wird automatisch eingerichtet …" : (asteriskInstallFailed ? "Asterisk-Einrichtung fehlgeschlagen" : "Asterisk wird automatisch eingerichtet")),
+                    systemImage: asteriskInstalled ? "checkmark.circle.fill" : (asteriskInstallFailed ? "xmark.circle.fill" : "arrow.trianglehead.2.clockwise.rotate.90")
+                )
+                .foregroundStyle(asteriskInstalled ? .green : (asteriskInstallFailed ? .red : .secondary))
                 Label(
                     asteriskConfigStatus,
-                    systemImage: asteriskInstallFailed ? "xmark.circle.fill" : (asteriskInstalled || asteriskConfigReady ? "checkmark.circle.fill" : "circle.dashed")
+                    systemImage: asteriskInstallFailed ? "xmark.circle.fill" : (asteriskInstalled ? "checkmark.circle.fill" : "circle.dashed")
                 )
-                .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled || asteriskConfigReady ? .green : .secondary))
-                Button {
-                    Task { await installAsteriskConfiguration() }
-                } label: {
-                    Label(isInstallingAsterisk ? "Installiere …" : "Asterisk automatisch installieren", systemImage: "arrow.down.to.line.compact")
+                .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
+                if asteriskInstallFailed {
+                    Button {
+                        Task {
+                            asteriskInstallFailed = false
+                            if !asteriskConfigReady { prepareAsteriskConfiguration() }
+                            if asteriskConfigReady { await installAsteriskConfiguration() }
+                        }
+                    } label: {
+                        Label("Asterisk-Einrichtung erneut versuchen", systemImage: "arrow.clockwise")
+                    }
                 }
-                .disabled(!asteriskConfigReady || !callWebhookHAReady || isInstallingAsterisk || setupHAToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Label("Der Home-Assistant-Token wird ausschließlich sicher im iOS-Keychain gespeichert.", systemImage: "lock.shield")
                     .foregroundStyle(.secondary)
             }
@@ -1893,6 +1893,12 @@ private struct SetupWizardView: View {
             haAuthenticated = true
             callWebhookHAReady = true
             callWebhookHAStatus = "CallWebhook-HA-Integration bereit (API \(version))"
+            if step == 2 && !asteriskInstalled && !isInstallingAsterisk {
+                if !asteriskConfigReady { prepareAsteriskConfiguration() }
+                if asteriskConfigReady {
+                    Task { await installAsteriskConfiguration() }
+                }
+            }
         } catch {
             haAuthenticated = false
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"

@@ -12,6 +12,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 DOMAIN = "callwebhook"
+BACKEND_API_VERSION = 2
 
 HOST = "192.168.178.1"
 TAMS = ("1", "2")
@@ -557,6 +558,22 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
     return [str(path) for path in targets]
 
 
+class CallWebhookSetupStatusView(HomeAssistantView):
+    url = "/api/callwebhook/setup/status"
+    name = "api:callwebhook:setup:status"
+    requires_auth = True
+
+    async def get(self, request):
+        return self.json({
+            "ok": True,
+            "domain": DOMAIN,
+            "api_version": BACKEND_API_VERSION,
+            "asterisk_provisioning": True,
+            "mailbox": True,
+            "archive": True,
+        })
+
+
 class CallWebhookAsteriskSetupView(HomeAssistantView):
     url = "/api/callwebhook/setup/asterisk"
     name = "api:callwebhook:setup:asterisk"
@@ -792,6 +809,10 @@ async def async_setup(
         exist_ok=True
     )
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+    hass.http.register_view(
+        CallWebhookSetupStatusView
+    )
 
     hass.http.register_view(
         CallWebhookAsteriskSetupView

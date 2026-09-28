@@ -422,7 +422,7 @@ private struct SetupWizardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button {
-                        openCallWebhookBootstrap()
+                        Task { await openCallWebhookBootstrapGuided() }
                     } label: {
                         Label("CallWebhook-Repository zu HA hinzufügen", systemImage: "shippingbox.and.arrow.backward")
                     }
@@ -1941,6 +1941,66 @@ private struct SetupWizardView: View {
             }
         }
         callWebhookHAStatus = "Home Assistant ist noch nicht bereit – bitte Installation prüfen"
+    }
+
+    @MainActor
+    private func openCallWebhookBootstrapGuided() async {
+        let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
+        UIPasteboard.general.string = repository
+        callWebhookHAStatus = "Repository in Home Assistant bestätigen. Danach öffnet CallWebhook automatisch die Bootstrap-App."
+        var add = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
+        add?.queryItems = [URLQueryItem(name: "repository_url", value: repository)]
+        if let url = add?.url {
+            await UIApplication.shared.open(url)
+        }
+
+        // Give the user time to confirm the repository, then resolve the real Supervisor slug.
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let base = URL(string: "http://192.168.178.\(input):8123"),
+              var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else { return }
+
+        for _ in 0..<60 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            guard let storeURL = URL(string: "/api/hassio/store/addons", relativeTo: base)?.absoluteURL else { return }
+            var request = URLRequest(url: storeURL)
+            request.timeoutInterval = 8
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            do {
+                var (data, response) = try await URLSession.shared.data(for: request)
+                var http = response as? HTTPURLResponse
+                if http?.statusCode == 401 {
+                    token = try await HomeAssistantAuth.shared.refresh(instance: base)
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    (data, response) = try await URLSession.shared.data(for: request)
+                    http = response as? HTTPURLResponse
+                }
+                guard let http, (200..<300).contains(http.statusCode),
+                      let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+                let dataRoot = root["data"] as? [String: Any]
+                let addons = (dataRoot?["addons"] as? [[String: Any]])
+                    ?? (root["addons"] as? [[String: Any]])
+                    ?? []
+                if let bootstrap = addons.first(where: {
+                    let slug = ($0["slug"] as? String ?? "").lowercased()
+                    let name = ($0["name"] as? String ?? "").lowercased()
+                    let repo = ($0["repository"] as? String ?? "").lowercased()
+                    return slug.hasSuffix("_callwebhook_bootstrap")
+                        || name == "callwebhook bootstrap"
+                        || (repo.contains("callwebhook") && slug.contains("bootstrap"))
+                }), let slug = bootstrap["slug"] as? String, !slug.isEmpty {
+                    callWebhookHAStatus = "CallWebhook Bootstrap gefunden – öffne App-Seite …"
+                    if let direct = URL(string: "http://192.168.178.\(input):8123/hassio/addon/\(slug)/info") {
+                        await UIApplication.shared.open(direct)
+                    }
+                    return
+                }
+            } catch {
+                continue
+            }
+        }
+        callWebhookHAStatus = "Repository hinzugefügt, Bootstrap-App konnte noch nicht automatisch geöffnet werden."
     }
 
     @MainActor

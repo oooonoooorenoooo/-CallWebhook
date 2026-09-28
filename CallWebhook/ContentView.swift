@@ -169,6 +169,8 @@ private struct SetupWizardView: View {
     @State private var asteriskInstalled = false
     @State private var isInstallingAsterisk = false
     @State private var setupHAToken = ""
+    @State private var isAuthenticatingHA = false
+    @State private var haAuthenticated = false
     @State private var isChecking = false
     @ObservedObject private var setupSIP = SIPService.shared
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
@@ -347,9 +349,16 @@ private struct SetupWizardView: View {
                     .foregroundStyle(homeAssistantReachable ? .green : .secondary)
                 Label(callWebhookHAStatus, systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
                     .foregroundStyle(callWebhookHAReady ? .green : .orange)
-                SecureField("Home-Assistant-Token", text: $setupHAToken)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                Button {
+                    Task { await authenticateHomeAssistant() }
+                } label: {
+                    Label(isAuthenticatingHA ? "Home Assistant öffnet …" : (haAuthenticated ? "Home Assistant verbunden" : "Mit Home Assistant verbinden"), systemImage: haAuthenticated ? "checkmark.shield.fill" : "person.badge.key.fill")
+                }
+                .disabled(isAuthenticatingHA || !homeAssistantReachable)
+                if haAuthenticated {
+                    Label("Autorisierung erfolgreich", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
                 Button {
                     prepareAsteriskConfiguration()
                 } label: {
@@ -1322,6 +1331,29 @@ private struct SetupWizardView: View {
             guard match.numberOfRanges > 1,
                   let valueRange = Range(match.range(at: 1), in: xml) else { return nil }
             return String(xml[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    @MainActor
+    private func authenticateHomeAssistant() async {
+        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.contains("://") { raw = "http://" + raw }
+        guard let base = URL(string: raw) else {
+            homeAssistantStatus = "Ungültige Home-Assistant-Adresse"
+            return
+        }
+        isAuthenticatingHA = true
+        defer { isAuthenticatingHA = false }
+        do {
+            let token = try await HomeAssistantAuth.shared.authenticate(instance: base)
+            setupHAToken = token
+            haAuthenticated = true
+            homeAssistantStatus = "Home Assistant autorisiert"
+            await checkCallWebhookHAIntegration(base: base)
+        } catch {
+            haAuthenticated = false
+            callWebhookHAReady = false
+            homeAssistantStatus = "Anmeldung fehlgeschlagen: \(error.localizedDescription)"
         }
     }
 

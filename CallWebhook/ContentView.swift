@@ -734,25 +734,47 @@ private struct SetupWizardView: View {
                 (data, response) = try await URLSession.shared.data(for: request)
                 http = response as? HTTPURLResponse
             }
-            guard let http else {
-                throw URLError(.badServerResponse)
-            }
+            guard let http else { throw URLError(.badServerResponse) }
             guard (200..<300).contains(http.statusCode) else {
                 let message = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
                 asteriskInstalled = false
-            asteriskInstallFailed = true
+                asteriskInstallFailed = true
                 asteriskConfigStatus = "HA-Provisionierung fehlgeschlagen: \(message)"
                 return
             }
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            let ok = (json?["ok"] as? Bool) ?? false
-            let configVerified = (json?["config_verified"] as? Bool) ?? false
-            guard ok && configVerified else {
+            guard let statusURL = URL(string: "/api/callwebhook/setup/asterisk/status", relativeTo: base)?.absoluteURL else {
+                throw URLError(.badURL)
+            }
+            var configVerified = false
+            for _ in 0..<180 {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                var statusRequest = URLRequest(url: statusURL)
+                statusRequest.timeoutInterval = 8
+                statusRequest.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
+                do {
+                    let (statusData, statusResponse) = try await URLSession.shared.data(for: statusRequest)
+                    guard let statusHTTP = statusResponse as? HTTPURLResponse, (200..<300).contains(statusHTTP.statusCode),
+                          let statusJSON = (try? JSONSerialization.jsonObject(with: statusData)) as? [String: Any] else { continue }
+                    let state = statusJSON["state"] as? String ?? "running"
+                    asteriskConfigStatus = statusJSON["message"] as? String ?? "Asterisk wird eingerichtet …"
+                    if state == "error" {
+                        asteriskInstalled = false
+                        asteriskInstallFailed = true
+                        return
+                    }
+                    if state == "done" {
+                        let result = statusJSON["result"] as? [String: Any]
+                        configVerified = (result?["config_verified"] as? Bool) ?? false
+                        break
+                    }
+                } catch {
+                    continue
+                }
+            }
+            guard configVerified else {
                 asteriskInstalled = false
-            asteriskInstallFailed = true
-                asteriskConfigStatus = ok
-                    ? "Asterisk-Konfiguration wurde geschrieben, aber nicht verifiziert"
-                    : "Home Assistant hat die Installation nicht bestätigt"
+                asteriskInstallFailed = true
+                asteriskConfigStatus = "Asterisk-Einrichtung wurde nicht vollständig verifiziert"
                 return
             }
             try? SetupKeychain.set(haToken, account: "home-assistant-token")

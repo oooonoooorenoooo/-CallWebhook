@@ -161,6 +161,7 @@ private struct SetupWizardView: View {
     @State private var isInstallingAsterisk = false
     @State private var setupHAToken = ""
     @State private var isChecking = false
+    @ObservedObject private var setupSIP = SIPService.shared
     @AppStorage("sipLine2Enabled") private var sipLine2Enabled = false
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
     @AppStorage("sipLine2Prefix") private var sipLine2Prefix = ""
@@ -548,17 +549,34 @@ private struct SetupWizardView: View {
                 asteriskConfigStatus = "Home Assistant hat die Installation nicht bestätigt"
                 return
             }
-            asteriskInstalled = true
-            asteriskConfigStatus = "Asterisk installiert und von Home Assistant bestätigt"
             try? SetupKeychain.set(setupHAToken, account: "home-assistant-token")
-            if let iosPassword = SetupKeychain.get(account: "asterisk-sip-callwebhook-ios") {
-                let defaults = UserDefaults.standard
-                defaults.set(true, forKey: "sipEnabled")
-                defaults.set("callwebhook-ios", forKey: "sipUsername")
-                defaults.set(iosPassword, forKey: "sipPassword")
-                if let host = base.host {
-                    defaults.set(host, forKey: "sipHost")
+            guard let iosPassword = SetupKeychain.get(account: "asterisk-sip-callwebhook-ios"),
+                  let host = base.host else {
+                asteriskInstalled = false
+                asteriskConfigStatus = "iPhone-SIP-Zugang fehlt nach Installation"
+                return
+            }
+            let defaults = UserDefaults.standard
+            defaults.set(true, forKey: "sipEnabled")
+            defaults.set("callwebhook-ios", forKey: "sipUsername")
+            defaults.set(iosPassword, forKey: "sipPassword")
+            defaults.set(host, forKey: "sipHost")
+
+            asteriskInstalled = false
+            asteriskConfigStatus = "Asterisk neu gestartet – prüfe SIP-Registrierung …"
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            try setupSIP.configureAndStart(host: host, username: "callwebhook-ios", password: iosPassword)
+
+            for _ in 0..<15 {
+                if setupSIP.registered {
+                    asteriskInstalled = true
+                    asteriskConfigStatus = "Asterisk bereit – iPhone-SIP erfolgreich registriert"
+                    break
                 }
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            if !asteriskInstalled {
+                asteriskConfigStatus = "Asterisk läuft, aber iPhone-SIP wurde nicht registriert: \(setupSIP.status)"
             }
         } catch {
             asteriskInstalled = false

@@ -168,6 +168,7 @@ private struct SetupWizardView: View {
     @State private var asteriskConfigStatus = "Noch nicht vorbereitet"
     @State private var asteriskConfigReady = false
     @State private var asteriskInstalled = false
+    @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
@@ -450,8 +451,11 @@ private struct SetupWizardView: View {
                     .foregroundStyle(asteriskConfigReady ? .green : .blue)
                 }
                 .disabled(asteriskConfigReady || !homeAssistantReachable)
-                Label(asteriskConfigStatus, systemImage: asteriskConfigReady ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(asteriskConfigReady ? .green : .secondary)
+                Label(
+                    asteriskConfigStatus,
+                    systemImage: asteriskInstallFailed ? "xmark.circle.fill" : (asteriskInstalled || asteriskConfigReady ? "checkmark.circle.fill" : "circle.dashed")
+                )
+                .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled || asteriskConfigReady ? .green : .secondary))
                 Button {
                     Task { await installAsteriskConfiguration() }
                 } label: {
@@ -682,6 +686,7 @@ private struct SetupWizardView: View {
         }
 
         isInstallingAsterisk = true
+        asteriskInstallFailed = false
         defer { isInstallingAsterisk = false }
 
         var request = URLRequest(url: url)
@@ -722,6 +727,7 @@ private struct SetupWizardView: View {
             guard (200..<300).contains(http.statusCode) else {
                 let message = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
                 asteriskInstalled = false
+            asteriskInstallFailed = true
                 asteriskConfigStatus = "HA-Provisionierung fehlgeschlagen: \(message)"
                 return
             }
@@ -730,6 +736,7 @@ private struct SetupWizardView: View {
             let configVerified = (json?["config_verified"] as? Bool) ?? false
             guard ok && configVerified else {
                 asteriskInstalled = false
+            asteriskInstallFailed = true
                 asteriskConfigStatus = ok
                     ? "Asterisk-Konfiguration wurde geschrieben, aber nicht verifiziert"
                     : "Home Assistant hat die Installation nicht bestätigt"
@@ -765,6 +772,7 @@ private struct SetupWizardView: View {
             }
         } catch {
             asteriskInstalled = false
+            asteriskInstallFailed = true
             asteriskConfigStatus = "Asterisk-Installation fehlgeschlagen: \(error.localizedDescription)"
         }
     }
@@ -1052,7 +1060,7 @@ private struct SetupWizardView: View {
     private var canContinue: Bool {
         switch step {
         case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated
-        case 2: return homeAssistantReachable
+        case 2: return homeAssistantReachable && haAuthenticated && callWebhookHAReady && asteriskInstalled
         case 3:
             let linesReady = !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
             let easybellReady = !easybellEnabled || (
@@ -1156,10 +1164,29 @@ private struct SetupWizardView: View {
                     action: "GetExistingVoIPNumbers",
                     arguments: []
                 )
-                fritzVoIPNumbers = extractSOAPValue("NewExistingVoIPNumbers", from: response)
+                let existingEntries = extractSOAPValue("NewExistingVoIPNumbers", from: response)
                     .split(whereSeparator: { $0 == "," || $0 == ";" || $0 == "\n" })
                     .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
+                var resolvedNumbers: [String] = []
+                for entry in existingEntries {
+                    if let accountIndex = Int(entry) {
+                        if let account = try? await soapCall(
+                            session: session,
+                            base: base,
+                            serviceType: voipService.type,
+                            controlURL: voipService.controlURL,
+                            action: "X_AVM-DE_GetVoIPAccount",
+                            arguments: [("NewVoIPAccountIndex", String(accountIndex))]
+                        ) {
+                            let number = extractSOAPValue("NewVoIPNumber", from: account)
+                            if !number.isEmpty { resolvedNumbers.append(number) }
+                        }
+                    } else {
+                        resolvedNumbers.append(entry)
+                    }
+                }
+                fritzVoIPNumbers = Array(NSOrderedSet(array: resolvedNumbers)) as? [String] ?? resolvedNumbers
                 fritzAuthenticated = true
                 do {
                     if !voipService.scpdURL.isEmpty {
@@ -1457,6 +1484,35 @@ private struct SetupWizardView: View {
                 } catch {
                     SetupKeychain.delete(account: "fritz-sip-callwhapp3")
                     throw error
+                }
+            }
+
+            if fritzTAMs.count < 3,
+               let tamService = extractTR064Services(from: descriptionXML).first(where: {
+                   $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:")
+               }) {
+                let enabledIndices = Set(fritzTAMs.map(\.index))
+                for index in 0..<3 where !enabledIndices.contains(index) {
+                    do {
+                        _ = try await soapCall(
+                            session: session, base: base, serviceType: tamService.type,
+                            controlURL: tamService.controlURL, action: "SetEnable",
+                            arguments: [("NewIndex", String(index)), ("NewEnable", "1")],
+                            secondFactorToken: secondFactorToken
+                        )
+                    } catch {
+                        if isSecondFactorRequired(error) {
+                            secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: descriptionXML)
+                            _ = try await soapCall(
+                                session: session, base: base, serviceType: tamService.type,
+                                controlURL: tamService.controlURL, action: "SetEnable",
+                                arguments: [("NewIndex", String(index)), ("NewEnable", "1")],
+                                secondFactorToken: secondFactorToken
+                            )
+                        } else {
+                            throw error
+                        }
+                    }
                 }
             }
 

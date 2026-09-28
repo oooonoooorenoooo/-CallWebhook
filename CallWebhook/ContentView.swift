@@ -711,6 +711,53 @@ private struct SetupWizardView: View {
             return
         }
 
+        let easybellPJSIP: String
+        if easybellEnabled,
+           let ebUser = SetupKeychain.get(account: "easybell-sip-username"),
+           let ebPassword = SetupKeychain.get(account: "easybell-sip-password"),
+           let ebContact = SetupKeychain.get(account: "easybell-contact-user") {
+            easybellPJSIP = """
+            
+            [easybell-auth]
+            type=auth
+            auth_type=userpass
+            username=\(ebUser)
+            password=\(ebPassword)
+
+            [easybell-aor]
+            type=aor
+            contact=sip:voip.easybell.de
+
+            [easybell-endpoint]
+            type=endpoint
+            transport=transport-udp
+            context=from-easybell
+            disallow=all
+            allow=alaw,ulaw,g722
+            outbound_auth=easybell-auth
+            aors=easybell-aor
+            from_user=\(ebUser)
+            from_domain=voip.easybell.de
+            send_pai=yes
+            direct_media=no
+            force_rport=yes
+            rtp_symmetric=yes
+
+            [easybell-registration]
+            type=registration
+            transport=transport-udp
+            outbound_auth=easybell-auth
+            server_uri=sip:voip.easybell.de
+            client_uri=sip:\(ebUser)@voip.easybell.de
+            contact_user=\(ebContact)
+            retry_interval=60
+            line=yes
+            endpoint=easybell-endpoint
+            """
+        } else {
+            easybellPJSIP = ""
+        }
+
         let fritz3 = sipLine3Enabled ? """
 
         [fritz3-auth]
@@ -771,6 +818,7 @@ private struct SetupWizardView: View {
         force_rport=yes
         rewrite_contact=yes
         rtp_symmetric=yes
+        \(easybellPJSIP)
 
         [fritz1-auth]
         type=auth

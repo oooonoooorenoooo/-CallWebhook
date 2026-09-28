@@ -128,6 +128,7 @@ private struct SetupWizardView: View {
     @State private var fritzHost = "192.168.178.1"
     @State private var fritzUser = ""
     @State private var fritzPassword = ""
+    @State private var fritzUserChoice: Bool? = nil
     @State private var homeAssistantURL = ""
     @State private var easybellEnabled = false
     @State private var line1Label = "Mobil 1"
@@ -268,13 +269,47 @@ private struct SetupWizardView: View {
     private var fritz: some View {
         Form {
             Section("FRITZ!Box") {
-                TextField("Adresse", text: $fritzHost)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("Benutzer", text: $fritzUser)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                SecureField("Kennwort", text: $fritzPassword)
+                Text("Ist bereits ein FRITZ!Box-Benutzer für CallWebhook vorhanden?")
+                    .font(.headline)
+                HStack {
+                    Button {
+                        fritzUserChoice = true
+                    } label: {
+                        Label("Ja", systemImage: fritzUserChoice == true ? "checkmark.circle.fill" : "circle")
+                    }
+                    .buttonStyle(.bordered)
+                    Button {
+                        fritzUserChoice = false
+                    } label: {
+                        Label("Nein", systemImage: fritzUserChoice == false ? "checkmark.circle.fill" : "circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if fritzUserChoice == false {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("FRITZ!Box-Benutzer anlegen", systemImage: "person.badge.plus")
+                            .font(.headline)
+                        Text("1. FRITZ!Box-Benutzeroberfläche öffnen")
+                        Text("2. System → FRITZ!Box-Benutzer")
+                        Text("3. „Benutzer hinzufügen“ wählen")
+                        Text("4. Benutzername, z. B. „callwebhook“, und ein sicheres Kennwort vergeben")
+                        Text("5. Unter Berechtigungen „FRITZ!Box Einstellungen“ aktivieren")
+                        Text("6. Zugriff aus dem Internet ist für CallWebhook nicht erforderlich")
+                        Text("7. Speichern und die Zugangsdaten anschließend hier eintragen")
+                    }
+                    .font(.callout)
+                }
+
+                if fritzUserChoice != nil {
+                    TextField("Adresse", text: $fritzHost)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Benutzer", text: $fritzUser)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Kennwort", text: $fritzPassword)
+                }
             }
             Section {
                 Button {
@@ -282,7 +317,7 @@ private struct SetupWizardView: View {
                 } label: {
                     Label(isChecking ? "Prüfe …" : "FRITZ!Box prüfen", systemImage: "network")
                 }
-                .disabled(isChecking || fritzHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isChecking || fritzUserChoice == nil || fritzHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fritzUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fritzPassword.isEmpty)
                 Label(fritzStatus, systemImage: fritzReachable ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundStyle(fritzReachable ? .green : .secondary)
                 if fritzReachable {

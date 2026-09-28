@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-TARGET=/config/custom_components/callwebhook
+TARGET=/homeassistant/custom_components/callwebhook
 BASE=https://raw.githubusercontent.com/oooonoooorenoooo/-CallWebhook/main/homeassistant/custom_components/callwebhook
-mkdir -p "$TARGET" /config/callwebhook
+mkdir -p "$TARGET" /homeassistant/callwebhook
 curl -fsSL "$BASE/__init__.py" -o "$TARGET/__init__.py"
 curl -fsSL "$BASE/manifest.json" -o "$TARGET/manifest.json"
-if ! grep -Eq '^[[:space:]]*callwebhook:[[:space:]]*$' /config/configuration.yaml; then
-  printf '\ncallwebhook:\n' >> /config/configuration.yaml
+if ! grep -Eq '^[[:space:]]*callwebhook:[[:space:]]*$' /homeassistant/configuration.yaml; then
+  printf '\ncallwebhook:\n' >> /homeassistant/configuration.yaml
 fi
 echo "CallWebhook backend files installed successfully."
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then

@@ -2040,15 +2040,16 @@ private struct SetupWizardView: View {
         guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
         try await task.send(.data(try JSONSerialization.data(withJSONObject: ["type": "auth", "access_token": token])))
         guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        let command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": "/store/addons", "method": "GET", "timeout": 15]
+        let command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": "/store", "method": "get", "timeout": 15]
         try await task.send(.data(try JSONSerialization.data(withJSONObject: command)))
         let response = try await receiveJSON()
         guard (response["success"] as? Bool) == true else { throw URLError(.badServerResponse) }
         let result = response["result"]
         var candidates: [[String: Any]] = []
-        if let array = result as? [[String: Any]] { candidates = array }
-        else if let dict = result as? [String: Any] {
-            candidates = (dict["addons"] as? [[String: Any]]) ?? (dict["apps"] as? [[String: Any]]) ?? []
+        if let dict = result as? [String: Any] {
+            candidates = (dict["addons"] as? [[String: Any]]) ?? []
+        } else if let array = result as? [[String: Any]] {
+            candidates = array
         }
         guard let item = candidates.first(where: {
             let slug = ($0["slug"] as? String ?? "").lowercased()
@@ -2060,7 +2061,7 @@ private struct SetupWizardView: View {
         return slug
     }
 
-    private func supervisorWrite(base: URL, token: String, endpoint: String, method: String = "POST", data: [String: Any] = [:]) async throws -> [String: Any] {
+    private func supervisorWrite(base: URL, token: String, endpoint: String, method: String = "post", data: [String: Any] = [:]) async throws -> [String: Any] {
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
         let baseScheme = components?.scheme
         components?.scheme = (baseScheme == "https") ? "wss" : "ws"
@@ -2084,7 +2085,7 @@ private struct SetupWizardView: View {
         guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
         try await task.send(.data(try JSONSerialization.data(withJSONObject: ["type": "auth", "access_token": token])))
         guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.uppercased(), "timeout": 180]
+        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.lowercased(), "timeout": 180]
         if !data.isEmpty { command["data"] = data }
         try await task.send(.data(try JSONSerialization.data(withJSONObject: command)))
         let response = try await receiveJSON()

@@ -549,9 +549,16 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
     requested_dir = Path(custom_path)
     if requested_dir != ASTERISK_CUSTOM_DIR:
         raise RuntimeError("Unzulässiger Asterisk-Konfigurationspfad")
-    if not ASTERISK_CUSTOM_DIR.exists():
+    try:
+        ASTERISK_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as error:
         raise RuntimeError(
-            "Asterisk-Konfigurationsordner ist für Home Assistant nicht erreichbar: "
+            "Asterisk-Konfigurationsordner konnte nicht angelegt werden: "
+            f"{ASTERISK_CUSTOM_DIR}: {error}"
+        ) from error
+    if not ASTERISK_CUSTOM_DIR.is_dir():
+        raise RuntimeError(
+            "Asterisk-Konfigurationspfad ist kein Verzeichnis: "
             f"{ASTERISK_CUSTOM_DIR}"
         )
     if not isinstance(pjsip, str) or not pjsip.strip():
@@ -565,7 +572,6 @@ def install_asterisk_config(pjsip, extensions, addon, custom_path):
     if not all(token in extensions for token in required_extensions):
         raise RuntimeError("extensions-Konfiguration unvollständig")
 
-    ASTERISK_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
     targets = {
         ASTERISK_CUSTOM_DIR / "pjsip.conf": pjsip,
         ASTERISK_CUSTOM_DIR / "extensions.conf": extensions,

@@ -315,7 +315,8 @@ private struct SetupWizardView: View {
                 Button {
                     Task { await checkFritzBox() }
                 } label: {
-                    Label(isChecking ? "Prüfe …" : "FRITZ!Box prüfen", systemImage: "network")
+                    Label(isChecking ? "Prüfe …" : (fritzReachable && fritzAuthenticated ? "FRITZ!Box geprüft" : "FRITZ!Box prüfen"), systemImage: fritzReachable && fritzAuthenticated ? "checkmark.circle.fill" : "network")
+                        .foregroundStyle(fritzReachable && fritzAuthenticated ? .green : .blue)
                 }
                 .disabled(isChecking || fritzUserChoice == nil || fritzHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fritzUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fritzPassword.isEmpty)
                 Label(fritzStatus, systemImage: fritzReachable ? "checkmark.circle.fill" : "circle.dashed")
@@ -1429,17 +1430,18 @@ private struct SetupWizardView: View {
     }
 
     private func setClientArguments(index: Int, username: String, password: String, outgoing: String) throws -> [(String, String)] {
+        let effectiveOutgoing = outgoing.isEmpty ? (fritzVoIPNumbers.first ?? "") : outgoing
         var values: [String: String] = [
             "NewX_AVM-DE_ClientIndex": String(index),
             "NewX_AVM-DE_ClientUsername": username,
             "NewX_AVM-DE_ClientPassword": password,
             "NewX_AVM-DE_PhoneName": username,
-            "NewX_AVM-DE_OutGoingNumber": outgoing,
+            "NewX_AVM-DE_OutGoingNumber": effectiveOutgoing,
             "NewX_AVM-DE_InComingNumbers": outgoing,
-            "NewX_AVM-DE_ExternalRegistration": "0",
             "NewX_AVM-DE_ClientId": ""
         ]
         values["NewX_AVM-DE_ClientID"] = ""
+        values["NewX_AVM-DE_ExternalRegistration"] = "0"
 
         var result: [(String, String)] = []
         for argument in fritzSIPWriteArguments {

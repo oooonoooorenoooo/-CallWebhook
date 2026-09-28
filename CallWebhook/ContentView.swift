@@ -1233,16 +1233,15 @@ private struct SetupWizardView: View {
             callWebhookHAStatus = "HA-Token eingeben und erneut prüfen"
             return
         }
-        guard let url = URL(string: "/api/callwebhook/setup/asterisk", relativeTo: base)?.absoluteURL else {
+        guard let url = URL(string: "/api/callwebhook/setup/status", relativeTo: base)?.absoluteURL else {
             callWebhookHAStatus = "CallWebhook-Endpunkt konnte nicht gebildet werden"
             return
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "OPTIONS"
         request.timeoutInterval = 8
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 callWebhookHAStatus = "CallWebhook-Integration antwortet nicht"
                 return
@@ -1255,13 +1254,21 @@ private struct SetupWizardView: View {
                 callWebhookHAStatus = "HA-Token nicht autorisiert"
                 return
             }
-            if (200..<500).contains(http.statusCode) {
-                callWebhookHAReady = true
-                callWebhookHAStatus = "CallWebhook-HA-Integration bereit"
-                try? SetupKeychain.set(token, account: "home-assistant-token")
+            guard (200..<300).contains(http.statusCode),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  (json["ok"] as? Bool) == true else {
+                callWebhookHAStatus = "CallWebhook-Integration nicht bereit (HTTP \(http.statusCode))"
                 return
             }
-            callWebhookHAStatus = "CallWebhook-Integration nicht bereit (HTTP \(http.statusCode))"
+            let version = json["api_version"] as? Int ?? 0
+            guard version >= 2,
+                  (json["asterisk_provisioning"] as? Bool) == true else {
+                callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
+                return
+            }
+            callWebhookHAReady = true
+            callWebhookHAStatus = "CallWebhook-HA-Integration bereit (API \(version))"
+            try? SetupKeychain.set(token, account: "home-assistant-token")
         } catch {
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
         }

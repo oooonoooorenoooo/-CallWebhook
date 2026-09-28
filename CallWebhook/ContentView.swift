@@ -66,6 +66,15 @@ private enum SetupKeychain {
               let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
+    static func delete(account: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
 }
 
 struct ContentView: View {
@@ -1105,11 +1114,15 @@ private struct SetupWizardView: View {
             return
         }
 
-        let existing1 = fritzSIPClients.contains { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }
-        let existing2 = fritzSIPClients.contains { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
-        let existing3 = fritzSIPClients.contains { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }
-        if existing1 && existing2 && (!sipLine3Enabled || existing3) {
-            sipProvisionStatus = "callwhapp1 und callwhapp2 sind bereits vorhanden"
+        let client1 = fritzSIPClients.first { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }
+        let client2 = fritzSIPClients.first { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
+        let client3 = fritzSIPClients.first { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }
+        let secret1Missing = SetupKeychain.get(account: "fritz-sip-callwhapp1") == nil
+        let secret2Missing = SetupKeychain.get(account: "fritz-sip-callwhapp2") == nil
+        let secret3Missing = sipLine3Enabled && SetupKeychain.get(account: "fritz-sip-callwhapp3") == nil
+        if client1 != nil && client2 != nil && (!sipLine3Enabled || client3 != nil)
+            && !secret1Missing && !secret2Missing && !secret3Missing {
+            sipProvisionStatus = "CallWebhook-SIP-Nebenstellen und sichere Zugangsdaten sind vollständig"
             return
         }
 
@@ -1133,32 +1146,50 @@ private struct SetupWizardView: View {
             let session = URLSession(configuration: .ephemeral, delegate: auth, delegateQueue: nil)
             defer { session.finishTasksAndInvalidate() }
 
-            if !existing1 {
+            if client1 == nil || secret1Missing {
                 let password = randomSIPPassword()
-                let args = try setClientArguments(index: index1, username: "callwhapp1", password: password, outgoing: line1Number)
-                _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
                 try SetupKeychain.set(password, account: "fritz-sip-callwhapp1")
+                do {
+                    let targetIndex = client1?.index ?? index1
+                    let args = try setClientArguments(index: targetIndex, username: "callwhapp1", password: password, outgoing: line1Number)
+                    _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                } catch {
+                    SetupKeychain.delete(account: "fritz-sip-callwhapp1")
+                    throw error
+                }
             }
 
-            if !existing2 {
+            if client2 == nil || secret2Missing {
                 let password = randomSIPPassword()
-                let number2 = line2Number.isEmpty ? line1Number : line2Number
-                let args = try setClientArguments(index: index2, username: "callwhapp2", password: password, outgoing: number2)
-                _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
                 try SetupKeychain.set(password, account: "fritz-sip-callwhapp2")
+                do {
+                    let targetIndex = client2?.index ?? index2
+                    let number2 = line2Number.isEmpty ? line1Number : line2Number
+                    let args = try setClientArguments(index: targetIndex, username: "callwhapp2", password: password, outgoing: number2)
+                    _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                } catch {
+                    SetupKeychain.delete(account: "fritz-sip-callwhapp2")
+                    throw error
+                }
             }
 
-            if sipLine3Enabled && !existing3 {
-                guard let index3 = sipClient3Index else {
+            if sipLine3Enabled && (client3 == nil || secret3Missing) {
+                guard let plannedIndex3 = sipClient3Index else {
                     throw NSError(domain: "CallWebhook.Setup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Kein sicherer Clientplatz für Leitung 3"])
                 }
                 let password = randomSIPPassword()
-                let args = try setClientArguments(index: index3, username: "callwhapp3", password: password, outgoing: line3Number)
-                _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
                 try SetupKeychain.set(password, account: "fritz-sip-callwhapp3")
+                do {
+                    let targetIndex = client3?.index ?? plannedIndex3
+                    let args = try setClientArguments(index: targetIndex, username: "callwhapp3", password: password, outgoing: line3Number)
+                    _ = try await soapCall(session: session, base: base, serviceType: voipService.type, controlURL: voipService.controlURL, action: fritzSIPWriteAction, arguments: args)
+                } catch {
+                    SetupKeychain.delete(account: "fritz-sip-callwhapp3")
+                    throw error
+                }
             }
 
-            sipProvisionStatus = "SIP-Nebenstellen angelegt und Zugangsdaten sicher gespeichert – FRITZ-Prüfung erneut ausführen"
+            sipProvisionStatus = "CallWebhook-SIP-Nebenstellen bereit und Zugangsdaten sicher synchronisiert – FRITZ-Prüfung erneut ausführen"
         } catch {
             sipProvisionStatus = "Provisionierung abgebrochen: \(error.localizedDescription)"
         }

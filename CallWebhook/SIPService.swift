@@ -18,7 +18,10 @@ final class SIPService: ObservableObject {
         let defaults = UserDefaults.standard
         let resolvedHost = (host ?? defaults.string(forKey: "sipHost") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedUsername = (username ?? defaults.string(forKey: "sipUsername") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedPassword = password ?? defaults.string(forKey: "sipPassword") ?? ""
+        let resolvedPassword = password
+            ?? SetupKeychain.get(account: "asterisk-sip-callwebhook-ios")
+            ?? defaults.string(forKey: "sipPassword")
+            ?? ""
 
         guard !resolvedHost.isEmpty, !resolvedUsername.isEmpty, !resolvedPassword.isEmpty else {
             status = "SIP-Zugangsdaten fehlen"
@@ -29,7 +32,8 @@ final class SIPService: ObservableObject {
         // the password that a previous successful registration stored.
         defaults.set(resolvedHost, forKey: "sipHost")
         defaults.set(resolvedUsername, forKey: "sipUsername")
-        defaults.set(resolvedPassword, forKey: "sipPassword")
+        try SetupKeychain.set(resolvedPassword, account: "asterisk-sip-callwebhook-ios")
+        defaults.removeObject(forKey: "sipPassword")
 
         iterateTimer?.invalidate()
         core?.stop()

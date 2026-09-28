@@ -2,6 +2,8 @@ from pathlib import Path
 from datetime import datetime
 import asyncio
 import json
+import os
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -542,6 +544,50 @@ async def mailbox_refresh_loop(
         )
 
 
+
+def ensure_asterisk_addon():
+    host = os.environ.get("SUPERVISOR", "supervisor")
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        raise RuntimeError("Home Assistant Supervisor-Token ist intern nicht verfügbar")
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    info_url = f"http://{host}/addons/{ASTERISK_ADDON}/info"
+    info = requests.get(info_url, headers=headers, timeout=30)
+    if info.status_code == 404:
+        repo = requests.post(
+            f"http://{host}/store/repositories",
+            headers=headers,
+            json={"repository": "https://github.com/TECH7Fox/asterisk-hass-addons"},
+            timeout=120,
+        )
+        if repo.status_code not in (200, 201, 400):
+            raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
+        install = requests.post(
+            f"http://{host}/store/addons/{ASTERISK_ADDON}/install",
+            headers=headers,
+            json={"background": False},
+            timeout=180,
+        )
+        if install.status_code >= 400:
+            raise RuntimeError(f"Asterisk konnte nicht installiert werden: HTTP {install.status_code} – {install.text}")
+    elif info.status_code >= 400:
+        raise RuntimeError(f"Asterisk-Status konnte nicht geprüft werden: HTTP {info.status_code} – {info.text}")
+    start = requests.post(f"http://{host}/addons/{ASTERISK_ADDON}/start", headers=headers, json={}, timeout=120)
+    if start.status_code not in (200, 201, 400):
+        raise RuntimeError(f"Asterisk konnte nicht gestartet werden: HTTP {start.status_code} – {start.text}")
+    for _ in range(30):
+        state = requests.get(info_url, headers=headers, timeout=30)
+        if state.status_code < 300:
+            try:
+                data = state.json().get("data", {})
+                if str(data.get("state", "")).lower() == "started":
+                    return
+            except ValueError:
+                pass
+        time.sleep(2)
+    raise RuntimeError("Asterisk wurde installiert, ist aber nach 60 Sekunden noch nicht bereit")
+
+
 def install_asterisk_config(pjsip, extensions, addon, custom_path):
     if addon != ASTERISK_ADDON:
         raise RuntimeError("Unbekanntes Asterisk-Add-on")
@@ -625,6 +671,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
             return self.json({"ok": False, "error": "Ungültiges JSON"}, status_code=400)
 
         try:
+            await hass.async_add_executor_job(ensure_asterisk_addon)
             files = await hass.async_add_executor_job(
                 install_asterisk_config,
                 payload.get("pjsip"),
@@ -643,6 +690,7 @@ class CallWebhookAsteriskSetupView(HomeAssistantView):
                 {"addon": ASTERISK_ADDON},
                 blocking=True,
             )
+            await hass.async_add_executor_job(ensure_asterisk_addon)
         except Exception as error:
             return self.json({"ok": False, "error": str(error)}, status_code=500)
 

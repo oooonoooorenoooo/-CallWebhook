@@ -365,11 +365,16 @@ private struct SetupWizardView: View {
                 }
                 if haAuthenticated && !callWebhookHAReady {
                     Button {
-                        Task { await bootstrapCallWebhookBackend() }
+                        openCallWebhookBootstrap()
                     } label: {
-                        Label(isBootstrappingHA ? "Bootstrap läuft …" : "CallWebhook automatisch installieren", systemImage: "shippingbox.and.arrow.backward")
+                        Label("CallWebhook-Bootstrap in HA installieren", systemImage: "shippingbox.and.arrow.backward")
                     }
-                    .disabled(isBootstrappingHA)
+                    Button {
+                        Task { await checkHomeAssistant() }
+                    } label: {
+                        Label("Bootstrap-Installation prüfen", systemImage: "arrow.clockwise.circle")
+                    }
+                    .disabled(isChecking)
                 }
                 Button {
                     prepareAsteriskConfiguration()
@@ -577,8 +582,14 @@ private struct SetupWizardView: View {
             return
         }
 
-        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !raw.contains("://") { raw = "http://" + raw }
+        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var raw = input
+        if !raw.contains("://") {
+            raw = "http://" + raw
+            if let parsed = URL(string: raw), parsed.port == nil {
+                raw += ":8123"
+            }
+        }
         guard let base = URL(string: raw),
               let url = URL(string: "/api/callwebhook/setup/asterisk", relativeTo: base)?.absoluteURL else {
             asteriskInstalled = false
@@ -591,7 +602,7 @@ private struct SetupWizardView: View {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 20
+        request.timeoutInterval = 180
         guard var haToken = SetupKeychain.get(account: "home-assistant-token"), !haToken.isEmpty else {
             asteriskInstalled = false
             asteriskConfigStatus = "Home Assistant noch nicht autorisiert"
@@ -610,79 +621,7 @@ private struct SetupWizardView: View {
         ]
 
         do {
-            func supervisorRequest(_ path: String, method: String = "POST", body: [String: Any]? = nil) async throws -> (Data, HTTPURLResponse) {
-                guard let supervisorURL = URL(string: path, relativeTo: base)?.absoluteURL else { throw URLError(.badURL) }
-                var supervisor = URLRequest(url: supervisorURL)
-                supervisor.httpMethod = method
-                supervisor.timeoutInterval = 60
-                supervisor.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
-                if let body {
-                    supervisor.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    supervisor.httpBody = try JSONSerialization.data(withJSONObject: body)
-                }
-                var (data, response) = try await URLSession.shared.data(for: supervisor)
-                var http = response as? HTTPURLResponse
-                if http?.statusCode == 401 {
-                    haToken = try await HomeAssistantAuth.shared.refresh(instance: base)
-                    setupHAToken = haToken
-                    supervisor.setValue("Bearer \(haToken)", forHTTPHeaderField: "Authorization")
-                    (data, response) = try await URLSession.shared.data(for: supervisor)
-                    http = response as? HTTPURLResponse
-                }
-                guard let http else { throw URLError(.badServerResponse) }
-                return (data, http)
-            }
-
-            asteriskConfigStatus = "Prüfe Asterisk-Add-on …"
-            let (_, infoResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/info", method: "GET")
-            if infoResponse.statusCode == 404 {
-                asteriskConfigStatus = "Installiere Asterisk-Repository …"
-                let (_, repoResponse) = try await supervisorRequest(
-                    "/api/hassio/store/repositories",
-                    body: ["repository": "https://github.com/TECH7Fox/asterisk-hass-addons"]
-                )
-                guard (200..<300).contains(repoResponse.statusCode) || repoResponse.statusCode == 400 else {
-                    asteriskConfigStatus = "Asterisk-Repository konnte nicht hinzugefügt werden (HTTP \(repoResponse.statusCode))"
-                    return
-                }
-                asteriskConfigStatus = "Installiere Asterisk …"
-                let (_, installResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/install")
-                guard (200..<300).contains(installResponse.statusCode) else {
-                    asteriskConfigStatus = "Asterisk konnte nicht installiert werden (HTTP \(installResponse.statusCode))"
-                    return
-                }
-            } else if !(200..<300).contains(infoResponse.statusCode) {
-                asteriskConfigStatus = "Asterisk-Status konnte nicht geprüft werden (HTTP \(infoResponse.statusCode))"
-                return
-            }
-
-            let (_, startResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/start")
-            guard (200..<300).contains(startResponse.statusCode) || startResponse.statusCode == 400 else {
-                asteriskConfigStatus = "Asterisk konnte nicht gestartet werden (HTTP \(startResponse.statusCode))"
-                return
-            }
-
-            asteriskConfigStatus = "Asterisk startet – warte auf Bereitschaft …"
-            var asteriskReady = false
-            for _ in 0..<30 {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-                let (infoData, readyResponse) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/info", method: "GET")
-                guard (200..<300).contains(readyResponse.statusCode) else { continue }
-                if let infoJSON = (try? JSONSerialization.jsonObject(with: infoData)) as? [String: Any],
-                   let data = infoJSON["data"] as? [String: Any],
-                   let state = data["state"] as? String,
-                   state.lowercased() == "started" {
-                    asteriskReady = true
-                    break
-                }
-            }
-            guard asteriskReady else {
-                asteriskInstalled = false
-                asteriskConfigStatus = "Asterisk wurde installiert, ist aber nach 60 Sekunden noch nicht bereit"
-                return
-            }
-
-            asteriskConfigStatus = "Asterisk bereit – übertrage CallWebhook-Konfiguration …"
+            asteriskConfigStatus = "Installiere und konfiguriere Asterisk über Home Assistant …"
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             var (data, response) = try await URLSession.shared.data(for: request)
             var http = response as? HTTPURLResponse
@@ -726,24 +665,6 @@ private struct SetupWizardView: View {
             defaults.set(host, forKey: "sipHost")
 
             asteriskInstalled = false
-            asteriskConfigStatus = "Asterisk neu gestartet – warte auf Bereitschaft …"
-            var restartedAsteriskReady = false
-            for _ in 0..<30 {
-                let (infoData, infoHTTP) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/info", method: "GET")
-                if (200..<300).contains(infoHTTP.statusCode),
-                   let infoJSON = (try? JSONSerialization.jsonObject(with: infoData)) as? [String: Any],
-                   let data = infoJSON["data"] as? [String: Any],
-                   let state = data["state"] as? String,
-                   state.lowercased() == "started" {
-                    restartedAsteriskReady = true
-                    break
-                }
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-            }
-            guard restartedAsteriskReady else {
-                asteriskConfigStatus = "Asterisk-Konfiguration ist installiert, aber der Neustart wurde nach 60 Sekunden nicht bereit"
-                return
-            }
             asteriskConfigStatus = "Asterisk bereit – prüfe iPhone-SIP-Registrierung …"
             try setupSIP.configureAndStart(host: host, username: "callwebhook-ios", password: iosPassword)
 
@@ -1608,12 +1529,18 @@ private struct SetupWizardView: View {
         callWebhookHAStatus = "CallWebhook-Integration noch nicht geprüft"
         homeAssistantStatus = "Prüfung fehlgeschlagen"
 
-        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else {
+        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else {
             homeAssistantStatus = "Adresse fehlt"
             return
         }
-        if !raw.contains("://") { raw = "http://" + raw }
+        var raw = input
+        if !raw.contains("://") {
+            raw = "http://" + raw
+            if let parsed = URL(string: raw), parsed.port == nil {
+                raw += ":8123"
+            }
+        }
         guard let base = URL(string: raw),
               let url = URL(string: "/manifest.json", relativeTo: base)?.absoluteURL else {
             homeAssistantStatus = "Ungültige Home-Assistant-Adresse"
@@ -1699,73 +1626,11 @@ private struct SetupWizardView: View {
     }
 
     @MainActor
-    private func bootstrapCallWebhookBackend() async {
-        guard !isBootstrappingHA else { return }
-        var raw = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !raw.contains("://") { raw = "http://" + raw }
-        guard let base = URL(string: raw),
-              var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
-            callWebhookHAStatus = "Home Assistant muss zuerst autorisiert werden"
-            return
-        }
-        isBootstrappingHA = true
-        defer { isBootstrappingHA = false }
-        callWebhookHAStatus = "Installiere CallWebhook-Bootstrap …"
-
-        func supervisorRequest(_ path: String, method: String = "POST", body: [String: Any]? = nil) async throws -> (Data, HTTPURLResponse) {
-            guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw URLError(.badURL) }
-            var request = URLRequest(url: url)
-            request.httpMethod = method
-            request.timeoutInterval = 30
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            if let body {
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            }
-            var (data, response) = try await URLSession.shared.data(for: request)
-            var http = response as? HTTPURLResponse
-            if http?.statusCode == 401 {
-                token = try await HomeAssistantAuth.shared.refresh(instance: base)
-                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                (data, response) = try await URLSession.shared.data(for: request)
-                http = response as? HTTPURLResponse
-            }
-            guard let http else { throw URLError(.badServerResponse) }
-            return (data, http)
-        }
-
-        do {
-            let repoURL = "https://github.com/oooonoooorenoooo/-CallWebhook"
-            let (_, repoResponse) = try await supervisorRequest("/api/hassio/store/repositories", body: ["repository": repoURL])
-            guard (200..<300).contains(repoResponse.statusCode) || repoResponse.statusCode == 400 else {
-                callWebhookHAStatus = "Bootstrap-Repository konnte nicht hinzugefügt werden (HTTP \(repoResponse.statusCode))"
-                return
-            }
-
-            let (_, installResponse) = try await supervisorRequest("/api/hassio/addons/callwebhook_bootstrap/install")
-            guard (200..<300).contains(installResponse.statusCode) || installResponse.statusCode == 400 else {
-                callWebhookHAStatus = "Bootstrap-Add-on konnte nicht installiert werden (HTTP \(installResponse.statusCode))"
-                return
-            }
-
-            let (_, startResponse) = try await supervisorRequest("/api/hassio/addons/callwebhook_bootstrap/start")
-            guard (200..<300).contains(startResponse.statusCode) else {
-                callWebhookHAStatus = "Bootstrap-Add-on konnte nicht gestartet werden (HTTP \(startResponse.statusCode))"
-                return
-            }
-
-            callWebhookHAStatus = "Home Assistant startet neu – warte auf CallWebhook …"
-            for _ in 0..<30 {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-                await checkCallWebhookHAIntegration(base: base)
-                if callWebhookHAReady {
-                    callWebhookHAStatus = "CallWebhook automatisch installiert und bereit"
-                    return
-                }
-            }
-            callWebhookHAStatus = "Bootstrap gestartet, CallWebhook ist nach dem Neustart noch nicht bereit"
-        } catch {
-            callWebhookHAStatus = "Bootstrap fehlgeschlagen: \(error.localizedDescription)"
+    private func openCallWebhookBootstrap() {
+        UIPasteboard.general.string = "https://github.com/oooonoooorenoooo/-CallWebhook"
+        callWebhookHAStatus = "Repository-Adresse kopiert. In Home Assistant: Apps → App Store → ⋯ → Repositories → Einfügen. Danach „CallWebhook Bootstrap“ installieren und starten."
+        if let url = URL(string: "https://my.home-assistant.io/redirect/supervisor_store/") {
+            UIApplication.shared.open(url)
         }
     }
 

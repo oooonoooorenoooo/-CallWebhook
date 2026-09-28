@@ -560,7 +560,7 @@ def ensure_asterisk_addon():
             json={"repository": "https://github.com/TECH7Fox/asterisk-hass-addons"},
             timeout=120,
         )
-        if repo.status_code not in (200, 201, 400):
+        if repo.status_code not in (200, 201, 400, 409):
             raise RuntimeError(f"Asterisk-Repository konnte nicht hinzugefügt werden: HTTP {repo.status_code} – {repo.text}")
         install = requests.post(
             f"http://{host}/store/addons/{ASTERISK_ADDON}/install",

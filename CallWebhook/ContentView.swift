@@ -726,8 +726,25 @@ private struct SetupWizardView: View {
             defaults.set(host, forKey: "sipHost")
 
             asteriskInstalled = false
-            asteriskConfigStatus = "Asterisk neu gestartet – prüfe SIP-Registrierung …"
-            try await Task.sleep(nanoseconds: 3_000_000_000)
+            asteriskConfigStatus = "Asterisk neu gestartet – warte auf Bereitschaft …"
+            var restartedAsteriskReady = false
+            for _ in 0..<30 {
+                let (infoData, infoHTTP) = try await supervisorRequest("/api/hassio/addons/b35499aa_asterisk/info", method: "GET")
+                if (200..<300).contains(infoHTTP.statusCode),
+                   let infoJSON = (try? JSONSerialization.jsonObject(with: infoData)) as? [String: Any],
+                   let data = infoJSON["data"] as? [String: Any],
+                   let state = data["state"] as? String,
+                   state.lowercased() == "started" {
+                    restartedAsteriskReady = true
+                    break
+                }
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            guard restartedAsteriskReady else {
+                asteriskConfigStatus = "Asterisk-Konfiguration ist installiert, aber der Neustart wurde nach 60 Sekunden nicht bereit"
+                return
+            }
+            asteriskConfigStatus = "Asterisk bereit – prüfe iPhone-SIP-Registrierung …"
             try setupSIP.configureAndStart(host: host, username: "callwebhook-ios", password: iosPassword)
 
             for _ in 0..<15 {

@@ -671,12 +671,40 @@ def ensure_asterisk_addon():
 
     info_url = f"http://{host}/addons/{addon_slug}/info"
 
-    # TECH7Fox Asterisk requires ami_password before the app can start.
-    ami_password = secrets.token_urlsafe(32)
+    # Preserve the add-on's complete default/current option set and fill required secrets.
+    installed_info = requests.get(info_url, headers=headers, timeout=30)
+    if installed_info.status_code >= 400:
+        raise RuntimeError(f"Asterisk-Optionen konnten nicht gelesen werden: HTTP {installed_info.status_code} – {installed_info.text}")
+    try:
+        info_data = installed_info.json().get("data", {})
+        current_options = dict(info_data.get("options") or {})
+    except (ValueError, TypeError):
+        current_options = {}
+    if not current_options:
+        current_options = {
+            "ami_password": None,
+            "auto_add": True,
+            "auto_add_secret": "",
+            "video_support": False,
+            "register_ingress_entry": True,
+            "generate_ssl_cert": True,
+            "certfile": "fullchain.pem",
+            "keyfile": "privkey.pem",
+            "additional_sounds": [],
+            "mailbox": False,
+            "mailbox_port": 12345,
+            "mailbox_password": "",
+            "mailbox_extension": "100",
+            "mailbox_google_api_key": "",
+            "log_level": "info",
+        }
+    current_options["ami_password"] = secrets.token_urlsafe(32)
+    if current_options.get("auto_add") and not current_options.get("auto_add_secret"):
+        current_options["auto_add_secret"] = secrets.token_urlsafe(24)
     options = requests.post(
         f"http://{host}/addons/{addon_slug}/options",
         headers=headers,
-        json={"options": {"ami_password": ami_password}},
+        json={"options": current_options},
         timeout=60,
     )
     if options.status_code not in (200, 201):

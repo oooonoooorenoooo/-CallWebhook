@@ -427,13 +427,6 @@ private struct SetupWizardView: View {
                         Label("CallWebhook-Repository zu HA hinzufügen", systemImage: "shippingbox.and.arrow.backward")
                     }
                     Button {
-                        openCallWebhookBootstrapApp()
-                        Task { await waitForCallWebhookAfterRestart() }
-                    } label: {
-                        Label(isWaitingForHARestart ? "Warte auf Home Assistant …" : "CallWebhook Bootstrap öffnen", systemImage: isWaitingForHARestart ? "arrow.trianglehead.2.clockwise.rotate.90" : "arrow.up.forward.app")
-                    }
-                    .disabled(isWaitingForHARestart)
-                    Button {
                         Task { await checkHomeAssistant() }
                     } label: {
                         Label("Bootstrap-Installation prüfen", systemImage: "arrow.clockwise.circle")
@@ -1967,7 +1960,7 @@ private struct SetupWizardView: View {
     private func openCallWebhookBootstrap() {
         let repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
         UIPasteboard.general.string = repository
-        callWebhookHAStatus = "Repository hinzufügen. Danach im App-Store nach „CallWebhook“ suchen, „CallWebhook Bootstrap“ installieren und einmal starten. Anschließend hier die Installation prüfen."
+        callWebhookHAStatus = "Repository hinzufügen. Danach im App-Store einmal nach „CallWebhook Bootstrap“ suchen, installieren und starten. Home Assistant startet anschließend automatisch neu."
         var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
         components?.queryItems = [URLQueryItem(name: "repository_url", value: repository)]
         if let url = components?.url {

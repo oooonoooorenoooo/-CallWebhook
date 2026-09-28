@@ -479,6 +479,13 @@ private struct SetupWizardView: View {
             }
             Section("Leitung 3") {
                 Toggle("Aktiv", isOn: $sipLine3Enabled)
+                    .onChange(of: sipLine3Enabled) { _, enabled in
+                        guard enabled else { return }
+                        Task {
+                            await checkFritzBox()
+                            await provisionMissingSIPClients()
+                        }
+                    }
                 if sipLine3Enabled {
                     TextField("Bezeichnung", text: $line3Label)
                     if line3ManualNumber || fritzVoIPNumbers.isEmpty {

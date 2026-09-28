@@ -172,7 +172,7 @@ private struct SetupWizardView: View {
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
     @State private var bootstrapProgressStep = 0
-    private let bootstrapProgressTotal = 5
+    private let bootstrapProgressTotal = 6
     @State private var asteriskProgressStep = 0
     private let asteriskProgressTotal = 7
     @State private var setupHAToken = ""
@@ -1952,6 +1952,7 @@ private struct SetupWizardView: View {
             setupHAToken = token
             haAuthenticated = true
             callWebhookHAReady = true
+            bootstrapProgressStep = max(bootstrapProgressStep, 5)
             bootstrapProgressStep = bootstrapProgressTotal
             callWebhookHAStatus = "CallWebhook Bootstrap vollständig verifiziert (API \(version))"
             if step == 2 && !asteriskInstalled && !isInstallingAsterisk {
@@ -2029,7 +2030,7 @@ private struct SetupWizardView: View {
               var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else { return }
 
         for _ in 0..<60 {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             guard let storeURL = URL(string: "/api/hassio/store/addons", relativeTo: base)?.absoluteURL else { return }
             var request = URLRequest(url: storeURL)
@@ -2184,7 +2185,7 @@ private struct SetupWizardView: View {
         }
         do {
             var slug: String?
-            for _ in 0..<45 {
+            for _ in 0..<120 {
                 if let found = try? await resolveBootstrapSupervisorSlug(base: base, token: token) {
                     slug = found
                     break
@@ -2201,7 +2202,7 @@ private struct SetupWizardView: View {
             await sendSetupPush(base: base, token: token, message: "CallWebhook Bootstrap ist installiert und wird jetzt ausgeführt.")
             _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
             bootstrapProgressStep = 4
-            callWebhookHAStatus = "Bootstrap gestartet – warte auf Home-Assistant-Neustart …"
+            callWebhookHAStatus = "Bootstrap gestartet – warte auf Backend …"
             await waitForCallWebhookAfterRestart()
         } catch {
             callWebhookHAStatus = "Automatische Bootstrap-Installation nicht möglich: \(error.localizedDescription). Bitte CallWebhook Bootstrap im Home-Assistant-App-Store öffnen."

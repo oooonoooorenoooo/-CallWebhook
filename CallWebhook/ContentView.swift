@@ -2040,7 +2040,7 @@ private struct SetupWizardView: View {
         guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
         try await task.send(.data(try JSONSerialization.data(withJSONObject: ["type": "auth", "access_token": token])))
         guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        let command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": "/store/addons", "method": "get", "timeout": 15]
+        let command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": "/store/addons", "method": "GET", "timeout": 15]
         try await task.send(.data(try JSONSerialization.data(withJSONObject: command)))
         let response = try await receiveJSON()
         guard (response["success"] as? Bool) == true else { throw URLError(.badServerResponse) }
@@ -2060,7 +2060,7 @@ private struct SetupWizardView: View {
         return slug
     }
 
-    private func supervisorWrite(base: URL, token: String, endpoint: String, method: String = "post", data: [String: Any] = [:]) async throws -> [String: Any] {
+    private func supervisorWrite(base: URL, token: String, endpoint: String, method: String = "POST", data: [String: Any] = [:]) async throws -> [String: Any] {
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
         let baseScheme = components?.scheme
         components?.scheme = (baseScheme == "https") ? "wss" : "ws"
@@ -2084,7 +2084,7 @@ private struct SetupWizardView: View {
         guard try await receiveJSON()["type"] as? String == "auth_required" else { throw URLError(.userAuthenticationRequired) }
         try await task.send(.data(try JSONSerialization.data(withJSONObject: ["type": "auth", "access_token": token])))
         guard try await receiveJSON()["type"] as? String == "auth_ok" else { throw URLError(.userAuthenticationRequired) }
-        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method, "timeout": 180]
+        var command: [String: Any] = ["id": 1, "type": "supervisor/api", "endpoint": endpoint, "method": method.uppercased(), "timeout": 180]
         if !data.isEmpty { command["data"] = data }
         try await task.send(.data(try JSONSerialization.data(withJSONObject: command)))
         let response = try await receiveJSON()
@@ -2128,8 +2128,7 @@ private struct SetupWizardView: View {
             callWebhookHAStatus = "Bootstrap gestartet – warte auf Home-Assistant-Neustart …"
             await waitForCallWebhookAfterRestart()
         } catch {
-            callWebhookHAStatus = "Automatische Bootstrap-Installation nicht erlaubt: \(error.localizedDescription)"
-            await openResolvedCallWebhookBootstrapApp()
+            callWebhookHAStatus = "Automatische Bootstrap-Installation nicht möglich: \(error.localizedDescription). Bitte CallWebhook Bootstrap im Home-Assistant-App-Store öffnen."
         }
     }
 

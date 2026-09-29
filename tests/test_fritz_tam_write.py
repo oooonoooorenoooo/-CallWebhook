@@ -1,4 +1,6 @@
 import ast
+import secrets
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse, parse_qs
@@ -10,9 +12,9 @@ SOURCE = Path(__file__).parents[1] / 'homeassistant/custom_components/callwebhoo
 
 
 def load():
-    names = {'FritzTAMConfigurationError', 'fritz_web_sid', 'fritz_tam_form', 'tam_numbers_match', 'configure_fritz_tams'}
+    names = {'FritzTAMConfigurationError', 'fritz_web_sid', 'fritz_tam_form', 'tam_numbers_match', 'configure_fritz_tams', 'FritzConfirmation', 'wait_fritz_confirmation'}
     nodes = [n for n in ast.parse(SOURCE.read_text()).body if getattr(n, 'name', '') in names]
-    ns = dict(ET=ET, urlparse=urlparse, parse_qs=parse_qs, HOST='192.168.178.1')
+    ns = dict(ET=ET, urlparse=urlparse, parse_qs=parse_qs, HOST='192.168.178.1', secrets=secrets, time=time)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), ns)
     return ns
 
@@ -167,3 +169,75 @@ class TAMWriteTests(unittest.TestCase):
                     with self.assertRaisesRegex(ns['FritzTAMConfigurationError'], 'abgebrochen'):
                         ns['configure_fritz_tams']({1:['03010002']}, lambda message:None)
                     self.assertEqual(len(submissions), 1)
+
+
+class ConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        self.ns = load()
+        self.factor = self.ns['FritzConfirmation']()
+        self.factor.owner = 'admin-a'
+
+    def test_available_choices_and_server_phone_code(self):
+        self.factor.begin('button,dtmf,googleauth;9876', {'isAvailable':True,'isConfigured':True})
+        state = self.factor.snapshot()
+        self.assertEqual(state['methods'], ['button','phone','otp'])
+        self.assertEqual(state['phone_code'], '*19876')
+        self.factor.begin('button,dtmf,googleauth;9876', {'isAvailable':True,'isConfigured':False})
+        self.assertEqual(self.factor.snapshot()['methods'], ['button','phone'])
+        self.factor.begin('button,dtmf;invalid', {})
+        self.assertEqual(self.factor.snapshot()['methods'], ['button'])
+
+    def test_otp_is_bound_to_owner_challenge_and_availability(self):
+        self.factor.begin('button,googleauth', {'isAvailable':True,'isConfigured':True})
+        key = self.factor.snapshot()['id']
+        for owner, challenge, code in [('admin-b',key,'123456'), ('admin-a','stale','123456'), ('admin-a',key,'bad')]:
+            with self.assertRaises(ValueError):
+                self.factor.submit(owner, {'id':challenge,'action':'otp','code':code})
+        self.factor.submit('admin-a', {'id':key,'action':'otp','code':'123456'})
+        self.assertNotIn('123456', str(self.factor.snapshot()))
+        self.assertEqual(self.factor.take(), ('otp','123456'))
+        self.assertIsNone(self.factor.take())
+        self.factor.begin('button', {})
+        with self.assertRaises(ValueError):
+            self.factor.submit('admin-a', {'id':self.factor.snapshot()['id'],'action':'otp','code':'123456'})
+        self.factor.clear()
+        self.assertEqual(self.factor.snapshot(), {})
+
+    def test_wrong_otp_can_retry_but_only_active_state_confirms(self):
+        submitted = []
+        checks = []
+        def request(path, fields, method):
+            if 'tfa_googleauth_info' in fields:
+                result = {'googleauth':{'isAvailable':True,'isConfigured':True}}
+            elif 'tfa_googleauth' in fields:
+                submitted.append(fields['tfa_googleauth'])
+                result = {'err':1 if len(submitted)==1 else 0}
+            else:
+                checks.append(True)
+                if len(checks) <= 2:
+                    if len(checks)==2: self.assertIn('nicht akzeptiert', self.factor.snapshot()['error'])
+                    self.factor.submit('admin-a', {'id':self.factor.snapshot()['id'],'action':'otp',
+                        'code':'111111' if len(checks)==1 else '222222'})
+                result = {'done':len(checks)==3, 'active':len(checks)==3}
+            return SimpleNamespace(json=lambda:result)
+        self.ns['time'] = SimpleNamespace(monotonic=lambda:0, sleep=lambda _:None)
+        self.ns['wait_fritz_confirmation'](request, 'button,googleauth', self.factor)
+        self.assertEqual(submitted, ['111111','222222'])
+        self.assertEqual(len(checks), 3)
+        self.assertEqual(self.factor.snapshot(), {})
+
+    def test_cancel_and_expiry_clear_pending_code_and_stop_router_request(self):
+        for cancel in (True,False):
+            with self.subTest(cancel=cancel):
+                clock = [0]
+                calls = []
+                def request(path, fields, method):
+                    calls.append(fields)
+                    if cancel and 'tfa_active' in fields:
+                        self.factor.submit('admin-a', {'id':self.factor.snapshot()['id'],'action':'cancel'})
+                    return SimpleNamespace(json=lambda:{'done':False})
+                self.ns['time'] = SimpleNamespace(monotonic=lambda:clock[0], sleep=lambda _:clock.__setitem__(0,clock[0]+61))
+                with self.assertRaises(self.ns['FritzTAMConfigurationError']):
+                    self.ns['wait_fritz_confirmation'](request, 'button', self.factor)
+                self.assertEqual(calls[-1], {'tfa_cancel':''})
+                self.assertEqual(self.factor.snapshot(), {})

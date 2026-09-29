@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 12
+BACKEND_API_VERSION = 13
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1291,7 +1291,113 @@ def tam_numbers_match(info, numbers):
     return bool(expected) and all(len(value) >= 3 for value in actual | expected) and actual == expected
 
 
-def configure_fritz_tams(groups, report):
+class FritzConfirmation:
+    """One short-lived, owner-bound confirmation; OTPs are never persisted."""
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.owner = None
+        self.pending = None
+        self.command = None
+
+    def begin(self, state, google):
+        import re
+        parts = state.split(";", 1)
+        advertised = parts[0].split(",")
+        methods = []
+        if "button" in advertised:
+            methods.append("button")
+        phone = ""
+        if "dtmf" in advertised and len(parts) == 2 and re.fullmatch(r"[0-9]{1,12}", parts[1]):
+            phone = "*1" + parts[1]
+            methods.append("phone")
+        if "googleauth" in advertised and google.get("isAvailable") is True and google.get("isConfigured") is True:
+            methods.append("otp")
+        if not methods:
+            raise FritzTAMConfigurationError("FRITZ!Box bietet keinen unterstützten Bestätigungsweg an")
+        with self.lock:
+            self.command = None
+            self.pending = {"id": secrets.token_hex(16), "methods": methods, "phone_code": phone,
+                            "error": "", "expires": time.monotonic() + 120}
+
+    def snapshot(self):
+        with self.lock:
+            return {k:v for k,v in (self.pending or {}).items() if k != "expires"}
+
+    def submit(self, owner, payload):
+        import re
+        with self.lock:
+            if (not self.pending or owner != self.owner or payload.get("id") != self.pending["id"]
+                    or time.monotonic() >= self.pending["expires"]):
+                raise ValueError("Bestätigungsauftrag nicht mehr gültig")
+            action = payload.get("action")
+            code = payload.get("code", "")
+            if action != "cancel" and (action != "otp" or "otp" not in self.pending["methods"]
+                    or not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code)):
+                raise ValueError("Sechsstelligen Authenticator-Code eingeben")
+            if self.command is not None:
+                raise ValueError("Bestätigung wird bereits geprüft")
+            self.command = (action, code if action == "otp" else "")
+            self.pending["error"] = ""
+
+    def take(self):
+        with self.lock:
+            command, self.command = self.command, None
+            return command
+
+    def reject(self):
+        with self.lock:
+            if self.pending:
+                self.pending["error"] = "Code nicht akzeptiert. Aktuellen Code eingeben oder anderen Bestätigungsweg wählen."
+
+    def clear(self):
+        with self.lock:
+            self.pending = self.command = None
+
+
+def wait_fritz_confirmation(web_request, state, confirmation):
+    if "starterror" in state:
+        raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung belegt oder gesperrt; später erneut versuchen")
+    google = {}
+    if "googleauth" in state.split(";", 1)[0].split(","):
+        google = web_request("/twofactor.lua", {"tfa_googleauth_info": ""}, "POST").json().get("googleauth") or {}
+    success = False
+    try:
+        if confirmation:
+            confirmation.begin(state, google)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            command = confirmation.take() if confirmation else None
+            if command:
+                action, code = command
+                if action == "cancel":
+                    raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung abgebrochen")
+                answer = web_request("/twofactor.lua", {"tfa_googleauth": code}, "POST").json()
+                code = command = None
+                if answer.get("err") != 0:
+                    confirmation.reject()
+            check = web_request("/twofactor.lua", {"tfa_active": ""}, "POST").json()
+            if check.get("done") is True:
+                if check.get("active") is not True:
+                    raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung abgebrochen")
+                success = True
+                return
+            time.sleep(0.5)
+        raise FritzTAMConfigurationError("Zeitüberschreitung bei der FRITZ!Box-Bestätigung")
+    finally:
+        if confirmation:
+            confirmation.clear()
+        if not success:
+            try:
+                web_request("/twofactor.lua", {"tfa_cancel": ""}, "POST")
+            except Exception:
+                pass
+
+
+_tam_confirmation = FritzConfirmation()
+
+
+def configure_fritz_tams(groups, report, confirmation=None):
     with requests.Session() as session:
         sid = None
         for index, numbers in sorted(groups.items()):
@@ -1317,19 +1423,8 @@ def configure_fritz_tams(groups, report):
             result = web_request("/data.lua", fields, "POST").json().get("data", {})
             if result.get("apply") == "twofactor":
                 state = result.get("twofactor", "")
-                if "starterror" in state:
-                    raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung durch anderen Auftrag belegt; erneut versuchen")
-                report("Bitte die Änderung mit einer Taste an der FRITZ!Box bestätigen …")
-                deadline = time.monotonic() + 120
-                while time.monotonic() < deadline:
-                    check = web_request("/twofactor.lua", {"tfa_active": ""}, "POST").json()
-                    if check.get("done") is True:
-                        if check.get("active") is not True:
-                            raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung abgebrochen")
-                        break
-                    time.sleep(0.5)
-                else:
-                    raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung nicht rechtzeitig erfolgt")
+                report("FRITZ!Box-Bestätigung erforderlich – Bestätigungsweg im Assistenten wählen …")
+                wait_fritz_confirmation(web_request, state, confirmation)
                 fields.update(confirmed="", twofactor="")
                 result = web_request("/data.lua", fields, "POST").json().get("data", {})
             if result.get("apply") != "ok":
@@ -1352,7 +1447,7 @@ async def run_mailbox_setup(hass, payload, groups):
     def report(message):
         hass.loop.call_soon_threadsafe(_tam_setup_state.update, {"message": message})
     try:
-        await hass.async_add_executor_job(configure_fritz_tams, groups, report)
+        await hass.async_add_executor_job(configure_fritz_tams, groups, report, _tam_confirmation)
         keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
         async with _refresh_lock:
             await hass.async_add_executor_job(save_setup, *(payload[key] for key in keys))
@@ -1370,12 +1465,33 @@ class CallWebhookMailboxSetupView(HomeAssistantView):
     name = "api:callwebhook:setup:mailboxes"
     requires_auth = True
 
+    def require_owner(self, request):
+        from homeassistant.components.http.const import KEY_HASS_USER
+        user = request.get(KEY_HASS_USER)
+        if not user or not user.is_admin:
+            raise web.HTTPForbidden()
+        return user.id
+
     async def get(self, request):
-        return self.json(dict(_tam_setup_state))
+        owner = self.require_owner(request)
+        state = dict(_tam_setup_state)
+        if owner == _tam_confirmation.owner:
+            state["confirmation"] = _tam_confirmation.snapshot()
+        return self.json(state)
 
     async def post(self, request):
         try:
             payload = await request.json()
+            if isinstance(payload, dict) and "confirmation" in payload:
+                owner = self.require_owner(request)
+                command = payload["confirmation"]
+                if not isinstance(command, dict):
+                    raise ValueError("Ungültige Bestätigung")
+                try:
+                    _tam_confirmation.submit(owner, command)
+                except ValueError as error:
+                    return self.json({"ok": False, "error": str(error)}, status_code=409)
+                return self.json({"ok": True})
             keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
             if not isinstance(payload, dict) or any(
                 type(payload.get(key)) is not int or not -1 <= payload[key] <= 9
@@ -1413,6 +1529,8 @@ class CallWebhookMailboxSetupView(HomeAssistantView):
                     if normalized in owners and owners[normalized] != index:
                         return self.json({"ok": False, "error": "Eine Rufnummer darf nur einem Anrufbeantworter zugeordnet sein"}, status_code=400)
                     owners[normalized] = index
+            _tam_confirmation.clear()
+            _tam_confirmation.owner = user.id
             _tam_setup_state.update(state="running", message="FRITZ!-Anrufbeantworter werden eingerichtet …", assignments={}, ok=False)
             hass.async_create_background_task(run_mailbox_setup(hass, payload, groups), "CallWebhook TAM setup")
             return self.json(dict(_tam_setup_state), status_code=202)

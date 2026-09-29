@@ -192,6 +192,7 @@ private struct SetupWizardView: View {
     let onFinished: () -> Void
     var onCancel: (() -> Void)? = nil
 
+    @StateObject private var fritzConfirmation = FritzConfirmationModel()
     @State private var step = 0
     @State private var functionTestRunning = false
     @ObservedObject private var setupPush = VoIPPushService.shared
@@ -358,6 +359,25 @@ private struct SetupWizardView: View {
             .navigationTitle(titles[step])
             .navigationBarTitleDisplayMode(.inline)
         }
+        .sheet(isPresented: $fritzConfirmation.visible) {
+            FritzConfirmationView(model: fritzConfirmation, submit: submitFritzConfirmationCode)
+        }
+    }
+
+    @MainActor
+    private func submitFritzConfirmationCode(_ code: String) async throws {
+        guard fritzConfirmation.backend, let base = HomeAssistantConnection.configuredBase else {
+            throw URLError(.badURL)
+        }
+        let (data, status) = try await HomeAssistantConnection.request(base: base,
+            path: "api/callwebhook/setup/mailboxes", method: "POST",
+            body: ["confirmation": ["id": fritzConfirmation.id, "action": "otp", "code": code]])
+        guard status == 200 else {
+            let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            throw NSError(domain: "CallWebhook.2FA", code: status,
+                userInfo: [NSLocalizedDescriptionKey: result?["error"] as? String ?? "Code konnte nicht übermittelt werden"])
+        }
+        fritzConfirmation.error = ""
     }
 
     private var welcome: some View {
@@ -466,7 +486,7 @@ private struct SetupWizardView: View {
                                 .font(.caption)
                         }
                         if !fritzSIPProvisioned {
-                            Label("Beim Anlegen der SIP-Nebenstellen kann die FRITZ!Box eine Sicherheitsbestätigung verlangen. CallWebhook fordert dich dann auf, eine Taste direkt an der FRITZ!Box zu drücken, und setzt die Einrichtung danach automatisch fort.", systemImage: "hand.tap")
+                            Label("Beim Anlegen der SIP-Nebenstellen kann die FRITZ!Box eine Sicherheitsbestätigung verlangen. Im Bestätigungsdialog kannst du zwischen den angebotenen Wegen wählen: Gerätetaste oder Code an einem verbundenen Festnetztelefon. Danach geht es automatisch weiter.", systemImage: "hand.tap")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -526,7 +546,7 @@ private struct SetupWizardView: View {
                         .foregroundStyle(.green)
                 }
                 if haAuthenticated && !callWebhookHAReady {
-                    Label("Einmalige Einrichtung: Repository hinzufügen → „CallWebhook Bootstrap“ öffnen → Installieren → Starten. Der Bootstrap installiert das CallWebhook-Backend und startet Home Assistant anschließend automatisch neu. Danach zu CallWebhook zurückkehren und die Bootstrap-Installation prüfen.", systemImage: "info.circle")
+                    Label("Der Assistent findet und installiert den Bootstrap automatisch, startet ihn und wartet auf den vollständigen Neustart von Home Assistant.", systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button {
@@ -535,20 +555,7 @@ private struct SetupWizardView: View {
                         Label("CallWebhook Bootstrap automatisch einrichten", systemImage: "shippingbox.and.arrow.backward")
                     }
                     .disabled(isBootstrappingHA || isWaitingForHARestart)
-                    Button("Notfall: Bootstrap-Repository öffnen") {
-                        openCallWebhookBootstrap()
-                    }
-                    Button {
-                        Task { await openResolvedCallWebhookBootstrapApp() }
-                    } label: {
-                        Label(isWaitingForHARestart ? "Warte auf Home Assistant …" : "CallWebhook Bootstrap direkt öffnen", systemImage: "arrow.up.forward.app")
-                    }
-                    Button {
-                        Task { await checkHomeAssistant() }
-                    } label: {
-                        Label("Bootstrap-Installation prüfen", systemImage: "arrow.clockwise.circle")
-                    }
-                    .disabled(isChecking)
+
                 }
                 HStack(spacing: 14) {
                     ZStack {
@@ -810,7 +817,7 @@ private struct SetupWizardView: View {
         mailboxNumbersVerified = false
         functionTestResults = []
         mailboxSaveError = nil
-        defer { isSavingMailboxes = false }
+        defer { isSavingMailboxes = false; fritzConfirmation.finish() }
         do {
             guard let ha = HomeAssistantConnection.configuredBase else { throw URLError(.badURL) }
             func backendVersion() async throws -> Int {
@@ -818,11 +825,11 @@ private struct SetupWizardView: View {
                 guard status == 200 else { return 0 }
                 return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["api_version"] as? Int ?? 0
             }
-            if try await backendVersion() < 12 {
+            if try await backendVersion() < 13 {
                 lineAssignmentStatus = "HA-Komponente für FRITZ!-Anrufbeantworter wird aktualisiert …"
                 await setupPush.updateBackend()
             }
-            guard try await backendVersion() >= 12 else {
+            guard try await backendVersion() >= 13 else {
                 throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Die HA-Aktualisierung für das Schreiben der Anrufbeantworter ist noch nicht abgeschlossen."])
             }
             try await synchronizeFritzLineNumbers()
@@ -867,6 +874,23 @@ private struct SetupWizardView: View {
                         throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: lineAssignmentStatus])
                     }
                     if state["state"] as? String == "completed" { data = bytes; completed = true; break }
+                    if fritzConfirmation.cancelled {
+                        let (_, cancelStatus) = try await HomeAssistantConnection.request(base: base,
+                            path: "api/callwebhook/setup/mailboxes", method: "POST",
+                            body: ["confirmation": ["id": fritzConfirmation.id, "action": "cancel"]])
+                        guard cancelStatus == 200 || cancelStatus == 409 else { throw URLError(.badServerResponse) }
+                        throw NSError(domain: "CallWebhook.2FA", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box-Bestätigung abgebrochen"])
+                    }
+                    if let confirmation = state["confirmation"] as? [String: Any],
+                       let id = confirmation["id"] as? String,
+                       let methods = confirmation["methods"] as? [String], !methods.isEmpty {
+                        fritzConfirmation.begin(id: id, methods: methods,
+                            phoneCode: confirmation["phone_code"] as? String ?? "", backend: true)
+                        fritzConfirmation.error = confirmation["error"] as? String ?? ""
+                    } else if fritzConfirmation.backend && !fritzConfirmation.id.isEmpty {
+                        fritzConfirmation.finish()
+                    }
                     try await Task.sleep(for: .milliseconds(500))
                 }
                 guard completed else { throw URLError(.timedOut) }
@@ -928,7 +952,7 @@ private struct SetupWizardView: View {
                 _ = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
             } catch {
                 guard isSecondFactorRequired(error) else { throw error }
-                lineAssignmentStatus = "Bitte die Änderung mit einer Taste an der FRITZ!Box bestätigen …"
+                lineAssignmentStatus = "Bitte den Bestätigungsweg im FRITZ!Box-Dialog wählen …"
                 secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: description)
                 _ = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
             }
@@ -1015,7 +1039,7 @@ private struct SetupWizardView: View {
                 Button("Anrufbeantworter in der FRITZ!Box öffnen") {
                     if let url = URL(string: "http://\(fritzHost)/?lp=tam") { UIApplication.shared.open(url) }
                 }
-                Text("Beim Speichern überträgt CallWebhook die gewählten Rufnummern auf die FRITZ!Box und liest sie zur Kontrolle zurück. Falls die FRITZ!Box es verlangt, die Änderung mit einer Gerätetaste bestätigen.")
+                Text("Beim Speichern überträgt CallWebhook die gewählten Rufnummern auf die FRITZ!Box und liest sie zur Kontrolle zurück. Falls die FRITZ!Box es verlangt, im Dialog einen angebotenen Bestätigungsweg wählen.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Anschließend einen ausgehenden Anruf testen, das iPhone sperren und von einem zweiten Telefon anrufen. Für den Mailbox-Test nicht annehmen und eine Nachricht hinterlassen.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -1988,7 +2012,6 @@ private struct SetupWizardView: View {
             throw NSError(domain: "CallWebhook.TR064", code: 866, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box verlangt eine Bestätigung, bietet aber X_AVM-DE_Auth nicht an"])
         }
 
-        _ = try? await soapCall(session: session, base: base, serviceType: authService.type, controlURL: authService.controlURL, action: "SetConfig", arguments: [("NewAction", "stop")])
         let start = try await soapCall(session: session, base: base, serviceType: authService.type, controlURL: authService.controlURL, action: "SetConfig", arguments: [("NewAction", "start")])
         let token = extractSOAPValue("NewToken", from: start)
         let methods = extractSOAPValue("NewMethods", from: start)
@@ -1996,12 +2019,29 @@ private struct SetupWizardView: View {
             throw NSError(domain: "CallWebhook.TR064", code: 866, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box hat keinen 2FA-Token geliefert"])
         }
 
-        sipProvisionStatus = methods.localizedCaseInsensitiveContains("button")
-            ? "FRITZ!Box-Bestätigung erforderlich: Bitte jetzt eine Taste an der FRITZ!Box drücken …"
-            : "FRITZ!Box-Bestätigung erforderlich (\(methods.isEmpty ? "2FA" : methods)) …"
+        let startState = extractSOAPValue("NewState", from: start).lowercased()
+        if startState == "authenticated" { return token }
+        guard startState == "waitingforauth" else {
+            throw NSError(domain: "CallWebhook.TR064", code: 866,
+                userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box kann die Bestätigung gerade nicht starten: \(startState)"])
+        }
+        let choices = FritzConfirmationMethods.tr064(methods)
+        guard !choices.methods.isEmpty else {
+            throw NSError(domain: "CallWebhook.TR064", code: 866,
+                userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box bietet für diese SIP-Änderung keinen unterstützten Bestätigungsweg an"])
+        }
+        fritzConfirmation.begin(id: token, methods: choices.methods, phoneCode: choices.phoneCode, backend: false)
+        defer { fritzConfirmation.finish() }
+        sipProvisionStatus = "FRITZ!Box-Bestätigung: Bestätigungsweg im Dialog wählen …"
 
-        for _ in 0..<60 {
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+        for _ in 0..<240 {
+            try await Task.sleep(for: .milliseconds(500))
+            if fritzConfirmation.cancelled {
+                _ = try await soapCall(session: session, base: base, serviceType: authService.type,
+                    controlURL: authService.controlURL, action: "SetConfig", arguments: [("NewAction", "stop")], secondFactorToken: token)
+                throw NSError(domain: "CallWebhook.TR064", code: 866,
+                    userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box-Bestätigung abgebrochen"])
+            }
             let stateXML = try await soapCall(session: session, base: base, serviceType: authService.type, controlURL: authService.controlURL, action: "GetState", arguments: [], secondFactorToken: token)
             let state = extractSOAPValue("NewState", from: stateXML).lowercased()
             if state == "authenticated" {
@@ -2278,7 +2318,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 12,
+            guard version >= 13,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
@@ -2466,7 +2506,7 @@ private struct SetupWizardView: View {
                     try await Task.sleep(nanoseconds: 500_000_000)
                 }
             }
-            guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap im Repository noch nicht gefunden. Notfall-Button öffnet die Repository-Einrichtung."] ) }
+            guard let slug else { throw NSError(domain: "CallWebhook.Bootstrap", code: 404, userInfo: [NSLocalizedDescriptionKey: "Bootstrap im Repository noch nicht gefunden. Automatische Einrichtung erneut versuchen."] ) }
             bootstrapProgressStep = 2
             let storeResponse = try await supervisorWrite(base: base, token: token, endpoint: "/store/addons/\(slug)", method: "get")
             let info = storeResponse["result"] as? [String: Any] ?? [:]
@@ -2504,35 +2544,8 @@ private struct SetupWizardView: View {
             bootstrapProgressStep = 4
             await waitForCallWebhookAfterRestart()
         } catch {
-            callWebhookHAStatus = "Bootstrap-Einrichtung fehlgeschlagen: \(error.localizedDescription). Der Notfall-Button öffnet die Repository-Einrichtung."
+            callWebhookHAStatus = "Bootstrap-Einrichtung fehlgeschlagen: \(error.localizedDescription). Bitte die automatische Einrichtung erneut versuchen."
         }
-    }
-
-    @MainActor
-    private func openResolvedCallWebhookBootstrapApp() async {
-        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let base = URL(string: "http://192.168.178.\(input):8123"),
-              let token = SetupKeychain.get(account: "home-assistant-token") else {
-            openCallWebhookBootstrap()
-            return
-        }
-        do {
-            let slug = try await resolveBootstrapSupervisorSlug(base: base, token: token)
-            let url = base.appendingPathComponent("hassio/addon/\(slug)/info")
-            await UIApplication.shared.open(url)
-        } catch {
-            openCallWebhookBootstrap()
-        }
-    }
-
-    @MainActor
-    private func openCallWebhookBootstrap() {
-        // Independent of authentication, store discovery and WebSocket transport.
-        UIPasteboard.general.string = bootstrapRepository
-        callWebhookHAStatus = "Repository bestätigen, CallWebhook Bootstrap installieren und starten. Anschließend hier die Installation prüfen."
-        var components = URLComponents(string: "https://my.home-assistant.io/redirect/supervisor_add_addon_repository/")
-        components?.queryItems = [URLQueryItem(name: "repository_url", value: bootstrapRepository)]
-        if let url = components?.url { UIApplication.shared.open(url) }
     }
 
     private func persistSetup() {

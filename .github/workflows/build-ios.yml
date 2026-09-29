@@ -38,6 +38,10 @@ jobs:
         run: |
           swiftc CallWebhook/PushSetupDiagnostics.swift tests/PushSetupDiagnosticsTests.swift -o "$RUNNER_TEMP/push-setup-tests"
           "$RUNNER_TEMP/push-setup-tests"
+      - name: Test FRITZ confirmation methods
+        run: |
+          swiftc CallWebhook/FritzConfirmationMethods.swift tests/FritzConfirmationMethodsTests.swift -o "$RUNNER_TEMP/fritz-confirmation-tests"
+          "$RUNNER_TEMP/fritz-confirmation-tests"
       - name: Test FRITZ phone-number list parsing
         run: |
           swiftc CallWebhook/FritzPhoneNumbers.swift tests/FritzPhoneNumbersTests.swift -o "$RUNNER_TEMP/fritz-number-tests"

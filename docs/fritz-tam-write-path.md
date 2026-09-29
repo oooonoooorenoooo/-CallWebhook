@@ -35,3 +35,26 @@ Partial writes are idempotent: a retry skips already matching TAMs.
 This path currently edits TAMs already visible in the FRITZ!Box. It does not
 create hidden empty TAM slots by briefly enabling catch-all routing. Firmware
 contract tests use synthetic forms; a live 5690 Pro save still needs device testing.
+
+
+## Confirmation choices
+
+The wizard displays router-advertised confirmation methods for each operation.
+For TR-064 SIP changes, X_AVM-DE_Auth SetConfig supplies `button` and/or
+`dtmf;*1…`. The full TR-064 dial string is displayed unchanged. TR-064 has no
+Authenticator-code submission action; the UI explains this when applicable.
+Reference: https://fritz.support/resources/TR-064_Authentication.pdf
+
+For WebGUI TAM saves, the native `twofactor.js` / `twofactor.lua` contract offers
+`button,dtmf,googleauth;<phone suffix>`. The WebGUI telephone code is `*1` plus
+the supplied suffix. Authenticator is available only when both the pending
+operation and `tfa_googleauth_info` advertise it for the current user. Six-digit
+codes go to `tfa_googleauth`; even a successful submission does not complete
+setup until `tfa_active` confirms `done` and `active`. Wrong codes can be retried.
+
+HA exposes a short-lived confirmation ID and choices to the initiating admin.
+Submissions require that owner and ID; codes stay in memory and are consumed
+once. Cancellation/expiry clears pending data and cancels this WebGUI operation.
+The wizard uses the same choice dialog for SIP and TAM requests. Bootstrap
+installation remains automatic; manual repository/store emergency links were
+removed from the setup UI.

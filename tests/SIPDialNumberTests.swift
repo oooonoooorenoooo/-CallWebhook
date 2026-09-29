@@ -3,6 +3,10 @@ import Foundation
 @main
 struct SIPDialNumberTests {
     static func main() {
+        precondition(SIPDialNumber.target("030 1234567", prefix: "*83") == "*830301234567")
+        precondition(SIPDialNumber.target("+49 30 1234567", prefix: "*83") == "*830049301234567")
+        precondition(SIPDialNumber.target("0301234567", prefix: "*83@wrong") == nil)
+        precondition(SIPDialNumber.target("0301234567,98765", prefix: "*83") == nil)
         precondition(SIPDialNumber.normalized("+49 (30) 123-4567") == "0049301234567")
         precondition(SIPDialNumber.normalized("030 1234567") == "0301234567")
         precondition(SIPDialNumber.normalized("**620") == "**620")

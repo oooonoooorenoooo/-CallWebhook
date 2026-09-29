@@ -190,6 +190,8 @@ private struct SetupWizardView: View {
     @State private var functionTestRunning = false
     @State private var functionTestResults: [String] = []
     @State private var mailboxNumbersVerified = false
+    @State private var lineAssignmentStatus = ""
+    @State private var fritzNumberAssignments: [String: String] = [:]
     @State private var fritzHost = "192.168.178.1"
     @State private var fritzUser = ""
     @State private var fritzPassword = ""
@@ -311,7 +313,10 @@ private struct SetupWizardView: View {
                 if let mailboxSaveError {
                     Text(mailboxSaveError).foregroundStyle(.red).padding(.horizontal)
                 }
-                if isSavingMailboxes { ProgressView("Anrufbeantworter-Zuordnung wird gespeichert …") }
+                if isSavingMailboxes {
+                    ProgressView("Leitungen und Anrufbeantworter-Zuordnung werden gespeichert …")
+                    Text(lineAssignmentStatus).font(.caption).padding(.horizontal)
+                }
 
                 HStack {
                     if step > 0 {
@@ -788,6 +793,7 @@ private struct SetupWizardView: View {
         mailboxSaveError = nil
         defer { isSavingMailboxes = false }
         do {
+            try await synchronizeFritzLineNumbers()
             let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let base = URL(string: "http://192.168.178.\(input):8123"),
                   let url = URL(string: "/api/callwebhook/setup/mailboxes", relativeTo: base)?.absoluteURL,
@@ -818,9 +824,58 @@ private struct SetupWizardView: View {
             }
             return true
         } catch {
-            mailboxSaveError = "Anrufbeantworter-Zuordnung nicht gespeichert: \(error.localizedDescription). Bitte erneut auf Weiter tippen."
+            mailboxSaveError = "Leitungs-/Anrufbeantworter-Zuordnung nicht gespeichert: \(error.localizedDescription). Bitte erneut auf Weiter tippen."
             return false
         }
+    }
+
+    @MainActor
+    private func synchronizeFritzLineNumbers() async throws {
+        func failure(_ text: String) -> NSError {
+            NSError(domain: "CallWebhook.FritzLines", code: 1, userInfo: [NSLocalizedDescriptionKey: text])
+        }
+        guard !setupSIP.active else { throw failure("Bitte zuerst das laufende Gespräch beenden.") }
+        guard !fritzSIPWriteAction.isEmpty else { throw failure("FRITZ!Box-Schreibschnittstelle zuerst im FRITZ!Box-Schritt prüfen.") }
+        let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = rawHost.contains("://") ? rawHost : "http://\(rawHost):49000"
+        guard let url = URL(string: base + "/tr64desc.xml") else { throw URLError(.badURL) }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let description = String(decoding: data, as: UTF8.self)
+        guard let service = extractTR064Services(from: description).first(where: { $0.type.contains("X_VoIP") }) else { throw URLError(.unsupportedURL) }
+        let session = URLSession(configuration: .ephemeral, delegate: FritzAuthDelegate(username: fritzUser, password: fritzPassword), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        var secondFactorToken: String?
+        // The second base client is still used by the generated Asterisk config.
+        var lines = [(1, line1Number), (2, sipLine2Enabled ? line2Number : line1Number)]
+        if sipLine3Enabled { lines.append((3, line3Number)) }
+        for (line, number) in lines {
+            let username = "callwhapp\(line)"
+            guard let client = fritzSIPClients.first(where: { $0.username == username || $0.phoneName == username }),
+                  let password = SetupKeychain.get(account: "fritz-sip-\(username)") else {
+                throw failure("Nebenstelle \(username) oder ihre gespeicherten Zugangsdaten fehlen. Im FRITZ!Box-Schritt einrichten.")
+            }
+            let args = try setClientArguments(index: client.index, username: username, password: password, outgoing: number)
+            let readArgs = [("NewX_AVM-DE_ClientIndex", String(client.index))]
+            let before = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: "X_AVM-DE_GetClient3", arguments: readArgs)
+            func matches(_ xml: String) -> Bool {
+                FritzPhoneNumbers.clientMatches(number: number,
+                    outgoing: extractSOAPValue("NewX_AVM-DE_OutGoingNumber", from: xml),
+                    incoming: xml)
+            }
+            if matches(before) { continue }
+            lineAssignmentStatus = "Leitung \(line): Rufnummer \(number) wird auf der FRITZ!Box gespeichert …"
+            do {
+                _ = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+            } catch {
+                guard isSecondFactorRequired(error) else { throw error }
+                lineAssignmentStatus = "Bitte die Änderung mit einer Taste an der FRITZ!Box bestätigen …"
+                secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: description)
+                _ = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: fritzSIPWriteAction, arguments: args, secondFactorToken: secondFactorToken)
+            }
+            let verified = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: "X_AVM-DE_GetClient3", arguments: readArgs)
+            guard matches(verified) else { throw failure("FRITZ!Box hat die Rufnummer für Leitung \(line) beim Zurücklesen nicht bestätigt.") }
+        }
+        lineAssignmentStatus = "FRITZ!Box-Rufnummern gespeichert und zurückgelesen"
     }
 
     private var forwardingReady: Bool {
@@ -1475,6 +1530,7 @@ private struct SetupWizardView: View {
                         session: session, base: base, serviceType: voipService.type,
                         controlURL: voipService.controlURL, action: action, arguments: []
                     ) {
+                        fritzNumberAssignments.merge(FritzPhoneNumbers.incomingAssignments(from: response)) { _, new in new }
                         resolvedNumbers = FritzPhoneNumbers.parse(response)
                         if !resolvedNumbers.isEmpty { break }
                     }
@@ -1898,14 +1954,17 @@ private struct SetupWizardView: View {
         guard outgoing.filter({ $0.isNumber }).count >= 3 else {
             throw NSError(domain: "CallWebhook.Setup", code: 4, userInfo: [NSLocalizedDescriptionKey: "Bitte eine echte Festnetzrufnummer auswählen. Ein Leitungsindex ist keine Rufnummer."])
         }
-        let effectiveOutgoing = outgoing.isEmpty ? (fritzVoIPNumbers.first ?? "") : outgoing
+        guard let incomingXML = fritzNumberAssignments[outgoing] else {
+            throw NSError(domain: "CallWebhook.Setup", code: 5, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box-Rufnummer mit Typ und Index fehlt. Bitte die Rufnummernliste erneut auslesen und eine erkannte Nummer auswählen."])
+        }
+        let effectiveOutgoing = outgoing
         var values: [String: String] = [
             "NewX_AVM-DE_ClientIndex": String(index),
             "NewX_AVM-DE_ClientUsername": username,
             "NewX_AVM-DE_ClientPassword": password,
             "NewX_AVM-DE_PhoneName": username,
             "NewX_AVM-DE_OutGoingNumber": effectiveOutgoing,
-            "NewX_AVM-DE_InComingNumbers": outgoing,
+            "NewX_AVM-DE_InComingNumbers": incomingXML,
             "NewX_AVM-DE_ClientId": ""
         ]
         values["NewX_AVM-DE_ClientID"] = ""
@@ -3222,6 +3281,7 @@ private struct DialPadView: View {
     let sipLine2Enabled: Bool
     let sipLine3Enabled: Bool
     @AppStorage("sipEnabled") private var sipEnabled = false
+    @AppStorage("sipLine3Number") private var landlineNumber = ""
     private let rows = [["1","2","3"],["4","5","6"],["7","8","9"],["*","0","#"]]
 
     var body: some View {
@@ -3233,13 +3293,18 @@ private struct DialPadView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
-                    if !secondaryPhoneNumber.isEmpty {
+                    if sipLine2Enabled && !secondaryPhoneNumber.isEmpty {
                         Text("SIM 2  \(secondaryPhoneNumber)")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
+                    if sipLine3Enabled && !landlineNumber.isEmpty {
+                        Text("Festnetz  \(landlineNumber)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .frame(height: 38)
+                .fixedSize(horizontal: false, vertical: true)
 
                 Spacer()
 
@@ -3257,6 +3322,7 @@ private struct DialPadView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Aus Zwischenablage einfügen")
+                    .disabled(sip.active || dialer.isDialing)
 
                     Text(dialer.number.isEmpty ? " " : dialer.number)
                         .font(.system(size: 34, weight: .regular, design: .rounded))
@@ -3272,11 +3338,11 @@ private struct DialPadView: View {
                         .foregroundStyle(dialer.number.isEmpty ? Color.secondary : Color.primary)
                         .opacity(dialer.number.isEmpty ? 0.35 : 1)
                         .onTapGesture {
-                            guard !dialer.number.isEmpty else { return }
+                            guard !dialer.number.isEmpty, !sip.active, !dialer.isDialing else { return }
                             dialer.deleteLast()
                         }
                         .onLongPressGesture(minimumDuration: 0.6, maximumDistance: 30) {
-                            guard !dialer.number.isEmpty else { return }
+                            guard !dialer.number.isEmpty, !sip.active, !dialer.isDialing else { return }
                             dialer.number = ""
                         }
                         .accessibilityLabel("Letzte Ziffer löschen; lange drücken zum Leeren")
@@ -3376,6 +3442,7 @@ private struct DialPadView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Mit SIP-Leitung \(line) anrufen")
+        .disabled(sip.active || dialer.isDialing)
     }
 
     @ViewBuilder

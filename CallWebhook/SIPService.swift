@@ -178,8 +178,7 @@ final class SIPService: ObservableObject {
         guard !IncomingRouteRepair.shared.running else { throw SIPError.provisioning }
         guard registered else { throw SIPError.notRegistered }
         guard !active, !IncomingCallProvider.shared.hasCall else { throw SIPError.alreadyActive }
-        guard let dialNumber = SIPDialNumber.normalized(number) else { throw SIPError.invalidNumber }
-        let targetNumber = prefix + dialNumber
+        guard let targetNumber = SIPDialNumber.target(number, prefix: prefix) else { throw SIPError.invalidNumber }
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
         core.configureAudioSession()
         let callID = UUID()
@@ -194,6 +193,15 @@ final class SIPService: ObservableObject {
         callStatus = "Leitung \(line): \(number) – Verbindung wird aufgebaut …"
         active = true
         status = "SIP Leitung \(line): \(number)"
+    }
+
+    func sendDTMF(_ digit: String) throws {
+        guard active, let call = trackedCall else { return }
+        let state = String(describing: call.state).lowercased()
+        guard state == "connected" || state.contains("streamsrunning") else { return }
+        guard digit.utf8.count == 1, let byte = digit.utf8.first,
+              "0123456789*#".contains(digit) else { throw SIPError.invalidNumber }
+        try call.sendDtmf(dtmf: CChar(bitPattern: byte))
     }
 
     func answerIncoming() throws {

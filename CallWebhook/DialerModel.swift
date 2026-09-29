@@ -13,10 +13,19 @@ final class DialerModel: ObservableObject {
     private let sip = SIPService.shared
 
     func append(_ digit: String) {
+        // During a call, keypad input belongs to the remote voice menu. Never
+        // append it to the destination number that will be used on the next call.
+        if sip.active {
+            do { try sip.sendDTMF(digit) }
+            catch { status = "Tastenton konnte nicht gesendet werden: \(error.localizedDescription)" }
+            return
+        }
+        guard !isDialing else { return }
         number.append(digit)
     }
 
     func deleteLast() {
+        guard !sip.active, !isDialing else { return }
         if !number.isEmpty { number.removeLast() }
     }
 

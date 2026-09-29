@@ -19,6 +19,8 @@ targets:
     info:
       path: CallWebhook/Info.plist
       properties:
+        CallWebhookTeamID: $(DEVELOPMENT_TEAM)
+        CallWebhookPushEnvironment: $(APS_ENVIRONMENT)
         CFBundleURLTypes:
           - CFBundleURLName: de.reno.CallWebhook.oauth
             CFBundleURLSchemes:
@@ -33,6 +35,7 @@ targets:
           - INStartAudioCallIntent
     settings:
       base:
+        APS_ENVIRONMENT: development
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook.U98PKCA4W7
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: 1.0.0

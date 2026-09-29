@@ -43,6 +43,9 @@ jobs:
         run: brew install xcodegen
       - name: Install development signing
         env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
           IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
           IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
@@ -60,6 +63,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          python3 scripts/ensure_push_profile.py "$PROFILE_PATH" development
           PROFILE_UUID="$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
@@ -79,6 +83,8 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign -d --entitlements :- "$APP_PATH" > "$RUNNER_TEMP/development-entitlements.plist" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.calling-app' "$RUNNER_TEMP/development-entitlements.plist")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$RUNNER_TEMP/development-entitlements.plist")" = "development"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CallWebhookPushEnvironment' "$APP_PATH/Info.plist")" = "development"
           test "$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$APP_PATH/Info.plist")" = "voip"
           rm -rf Payload
           mkdir Payload
@@ -101,6 +107,9 @@ jobs:
         run: brew install xcodegen
       - name: Install distribution signing
         env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
           CERT_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
           CERT_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
           PROFILE_BASE64: ${{ secrets.IOS_DISTRIBUTION_PROVISIONING_PROFILE_BASE64 }}
@@ -118,6 +127,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          python3 scripts/ensure_push_profile.py "$PROFILE_PATH" production
           PROFILE_UUID="$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)"
           PROFILE_NAME="$(security cms -D -i "$PROFILE_PATH" | plutil -extract Name raw -)"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
@@ -134,7 +144,7 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          xcodebuild archive -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CURRENT_PROJECT_VERSION="${{ github.run_number }}"
+          xcodebuild archive -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CURRENT_PROJECT_VERSION="${{ github.run_number }}" APS_ENVIRONMENT=production
       - name: Verify archived Default Dialer entitlement
         run: |
           APP_PATH="$RUNNER_TEMP/CallWebhook.xcarchive/Products/Applications/CallWebhook.app"
@@ -148,6 +158,8 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.calling-app' "$APP_ENTITLEMENTS")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.calling-app' "$PROFILE_PLIST")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$APP_PATH/Info.plist")" = "voip"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$APP_ENTITLEMENTS")" = "production"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CallWebhookPushEnvironment' "$APP_PATH/Info.plist")" = "production"
           echo "TESTFLIGHT_DEFAULT_DIALER_AND_CALLING_SIGNING_OK=true"
       - name: Export App Store IPA
         env:

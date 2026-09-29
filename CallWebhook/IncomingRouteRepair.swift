@@ -6,8 +6,8 @@ final class IncomingRouteRepair: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var status = "Aktualisiert die Rufweiterleitung zum iPhone und startet Asterisk neu."
 
-    func run() async {
-        guard !running, !SIPService.shared.active else { return }
+    func run(requireVoIP: Bool = false) async {
+        guard !running, !SIPService.shared.active, !IncomingCallProvider.shared.hasCall else { return }
         running = true
         defer { running = false }
         do {
@@ -15,6 +15,13 @@ final class IncomingRouteRepair: ObservableObject {
                   let pjsip = SetupKeychain.get(account: "asterisk-pjsip-generated"),
                   let old = SetupKeychain.get(account: "asterisk-extensions-generated") else {
                 throw failure("Gespeicherte Asterisk-Konfiguration oder HA-Adresse fehlt.")
+            }
+            if requireVoIP {
+                let (data, code) = try await HomeAssistantConnection.request(base: base, path: "api/callwebhook/voip")
+                guard code == 200, let state = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      state["configured"] as? Bool == true, state["registered"] as? Bool == true else {
+                    throw failure("Apple-Push-Schlüssel und iPhone müssen zuerst registriert sein.")
+                }
             }
             let extensions = IncomingDialplan.addingIncomingRoute(to: old)
             let defaults = UserDefaults.standard
@@ -46,7 +53,7 @@ final class IncomingRouteRepair: ObservableObject {
                     }
                     try SetupKeychain.set(extensions, account: "asterisk-extensions-generated")
                     try SIPService.shared.configureAndStart()
-                    status = "Rufweiterleitung installiert. SIP verbindet sich erneut – danach bei geöffneter App einen Testanruf durchführen."
+                    status = "Rufweiterleitung installiert. SIP verbindet sich erneut. Anruf-Push-Status unter Extras prüfen."
                     return
                 }
             }

@@ -15,7 +15,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 5
+BACKEND_API_VERSION = 6
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -55,7 +55,7 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["progress_step"] = 5
         _asterisk_setup_state["message"] = "Asterisk läuft – Konfiguration wird geschrieben …"
         actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
-        files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), payload.get("extensions"), actual_addon, actual_path)
+        files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), voip_dialplan(payload.get("extensions") or ""), actual_addon, actual_path)
         _asterisk_setup_state["progress_step"] = 6
         configured_tams = await hass.async_add_executor_job(save_setup, payload.get("mailbox_tam_1"), payload.get("mailbox_tam_2"), payload.get("mailbox_tam_3"))
         _asterisk_setup_state["message"] = "Asterisk-Konfiguration geschrieben – Neustart läuft …"
@@ -1087,6 +1087,217 @@ class CallWebhookAudioView(
         )
 
 
+# VoIP push credentials stay on HA. They are never returned by any status endpoint.
+VOIP_FILE = BASE_DIR / "voip.json"
+VOIP_TOPIC = "de.reno.CallWebhook.U98PKCA4W7.voip"
+_voip = {}
+_voip_calls = {}
+_voip_clients = {}
+_voip_lock = asyncio.Lock()
+_voip_last_status = "Noch kein Anruf-Push gesendet"
+
+
+def load_voip():
+    global _voip
+    if VOIP_FILE.exists():
+        _voip = json.loads(VOIP_FILE.read_text())
+    _voip.setdefault("hook_secret", secrets.token_hex(32))
+
+
+def save_voip(value):
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    temp = VOIP_FILE.with_suffix(".tmp")
+    fd = os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w") as file:
+        json.dump(value, file)
+    os.chmod(temp, 0o600)
+    temp.replace(VOIP_FILE)
+
+
+def voip_dialplan(original):
+    """Replace only the app-owned incoming contexts; preserve outgoing routes."""
+    import re
+    if not _voip.get("device") or not _voip.get("key"):
+        return original
+    secret = _voip["hook_secret"]
+    # Supervisor's HA hostname is reachable from the Asterisk add-on network.
+    hook = f"http://homeassistant:8123/api/callwebhook/voip/hook/{secret}"
+    owned = {"from-fritz", "from-easybell", "callwebhook-push-header"}
+    kept, skip = [], False
+    for line in original.splitlines():
+        match = re.match(r"^\s*\[([^]]+)\]\s*$", line)
+        if match:
+            skip = match.group(1) in owned
+        if not skip:
+            kept.append(line)
+    route = '''
+[from-fritz]
+exten => s,1,NoOp(CallWebhook incoming VoIP)
+ same => n,Set(CW_ID=${UUID()})
+ same => n,Set(CURLOPT(conntimeout)=2)
+ same => n,Set(CURLOPT(httptimeout)=15)
+ same => n,Set(CW_PUSH=${CURL(HOOK/ring?id=${CW_ID}&caller=${URIENCODE(${CALLERID(num)})})})
+ same => n,GotoIf($["${CW_PUSH}"="cancelled"]?done)
+ same => n,Dial(${PJSIP_DIAL_CONTACTS(callwebhook-ios)},60,b(callwebhook-push-header^s^1(${CW_ID})))
+ same => n(done),Hangup()
+exten => _.,1,Goto(s,1)
+exten => h,1,Set(CURLOPT(httptimeout)=2)
+ same => n,Set(CW_END=${CURL(HOOK/end?id=${CW_ID})})
+
+[from-easybell]
+exten => s,1,Goto(from-fritz,s,1)
+exten => _.,1,Goto(from-fritz,s,1)
+
+[callwebhook-push-header]
+exten => s,1,Set(PJSIP_HEADER(add,X-CallWebhook-ID)=${ARG1})
+ same => n,Return()
+'''.replace("HOOK", hook)
+    return "\n".join(kept).rstrip() + "\n" + route
+
+
+async def send_voip_push(call_id, caller):
+    global _voip_last_status
+    from aioapns import APNs, NotificationRequest, PushType
+    device = _voip.get("device")
+    if not device or not _voip.get("key"):
+        _voip_last_status = "Apple-Push-Schlüssel oder iPhone-Registrierung fehlt"
+        return False
+    environment = device["environment"]
+    client = _voip_clients.get(environment)
+    if client is None:
+        client = APNs(key=_voip["key"], key_id=_voip["key_id"], team_id=_voip["team_id"],
+                      topic=VOIP_TOPIC, use_sandbox=environment == "development",
+                      max_connections=1, max_connection_attempts=1)
+        _voip_clients[environment] = client
+    request = NotificationRequest(
+        device_token=device["token"], notification_id=call_id,
+        message={"aps": {}, "call_id": call_id, "caller": caller, "sent_at": int(time.time())},
+        push_type=PushType.VOIP, priority=10, time_to_live=0)
+    try:
+        result = await asyncio.wait_for(client.send_notification(request), timeout=4)
+        if not result.is_successful:
+            _voip_last_status = f"Apple-Push abgelehnt: {result.status} {result.description}"
+            return False
+        _voip_last_status = "Anruf-Push von Apple angenommen (Zustellung noch nicht bestätigt)"
+        return True
+    except Exception:
+        _voip_last_status = "Apple-Push-Verbindung fehlgeschlagen"
+        return False
+
+
+class CallWebhookVoIPView(HomeAssistantView):
+    url = "/api/callwebhook/voip"
+    name = "api:callwebhook:voip"
+    requires_auth = True
+
+    async def get(self, request):
+        return self.json({"configured": bool(_voip.get("key")),
+                          "registered": bool(_voip.get("device")), "message": _voip_last_status})
+
+    async def post(self, request):
+        import re
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError()
+            async with _voip_lock:
+                value = dict(_voip)
+                action = payload.get("action")
+                if action == "register":
+                    token, environment = payload.get("token", ""), payload.get("environment")
+                    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32,512}", token) or environment not in ("development", "production"):
+                        raise ValueError()
+                    value["device"] = {"token": token, "environment": environment}
+                elif action == "unregister":
+                    if payload.get("token") == value.get("device", {}).get("token"):
+                        value.pop("device", None)
+                elif action == "credentials":
+                    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+                    from cryptography.hazmat.primitives.asymmetric import ec
+                    key = payload.get("key", "")
+                    if not isinstance(key, str) or len(key) > 4096:
+                        raise ValueError()
+                    parsed = load_pem_private_key(key.encode(), password=None)
+                    if not isinstance(parsed, ec.EllipticCurvePrivateKey) or not isinstance(parsed.curve, ec.SECP256R1):
+                        raise ValueError()
+                    for field in ("team_id", "key_id"):
+                        if not isinstance(payload.get(field), str) or not re.fullmatch(r"[A-Z0-9]{10}", payload[field]):
+                            raise ValueError()
+                        value[field] = payload[field]
+                    value["key"] = key
+                else:
+                    raise ValueError()
+                await request.app["hass"].async_add_executor_job(save_voip, value)
+                _voip.clear()
+                _voip.update(value)
+                _voip_clients.clear()
+            return self.json({"ok": True})
+        except (ValueError, TypeError):
+            return self.json({"ok": False, "error": "Ungültiger Push-Schlüssel oder ungültige Geräteanmeldung"}, status_code=400)
+
+
+class CallWebhookVoIPCallView(HomeAssistantView):
+    url = "/api/callwebhook/voip/call/{call_id}"
+    name = "api:callwebhook:voip:call"
+    requires_auth = True
+
+    async def get(self, request, call_id):
+        call = _voip_calls.get(call_id)
+        return self.json({"active": bool(call and not call["ended"] and time.monotonic() - call["created"] < 90)})
+
+    async def post(self, request, call_id):
+        call = _voip_calls.get(call_id)
+        if not call or call["ended"] or time.monotonic() - call["created"] >= 90:
+            return self.json({"ok": False}, status_code=410)
+        payload = await request.json()
+        if payload.get("action") == "ready":
+            call["ready"].set()
+        elif payload.get("action") == "end":
+            call["ended"] = True
+            call["ready"].set()
+        else:
+            return self.json({"ok": False}, status_code=400)
+        return self.json({"ok": True})
+
+
+class CallWebhookVoIPHookView(HomeAssistantView):
+    url = "/api/callwebhook/voip/hook/{secret}/{action}"
+    name = "api:callwebhook:voip:hook"
+    requires_auth = False  # Dedicated 256-bit secret; never accepts an HA token in the URL.
+
+    async def get(self, request, secret, action):
+        from uuid import UUID
+        if not secrets.compare_digest(secret, _voip.get("hook_secret", "")) or not _voip.get("hook_secret"):
+            return web.Response(status=401)
+        try:
+            call_id = str(UUID(request.query.get("id", "")))
+        except ValueError:
+            return web.Response(status=400)
+        for key, call in list(_voip_calls.items()):
+            if time.monotonic() - call["created"] > 120:
+                del _voip_calls[key]
+        if action == "end":
+            if call_id in _voip_calls:
+                _voip_calls[call_id]["ended"] = True
+                _voip_calls[call_id]["ready"].set()
+            return web.Response(text="ended")
+        if action != "ring":
+            return web.Response(status=404)
+        if call_id in _voip_calls:
+            return web.Response(text="cancelled" if _voip_calls[call_id]["ended"] else "duplicate")
+        if len(_voip_calls) >= 64:
+            return web.Response(status=429)
+        call = {"created": time.monotonic(), "ended": False, "ready": asyncio.Event()}
+        _voip_calls[call_id] = call
+        caller = request.query.get("caller", "Unbekannt")[:80]
+        if await send_voip_push(call_id, caller):
+            try:
+                await asyncio.wait_for(call["ready"].wait(), timeout=8)
+            except asyncio.TimeoutError:
+                pass  # Keep direct SIP as fallback if APNs cannot wake this device.
+        return web.Response(text="cancelled" if call["ended"] else "ready")
+
+
 async def async_setup(
     hass: HomeAssistant,
     config: dict
@@ -1101,6 +1312,10 @@ async def async_setup(
         CallWebhookSetupStatusView
     )
 
+    await hass.async_add_executor_job(load_voip)
+    hass.http.register_view(CallWebhookVoIPView)
+    hass.http.register_view(CallWebhookVoIPCallView)
+    hass.http.register_view(CallWebhookVoIPHookView)
     hass.http.register_view(CallWebhookMailboxSetupView)
 
     hass.http.register_view(

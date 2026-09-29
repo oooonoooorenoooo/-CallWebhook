@@ -71,16 +71,19 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
             names = ('CallWebhookMailboxSetupView', 'CallWebhookSetupStatusView', 'CallWebhookAsteriskSetupView',
                      'CallWebhookAsteriskSetupStatusView', 'CallWebhookMailboxView',
                      'CallWebhookMailboxDeleteView', 'CallWebhookMailboxArchiveView',
-                     'CallWebhookAudioView', 'CallWebhookArchiveAudioView')
+                     'CallWebhookAudioView', 'CallWebhookArchiveAudioView', 'CallWebhookVoIPView',
+                     'CallWebhookVoIPCallView', 'CallWebhookVoIPHookView')
             async def mailbox_loop(hass):
                 pass
+            async def executor(function, *args):
+                return function(*args)
             scheduled = []
             def background(coroutine, name):
                 scheduled.append(name)
                 coroutine.close()
             handlers = load_handlers(BASE_DIR=Path(directory), ARCHIVE_DIR=Path(directory) / 'archive',
-                mailbox_refresh_loop=mailbox_loop, **dict.fromkeys(names, object))
-            hass = SimpleNamespace(http=SimpleNamespace(register_view=Mock()), async_create_background_task=background)
+                mailbox_refresh_loop=mailbox_loop, load_voip=lambda: None, **dict.fromkeys(names, object))
+            hass = SimpleNamespace(http=SimpleNamespace(register_view=Mock()), async_create_background_task=background, async_add_executor_job=executor)
             self.assertTrue(await handlers['async_setup'](hass, {}))
             self.assertEqual(scheduled, ['CallWebhook mailbox refresh'])
 

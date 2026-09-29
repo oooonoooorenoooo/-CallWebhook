@@ -17,6 +17,15 @@ final class SIPService: ObservableObject {
 
     private init() {}
 
+    func wakeForIncomingCall() throws {
+        guard UserDefaults.standard.bool(forKey: "sipEnabled") else { throw SIPError.notConfigured }
+        if core == nil { try configureAndStart() }
+        else if !active {
+            registered = false
+            core?.refreshRegisters()
+        }
+    }
+
     func ensureStarted() throws {
         if core == nil { try configureAndStart() }
     }
@@ -91,12 +100,16 @@ final class SIPService: ObservableObject {
     private func updateCallState() {
         if trackedCall == nil, let call = core?.currentCall,
            String(describing: call.state).lowercased().contains("incoming") {
+            let caller = call.remoteAddress?.username ?? "Unbekannt"
+            let id = call.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-ID")
+            guard IncomingCallProvider.shared.attachSIP(caller: caller, id: id.flatMap(UUID.init(uuidString:))) else {
+                try? call.terminate()
+                return
+            }
             trackedCall = call
             active = true
             incoming = true
-            let caller = call.remoteAddress?.username ?? "Unbekannt"
             callStatus = "Eingehender Anruf: \(caller)"
-            IncomingCallProvider.shared.report(caller: caller)
         }
         guard let call = trackedCall else { return }
         let state = String(describing: call.state).lowercased()
@@ -159,7 +172,7 @@ final class SIPService: ObservableObject {
         }
         guard !IncomingRouteRepair.shared.running else { throw SIPError.provisioning }
         guard registered else { throw SIPError.notRegistered }
-        guard !active else { throw SIPError.alreadyActive }
+        guard !active, !IncomingCallProvider.shared.hasCall else { throw SIPError.alreadyActive }
         guard let dialNumber = SIPDialNumber.normalized(number) else { throw SIPError.invalidNumber }
         let targetNumber = prefix + dialNumber
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
@@ -192,7 +205,7 @@ final class SIPService: ObservableObject {
     }
 
     func hangup() {
-        guard let core else { return }
+        guard let core else { IncomingCallProvider.shared.ended(); return }
         do {
             try core.terminateAllCalls()
         } catch {

@@ -3354,6 +3354,8 @@ private struct ExtrasView: View {
                     }
                 }
 
+                VoIPPushSettingsView()
+
                 DisclosureGroup("Asterisk / VoIP", isExpanded: $showSIP) {
                     Toggle("Anrufe über Asterisk", isOn: $sipEnabled)
                     TextField("Asterisk Host", text: $sipHost)

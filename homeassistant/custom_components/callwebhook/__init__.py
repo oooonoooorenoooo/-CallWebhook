@@ -1172,7 +1172,7 @@ async def send_voip_push(call_id, caller):
     request = NotificationRequest(
         device_token=device["token"], notification_id=call_id,
         message={"aps": {}, "call_id": call_id, "caller": caller, "sent_at": int(time.time())},
-        push_type=PushType.VOIP, priority=10, time_to_live=0)
+        push_type=PushType.VOIP, priority=10, time_to_live=5)
     try:
         result = await asyncio.wait_for(client.send_notification(request), timeout=4)
         if not result.is_successful:
@@ -1227,10 +1227,14 @@ class CallWebhookVoIPView(HomeAssistantView):
                     value["key"] = key
                 else:
                     raise ValueError()
+                credentials_changed = action == "credentials" and any(value.get(field) != _voip.get(field) for field in ("key", "key_id", "team_id"))
                 await request.app["hass"].async_add_executor_job(save_voip, value)
                 _voip.clear()
                 _voip.update(value)
-                _voip_clients.clear()
+                if credentials_changed:
+                    for client in _voip_clients.values():
+                        client.pool.close()
+                    _voip_clients.clear()
             return self.json({"ok": True})
         except (ValueError, TypeError):
             return self.json({"ok": False, "error": "Ungültiger Push-Schlüssel oder ungültige Geräteanmeldung"}, status_code=400)

@@ -43,12 +43,15 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_device_rotation_persists_and_old_invalidation_does_not_remove_new_token(self):
         view = self.ns['CallWebhookVoIPView']()
+        client = object()
+        self.ns['_voip_clients']['production'] = client
         for token in ('a'*64, 'b'*64):
             code, _ = await view.post(self.request({'action':'register', 'token':token, 'environment':'production'}))
             self.assertEqual(code, 200)
         await view.post(self.request({'action':'unregister', 'token':'a'*64}))
         saved = json.loads(self.ns['VOIP_FILE'].read_text())
         self.assertEqual(saved['device']['token'], 'b'*64)
+        self.assertIs(self.ns['_voip_clients']['production'], client)
         self.assertEqual(self.ns['VOIP_FILE'].stat().st_mode & 0o777, 0o600)
         code, status = await view.get(self.request())
         self.assertNotIn('b'*64, json.dumps(status))
@@ -94,7 +97,7 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await call_view.get(self.request(), call_id))[1]['active'])
         self.assertEqual((await call_view.post(self.request({'action':'ready'}), call_id))[0], 410)
 
-    async def test_sender_uses_voip_zero_ttl_and_correct_environment(self):
+    async def test_sender_uses_voip_short_ttl_and_correct_environment(self):
         self.ns['_voip'].update(key='private', key_id='A'*10, team_id='B'*10,
                                 device={'token':'a'*64, 'environment':'production'})
         clients, requests = [], []
@@ -109,7 +112,7 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clients[0]['topic'], 'test.app.voip')
         self.assertFalse(clients[0]['use_sandbox'])
         self.assertEqual(requests[0]['push_type'], 'voip')
-        self.assertEqual(requests[0]['time_to_live'], 0)
+        self.assertEqual(requests[0]['time_to_live'], 5)
         self.assertEqual(requests[0]['priority'], 10)
         self.assertNotIn('private', json.dumps(requests[0]))
 

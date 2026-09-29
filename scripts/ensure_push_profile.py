@@ -28,7 +28,7 @@ def decode_profile(content):
 def valid(profile, environment):
     ent = profile.get("Entitlements", {})
     return (ent.get("aps-environment") == environment
-            and ent.get("application-identifier", "").endswith("." + BUNDLE)
+            and ent.get("application-identifier", "").lower().endswith("." + BUNDLE.lower())
             and ent.get("com.apple.developer.calling-app") is True
             and ent.get("com.apple.developer.dialing-app") is True)
 
@@ -86,8 +86,20 @@ def main(path, environment):
     bundles = api("/v1/bundleIds?filter[identifier]=" + BUNDLE)["data"]
     if not bundles:
         # Apple can normalize identifier case; never create a different app ID.
-        bundles = [item for item in all_data("/v1/bundleIds?limit=200")
-                   if item["attributes"]["identifier"].lower() == BUNDLE.lower()]
+        available = all_data("/v1/bundleIds?limit=200")
+        bundles = [item for item in available if item["attributes"]["identifier"].lower() == BUNDLE.lower()]
+        if not bundles:
+            # Profiles provide an authoritative relationship even when a filtered
+            # identifier lookup omits an Xcode-created identifier.
+            matches = [item for item in all_data("/v1/profiles?limit=200")
+                       if item["attributes"].get("uuid") == original["UUID"]]
+            if len(matches) == 1:
+                related = api(f"/v1/profiles/{matches[0]['id']}/bundleId")["data"]
+                if related["attributes"]["identifier"].lower() == BUNDLE.lower():
+                    bundles = [related]
+        if not bundles:
+            print("Apple API visible bundle count:", len(available))
+            print("CallWebhook identifiers visible to this key:", [item["attributes"]["identifier"] for item in available if "callwebhook" in item["attributes"]["identifier"].lower()])
     if len(bundles) != 1:
         raise RuntimeError("CallWebhook bundle ID not found in this API key team. Profile identifier: " + original.get("Entitlements", {}).get("application-identifier", "unknown"))
     bundle_id = bundles[0]["id"]

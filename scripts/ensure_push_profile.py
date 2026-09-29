@@ -72,8 +72,14 @@ def main(path, environment):
             with urlopen(request, timeout=30) as response:
                 return json.load(response)
         except HTTPError as error:
-            # Do not print request headers or authentication material.
-            raise RuntimeError(f"Apple signing API HTTP {error.code}. API key needs Certificates, Identifiers & Profiles access.") from None
+            # Apple's structured errors contain request validation details, never
+            # our Authorization header or private key. Do not print raw responses.
+            try:
+                errors = json.load(error).get("errors", [])
+                detail = "; ".join(str(item.get("code", "")) + ": " + str(item.get("detail", item.get("title", ""))) for item in errors)
+            except (ValueError, AttributeError):
+                detail = "No structured error details"
+            raise RuntimeError(f"Apple signing API HTTP {error.code} at {request.selector}: {detail[:1200]}") from None
 
     def all_data(path):
         result = []
@@ -88,13 +94,13 @@ def main(path, environment):
                and item["attributes"].get("platform") in ("IOS", "UNIVERSAL")]
     if len(bundles) != 1:
         # Apple can normalize identifier case; never create a different app ID.
-        available = all_data("/v1/bundleIds?limit=200")
+        available = all_data("/v1/bundleIds?limit=50")
         bundles = [item for item in available if item["attributes"]["identifier"].lower() == BUNDLE.lower()
                    and item["attributes"].get("platform") in ("IOS", "UNIVERSAL")]
         if len(bundles) != 1:
             # Profiles provide an authoritative relationship even when a filtered
             # identifier lookup omits an Xcode-created identifier.
-            matches = [item for item in all_data("/v1/profiles?limit=200")
+            matches = [item for item in all_data("/v1/profiles?limit=50")
                        if item["attributes"].get("uuid") == original["UUID"]]
             if len(matches) == 1:
                 related = api(f"/v1/profiles/{matches[0]['id']}/bundleId")["data"]
@@ -106,17 +112,17 @@ def main(path, environment):
     if len(bundles) != 1:
         raise RuntimeError("CallWebhook bundle ID could not be uniquely matched to this profile. Profile identifier: " + original.get("Entitlements", {}).get("application-identifier", "unknown"))
     bundle_id = bundles[0]["id"]
-    capabilities = all_data(f"/v1/bundleIds/{bundle_id}/bundleIdCapabilities?limit=200")
+    capabilities = all_data(f"/v1/bundleIds/{bundle_id}/bundleIdCapabilities?limit=50")
     if not any(item["attributes"]["capabilityType"] == "PUSH_NOTIFICATIONS" for item in capabilities):
         api("/v1/bundleIdCapabilities", {"data": {
             "type": "bundleIdCapabilities", "attributes": {"capabilityType": "PUSH_NOTIFICATIONS"},
             "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}}})
-    profiles = all_data(f"/v1/bundleIds/{bundle_id}/profiles?limit=200")
+    profiles = all_data(f"/v1/bundleIds/{bundle_id}/profiles?limit=50")
     source = next((item for item in profiles if item["attributes"].get("uuid") == original["UUID"]), None)
     if source is None:
         raise RuntimeError("Original signing profile not found in Apple account; update provisioning profile secret")
-    certificates = all_data(f"/v1/profiles/{source['id']}/certificates?limit=200")
-    devices = all_data(f"/v1/profiles/{source['id']}/devices?limit=200")
+    certificates = all_data(f"/v1/profiles/{source['id']}/certificates?limit=50")
+    devices = all_data(f"/v1/profiles/{source['id']}/devices?limit=50")
     source_certs = {item["id"] for item in certificates}
     source_devices = {item["id"] for item in devices}
     name = "CallWebhook-VoIP-" + environment
@@ -127,8 +133,8 @@ def main(path, environment):
         content = base64.b64decode(attributes["profileContent"])
         if not valid(decode_profile(content), environment):
             continue
-        certs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/certificates?limit=200")}
-        devs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/devices?limit=200")}
+        certs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/certificates?limit=50")}
+        devs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/devices?limit=50")}
         if certs == source_certs and devs == source_devices:
             target.write_bytes(content)
             print("Reusing APNs profile with original certificates and devices.")

@@ -28,7 +28,7 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         path = Path(self.directory.name)
-        names = ('load_voip', 'save_voip', 'voip_configured', 'voip_dialplan', 'send_voip_push',
+        names = ('load_voip', 'save_voip', 'voip_configured', 'voip_dialplan', 'fritz_incoming_pjsip', 'send_voip_push',
                  'CallWebhookVoIPView', 'CallWebhookVoIPCallView', 'CallWebhookVoIPHookView')
         nodes = [n for n in ast.parse(SOURCE.read_text()).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in names]
         self.ns = dict(json=json, asyncio=asyncio, os=os, secrets=secrets, time=time,
@@ -183,3 +183,46 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated, self.ns['voip_dialplan'](updated))
         self.assertLess(updated.index('/ring?'), updated.index('Dial(${PJSIP_DIAL_CONTACTS'))
         self.assertNotIn('private', updated)
+
+
+    def test_fritz_incoming_matches_router_without_changing_authenticated_phone_or_outgoing_lines(self):
+        phone = "[callwebhook-ios]\ntype=endpoint\nauth=callwebhook-ios-auth\ncontext=from-callwebhook-ios\n"
+        trunks = "".join(f"[fritz{i}-registration]\ntype=registration\nserver_uri=sip:192.168.178.1\nline=yes\nendpoint=fritz{i}-endpoint\n"
+                         f"[fritz{i}-auth]\ntype=auth\npassword=unchanged-{i}\n" for i in range(1, 4))
+        other = "[easybell-registration]\ntype=registration\nserver_uri=sip:voip.easybell.de\n"
+        original = phone + trunks + other
+        repair = self.ns['fritz_incoming_pjsip']
+        result = repair(original)
+        self.assertTrue(result.startswith(original))
+        self.assertIn('context=from-fritz\nidentify_by=ip', result)
+        self.assertIn('endpoint=callwebhook-fritz-incoming\nmatch=192.168.178.1\nsrv_lookups=no', result)
+        self.assertEqual(result.count('type=identify'), 1)
+        self.assertEqual(repair(result), result)
+        # Updating a router replaces the app-owned match, never broadens it.
+        moved = repair(result.replace('server_uri=sip:192.168.178.1', 'server_uri=sip:192.168.178.254'))
+        self.assertIn('match=192.168.178.254\n', moved)
+        self.assertNotIn('match=192.168.178.1\n', moved)
+
+    def test_fritz_match_requires_one_host_and_rejects_networks_and_injected_criteria(self):
+        repair = self.ns['fritz_incoming_pjsip']
+        base = '[fritz1-registration]\ntype=registration\nserver_uri=sip:'
+        for host in ('192.168.178.1/24', '0.0.0.0', '[::]', '224.0.0.1', 'fritz.box,evil.example',
+                     'user@fritz.box', 'fritz.box?x=1', 'fritz.box:bad', '*.example', 'fritz..box'):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                repair(base + host + '\n')
+        with self.assertRaises(ValueError):
+            repair('[callwebhook-ios]\ntype=endpoint\n')
+        with self.assertRaises(ValueError):
+            repair(base + '192.168.178.1\n[fritz2-registration]\nserver_uri=sip:192.168.178.2\n')
+        for uri, host in [('fritz.box', 'fritz.box'), ('192.168.178.1:5060', '192.168.178.1'),
+                          ('[fd00::1]:5060', 'fd00::1')]:
+            self.assertIn('match=' + host + '\n', repair(base + uri + '\n'))
+
+    async def test_old_persisted_route_requires_repair_before_being_ready(self):
+        view = self.ns['CallWebhookVoIPView']()
+        self.ns['_voip'].update(route_ready=True)
+        self.assertFalse((await view.get(self.request()))[1]['route_ready'])
+        self.ns['_voip']['incoming_route_revision'] = 1
+        self.assertTrue((await view.get(self.request()))[1]['route_ready'])
+        self.ns['_voip']['route_ready'] = False
+        self.assertFalse((await view.get(self.request()))[1]['route_ready'])

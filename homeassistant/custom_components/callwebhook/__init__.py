@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 13
+BACKEND_API_VERSION = 14
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -56,9 +56,10 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["progress_step"] = 5
         _asterisk_setup_state["message"] = "Asterisk läuft – Konfiguration wird geschrieben …"
         actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
+        pjsip = fritz_incoming_pjsip(payload.get("pjsip"))
         extensions = voip_dialplan(payload.get("extensions") or "")
         push_route_applied = f"/api/callwebhook/voip/hook/{_voip.get('hook_secret', '')}" in extensions
-        files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), extensions, actual_addon, actual_path)
+        files = await hass.async_add_executor_job(install_asterisk_config, pjsip, extensions, actual_addon, actual_path)
         _asterisk_setup_state["progress_step"] = 6
         configured_tams = await hass.async_add_executor_job(save_setup, payload.get("mailbox_tam_1"), payload.get("mailbox_tam_2"), payload.get("mailbox_tam_3"))
         _asterisk_setup_state["message"] = "Asterisk-Konfiguration geschrieben – Neustart läuft …"
@@ -67,7 +68,7 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["message"] = "Asterisk wird neu gestartet und abschließend geprüft …"
         await hass.async_add_executor_job(wait_for_asterisk_started, actual_addon)
         async with _voip_lock:
-            value = dict(_voip, route_ready=push_route_applied and voip_configured())
+            value = dict(_voip, route_ready=push_route_applied and voip_configured(), incoming_route_revision=1)
             await hass.async_add_executor_job(save_voip, value)
             _voip.update(value)
         _asterisk_setup_state["progress_step"] = 7
@@ -1806,6 +1807,73 @@ async def relay_request(url, credential, path, payload=None):
             return await response.json()
 
 
+def fritz_incoming_pjsip(original):
+    """Match the configured router even when it drops REGISTER's line parameter.
+
+    Use one inbound-only endpoint for the router, not three competing IP matches.
+    The iPhone keeps its authenticated endpoint; outgoing line credentials remain
+    untouched. Never trust arbitrary caller IDs, networks or SIP header matches.
+    """
+    import ipaddress
+    import re
+    if not isinstance(original, str):
+        raise ValueError("Asterisk-SIP-Konfiguration fehlt")
+    owned = {"callwebhook-fritz-incoming", "callwebhook-fritz-identify"}
+    kept, hosts, section = [], set(), ""
+    for line in original.splitlines():
+        match = re.fullmatch(r"\s*\[([^]]+)\]\s*(?:;.*)?", line)
+        if match:
+            section = match.group(1)
+        if section in owned:
+            continue
+        kept.append(line)
+        if section not in {"fritz1-registration", "fritz2-registration", "fritz3-registration"}:
+            continue
+        entry = re.fullmatch(r"\s*server_uri\s*=\s*sip:([^;\s]+)\s*(?:;.*)?", line)
+        if not entry:
+            continue
+        uri = urlparse("sip://" + entry.group(1))
+        host = uri.hostname
+        if not host or uri.username or uri.password or uri.path or uri.query or uri.fragment:
+            raise ValueError("Ungültige FRITZ!Box-Adresse für eingehende Anrufe")
+        # Accessing .port rejects malformed ports before producing any config.
+        if uri.port is not None and not 1 <= uri.port <= 65535:
+            raise ValueError("Ungültiger FRITZ!Box-SIP-Port")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            if (len(host) > 253 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host)
+                    or any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+                           for label in host.split("."))):
+                raise ValueError("Ungültiger FRITZ!Box-Hostname")
+        else:
+            if address.is_unspecified or address.is_multicast:
+                raise ValueError("FRITZ!Box-Adresse muss einen einzelnen Router bezeichnen")
+        hosts.add(host)
+    if len(hosts) != 1:
+        raise ValueError("Eine eindeutige FRITZ!Box-Adresse für eingehende Anrufe fehlt")
+    host = hosts.pop()
+    return "\n".join(kept).rstrip() + f"""
+
+[callwebhook-fritz-incoming]
+type=endpoint
+transport=transport-udp
+context=from-fritz
+identify_by=ip
+disallow=all
+allow=alaw,ulaw
+direct_media=no
+force_rport=yes
+rtp_symmetric=yes
+
+[callwebhook-fritz-identify]
+type=identify
+endpoint=callwebhook-fritz-incoming
+match={host}
+srv_lookups=no
+"""
+
+
 def voip_dialplan(original):
     """Replace only the app-owned incoming contexts; preserve outgoing routes."""
     import re
@@ -1896,7 +1964,7 @@ class CallWebhookVoIPView(HomeAssistantView):
     async def get(self, request):
         return self.json({"configured": voip_configured(), "api_version": BACKEND_API_VERSION,
                           "mode": "relay" if _voip.get("relay_credential") else "direct",
-                          "route_ready": bool(_voip.get("route_ready")),
+                          "route_ready": bool(_voip.get("route_ready") and _voip.get("incoming_route_revision") == 1),
                           "registered": bool(_voip.get("device")), "message": _voip_last_status})
 
     async def post(self, request):

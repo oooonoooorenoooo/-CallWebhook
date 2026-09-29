@@ -269,6 +269,9 @@ private struct SetupWizardView: View {
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
     @State private var isBootstrappingHA = false
+    @ScaledMetric(relativeTo: .body) private var setupStatusIconSize: CGFloat = 18
+    @State private var bootstrapRestartPending = false
+    @State private var isCheckingBackend = false
     @State private var bootstrapPreviousBootID: String?
     @State private var isWaitingForHARestart = false
     @State private var haAuthenticated = false
@@ -531,16 +534,17 @@ private struct SetupWizardView: View {
                     Label(isChecking ? "Prüfe …" : (homeAssistantReachable ? "Home Assistant geprüft" : "Home Assistant prüfen"), systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "house.and.flag")
                         .foregroundStyle(homeAssistantReachable ? .green : .blue)
                 }
-                .disabled(isChecking || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Label(homeAssistantStatus, systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(homeAssistantReachable ? .green : .secondary)
+                .disabled(isChecking || isBootstrappingHA || isWaitingForHARestart || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Label(bootstrapRestartPending ? "Home Assistant startet neu …" : homeAssistantStatus,
+                      systemImage: homeAssistantReachable && !bootstrapRestartPending ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(homeAssistantReachable && !bootstrapRestartPending ? .green : .secondary)
                 Button {
                     Task { await authenticateHomeAssistant() }
                 } label: {
                     Label(isAuthenticatingHA ? "Home Assistant öffnet …" : (haAuthenticated ? "Home Assistant verbunden" : "Mit Home Assistant verbinden"), systemImage: haAuthenticated ? "checkmark.shield.fill" : "person.badge.key.fill")
                         .foregroundStyle(haAuthenticated ? .green : .blue)
                 }
-                .disabled(isAuthenticatingHA || !homeAssistantReachable)
+                .disabled(isAuthenticatingHA || isBootstrappingHA || isWaitingForHARestart || !homeAssistantReachable)
                 if haAuthenticated {
                     Label("Autorisierung erfolgreich", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -557,52 +561,54 @@ private struct SetupWizardView: View {
                     .disabled(isBootstrappingHA || isWaitingForHARestart)
 
                 }
-                HStack(spacing: 14) {
+                HStack(spacing: 8) {
                     ZStack {
                         ForEach(0..<bootstrapProgressTotal, id: \.self) { index in
                             Circle()
-                                .trim(from: CGFloat(index) / CGFloat(bootstrapProgressTotal) + 0.014,
-                                      to: CGFloat(index + 1) / CGFloat(bootstrapProgressTotal) - 0.014)
+                                .trim(from: CGFloat(index) / CGFloat(bootstrapProgressTotal) + 0.025,
+                                      to: CGFloat(index + 1) / CGFloat(bootstrapProgressTotal) - 0.025)
                                 .stroke(index < bootstrapProgressStep ? Color.green : Color.secondary.opacity(0.22),
-                                        style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
                                 .rotationEffect(.degrees(-90))
                         }
-                        if callWebhookHAReady {
+                        if callWebhookHAReady && !bootstrapRestartPending {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.system(size: setupStatusIconSize * 0.48, weight: .bold))
                                 .foregroundStyle(.green)
                         }
                     }
-                    .frame(width: 44, height: 44)
-                    Text(callWebhookHAStatus)
-                        .foregroundStyle(callWebhookHAReady ? .green : .secondary)
+                    .padding(1)
+                    .frame(width: setupStatusIconSize, height: setupStatusIconSize)
+                    Text(bootstrapRestartPending ? "Home Assistant startet neu … Warte auf vollständige Bereitschaft." : callWebhookHAStatus)
+                        .foregroundStyle(callWebhookHAReady && !bootstrapRestartPending ? .green : .secondary)
                 }
                 Label(
                     asteriskInstalled ? "Asterisk automatisch eingerichtet" : (isInstallingAsterisk ? "Asterisk wird automatisch eingerichtet …" : (asteriskInstallFailed ? "Asterisk-Einrichtung fehlgeschlagen" : "Asterisk wird automatisch eingerichtet")),
                     systemImage: asteriskInstalled ? "checkmark.circle.fill" : (asteriskInstallFailed ? "xmark.circle.fill" : "arrow.trianglehead.2.clockwise.rotate.90")
                 )
                 .foregroundStyle(asteriskInstalled ? .green : (asteriskInstallFailed ? .red : .secondary))
-                HStack(spacing: 14) {
+                HStack(spacing: 8) {
                     ZStack {
                         ForEach(0..<asteriskProgressTotal, id: \.self) { index in
                             Circle()
-                                .trim(from: CGFloat(index) / CGFloat(asteriskProgressTotal) + 0.010,
-                                      to: CGFloat(index + 1) / CGFloat(asteriskProgressTotal) - 0.010)
+                                .trim(from: CGFloat(index) / CGFloat(asteriskProgressTotal) + 0.025,
+                                      to: CGFloat(index + 1) / CGFloat(asteriskProgressTotal) - 0.025)
                                 .stroke(index < asteriskProgressStep ? Color.green : Color.secondary.opacity(0.22),
-                                        style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
                                 .rotationEffect(.degrees(-90))
                         }
                         if asteriskInstalled {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.system(size: setupStatusIconSize * 0.48, weight: .bold))
                                 .foregroundStyle(.green)
                         } else if asteriskInstallFailed {
                             Image(systemName: "xmark")
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.system(size: setupStatusIconSize * 0.48, weight: .bold))
                                 .foregroundStyle(.red)
                         }
                     }
-                    .frame(width: 44, height: 44)
+                    .padding(1)
+                    .frame(width: setupStatusIconSize, height: setupStatusIconSize)
                     Text(asteriskConfigStatus)
                         .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
                 }
@@ -2226,7 +2232,7 @@ private struct SetupWizardView: View {
         homeAssistantReachable = false
         callWebhookHAReady = false
         callWebhookHAStatus = "CallWebhook-Integration noch nicht geprüft"
-        homeAssistantStatus = "Prüfung fehlgeschlagen"
+        homeAssistantStatus = "Home Assistant wird geprüft …"
 
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else {
@@ -2272,6 +2278,9 @@ private struct SetupWizardView: View {
 
     @MainActor
     private func checkCallWebhookHAIntegration(base: URL) async {
+        guard !isCheckingBackend else { return }
+        isCheckingBackend = true
+        defer { isCheckingBackend = false }
         callWebhookHAReady = false
         guard let url = URL(string: "/api/callwebhook/setup/status", relativeTo: base)?.absoluteURL else {
             callWebhookHAStatus = "CallWebhook-Endpunkt konnte nicht gebildet werden"
@@ -2334,10 +2343,12 @@ private struct SetupWizardView: View {
                 return
             }
             bootstrapPreviousBootID = nil
+            bootstrapRestartPending = false
             callWebhookHAReady = true
             bootstrapProgressStep = bootstrapProgressTotal
             callWebhookHAStatus = "CallWebhook-Backend bereit (API \(version))"
             homeAssistantReachable = true
+            homeAssistantStatus = "Home Assistant vollständig gestartet und erreichbar"
             await continueHASetup()
         } catch {
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
@@ -2373,8 +2384,11 @@ private struct SetupWizardView: View {
     private func waitForCallWebhookAfterRestart() async {
         guard !isWaitingForHARestart else { return }
         isWaitingForHARestart = true
-        defer { isWaitingForHARestart = false }
-        callWebhookHAStatus = "Warte auf Bootstrap und Home-Assistant-Neustart …"
+        defer { isWaitingForHARestart = false; bootstrapRestartPending = false }
+        bootstrapRestartPending = true
+        homeAssistantReachable = false
+        callWebhookHAReady = false
+        callWebhookHAStatus = "Home Assistant startet neu … Warte auf vollständige Bereitschaft."
 
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty, let base = URL(string: "http://192.168.178.\(input):8123") else {
@@ -2391,11 +2405,15 @@ private struct SetupWizardView: View {
                 // The successful readiness check already continues Asterisk and
                 // helper setup, including the pre-existing-backend path.
                 if callWebhookHAReady { return }
+                if !haAuthenticated { return }
             } catch {
-                if Task.isCancelled { return }
+                if Task.isCancelled {
+                    callWebhookHAStatus = "Warten auf Home Assistant abgebrochen – Einrichtung erneut prüfen"
+                    return
+                }
             }
         }
-        callWebhookHAStatus = "Home Assistant ist noch nicht bereit – bitte Installation prüfen"
+        callWebhookHAStatus = "Home Assistant ist noch nicht bereit – automatische Einrichtung erneut prüfen"
     }
 
     private let bootstrapRepository = "https://github.com/oooonoooorenoooo/-CallWebhook"
@@ -2483,6 +2501,7 @@ private struct SetupWizardView: View {
         do {
             let token = (try? await HomeAssistantAuth.shared.refresh(instance: base)) ?? savedToken
             bootstrapProgressStep = 0
+            bootstrapRestartPending = false
             callWebhookHAReady = false
             callWebhookHAStatus = "Bootstrap-Repository wird geprüft …"
             let response = try await supervisorWrite(base: base, token: token, endpoint: "/store", method: "get")
@@ -2539,11 +2558,25 @@ private struct SetupWizardView: View {
                    let status = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
                     bootstrapPreviousBootID = status["boot_id"] as? String
                 }
+                // Announce the restart before sending start: HA can disappear
+                // while the Supervisor response is still in flight.
+                bootstrapRestartPending = true
+                homeAssistantReachable = false
+                callWebhookHAReady = false
+                callWebhookHAStatus = "Home Assistant startet neu … Warte auf vollständige Bereitschaft."
                 _ = try await supervisorWrite(base: base, token: token, endpoint: "/addons/\(slug)/start")
             }
             bootstrapProgressStep = 4
             await waitForCallWebhookAfterRestart()
         } catch {
+            if bootstrapRestartPending, (error as NSError).domain == NSURLErrorDomain {
+                // A lost connection after /start is expected during the reboot;
+                // the authenticated readiness check decides whether it succeeded.
+                bootstrapProgressStep = 4
+                await waitForCallWebhookAfterRestart()
+                return
+            }
+            bootstrapRestartPending = false
             callWebhookHAStatus = "Bootstrap-Einrichtung fehlgeschlagen: \(error.localizedDescription). Bitte die automatische Einrichtung erneut versuchen."
         }
     }

@@ -25,7 +25,7 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
 
     func isWaiting(for id: UUID) -> Bool { callID == id && waitingForSIP }
 
-    func report(caller: String, id: UUID = UUID(), completion: @escaping () -> Void = {}) {
+    func report(caller: String, id: UUID = UUID(), line: Int? = nil, completion: @escaping () -> Void = {}) {
         if callID == id {
             // Every VoIP delivery must reach CallKit, even a duplicate APNs delivery.
             // CallKit rejects the existing UUID; keep the already active call intact.
@@ -35,7 +35,7 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
             return
         }
         let busy = callID != nil || finished[id] != nil
-        LocalCallHistory.shared.begin(id: id, number: caller, incoming: true)
+        LocalCallHistory.shared.begin(id: id, number: caller, incoming: true, line: line)
         if !busy { callID = id; waitingForSIP = true }
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: caller)
@@ -63,15 +63,16 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
     }
 
     // Push and SIP carry the same ID. Declined/expired calls must not ring again.
-    func attachSIP(caller: String, id: UUID?) -> Bool {
+    func attachSIP(caller: String, id: UUID?, line: Int? = nil) -> Bool {
         finished = finished.filter { Date().timeIntervalSince($0.value) < 120 }
         if let id, finished[id] != nil { return false }
         if let current = callID {
             guard id == current else { return false }
+            LocalCallHistory.shared.setLine(current, line: line)
             waitingForSIP = false
             return true
         }
-        report(caller: caller, id: id ?? UUID())
+        report(caller: caller, id: id ?? UUID(), line: line)
         waitingForSIP = false
         return true
     }

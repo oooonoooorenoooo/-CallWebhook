@@ -103,7 +103,9 @@ final class SIPService: ObservableObject {
            String(describing: call.state).lowercased().contains("incoming") {
             let caller = call.remoteAddress?.username ?? "Unbekannt"
             let id = call.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-ID")
-            guard IncomingCallProvider.shared.attachSIP(caller: caller, id: id.flatMap(UUID.init(uuidString:))) else {
+            let lineHeader = call.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-Line")
+            let line = lineHeader.flatMap(Int.init)
+            guard IncomingCallProvider.shared.attachSIP(caller: caller, id: id.flatMap(UUID.init(uuidString:)), line: line) else {
                 try? call.terminate()
                 return
             }
@@ -182,7 +184,7 @@ final class SIPService: ObservableObject {
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
         core.configureAudioSession()
         let callID = UUID()
-        LocalCallHistory.shared.begin(id: callID, number: number, incoming: false)
+        LocalCallHistory.shared.begin(id: callID, number: number, incoming: false, line: line)
         guard let call = core.inviteAddress(addr: target) else {
             LocalCallHistory.shared.end(callID, reason: "failed")
             callStatus = "SIP konnte den Anruf nicht starten"

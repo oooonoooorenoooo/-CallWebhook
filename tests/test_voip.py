@@ -222,7 +222,33 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         view = self.ns['CallWebhookVoIPView']()
         self.ns['_voip'].update(route_ready=True)
         self.assertFalse((await view.get(self.request()))[1]['route_ready'])
-        self.ns['_voip']['incoming_route_revision'] = 1
+        self.ns['_voip']['incoming_route_revision'] = 2
         self.assertTrue((await view.get(self.request()))[1]['route_ready'])
         self.ns['_voip']['route_ready'] = False
         self.assertFalse((await view.get(self.request()))[1]['route_ready'])
+
+
+    async def test_incoming_line_metadata_survives_end_and_rejects_invalid_values(self):
+        self.ns['send_voip_push'] = AsyncMock(return_value=False)
+        hook = self.ns['CallWebhookVoIPHookView']()
+        view = self.ns['CallWebhookVoIPCallView']()
+        for raw, expected in [('1', 1), ('2', 2), ('3', 3), ('0', None), ('99', None), ('SIM 1', None), ('', None)]:
+            call_id = str(uuid4())
+            request = self.request(query={'id': call_id, 'line': raw})
+            await hook.get(request, self.ns['_voip']['hook_secret'], 'ring')
+            self.assertEqual((await view.get(request, call_id))[1]['line'], expected)
+            await hook.get(request, self.ns['_voip']['hook_secret'], 'end')
+            state = (await view.get(request, call_id))[1]
+            self.assertEqual(state['line'], expected)
+            self.assertFalse(state['active'])
+
+    def test_dialplan_preserves_incoming_destination_before_goto_and_forwards_line(self):
+        self.ns['_voip'].update(device={'token': 'a'*64}, key='private')
+        plan = self.ns['voip_dialplan']('[outgoing]\n')
+        for line in (1, 2, 3):
+            self.assertIn(f'"${{EXTEN}}"="callwhapp{line}"]?Set(__CW_LINE={line})', plan)
+        self.assertLess(plan.index('Set(__CW_LINE=3)'), plan.index('same => n,Goto(s,1)'))
+        self.assertIn('&line=${CW_LINE}', plan)
+        self.assertIn('s^1(${CW_ID}^${CW_LINE})', plan)
+        self.assertIn('Set(PJSIP_HEADER(add,X-CallWebhook-Line)=${ARG2})', plan)
+        self.assertEqual(plan, self.ns['voip_dialplan'](plan))

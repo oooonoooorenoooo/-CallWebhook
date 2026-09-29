@@ -98,11 +98,11 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         }
         guard await synchronize() else { return }
         guard configured else { return }
-        if backendAPIVersion < 14 {
+        if backendAPIVersion < 15 {
             routeReady = false
             backendStatus = "Eingehende FRITZ!Box-Anrufe: HA-Komponente wird aktualisiert …"
             await updateBackend()
-            guard backendAPIVersion >= 14, configured else { return }
+            guard backendAPIVersion >= 15, configured else { return }
         }
         if !routeReady {
             guard backendAPIVersion >= 8 else {
@@ -145,7 +145,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                 try await Task.sleep(for: .seconds(1))
                 if let (data, code) = try? await HomeAssistantConnection.request(base: base, path: "api/callwebhook/setup/status"),
                    code == 200, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (value["api_version"] as? Int ?? 0) >= 14, value["ready_for_asterisk"] as? Bool == true {
+                   (value["api_version"] as? Int ?? 0) >= 15, value["ready_for_asterisk"] as? Bool == true {
                     await synchronize()
                     await refreshStatus()
                     return
@@ -259,6 +259,13 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             let id = (data["call_id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
             let caller = data["caller"] as? String ?? "Unbekannt"
             IncomingCallProvider.shared.report(caller: caller, id: id, completion: completion)
+            // Fetch metadata independently of SIP wake-up. This also enriches a
+            // missed/declined call when no INVITE reaches the device afterward.
+            Task { @MainActor in
+                if let state = try? await self.callState(id) {
+                    LocalCallHistory.shared.setLine(id, line: state["line"] as? Int)
+                }
+            }
             guard wakeTasks[id] == nil else { return }
             wakeTasks[id] = Task { @MainActor in
                 defer { self.wakeTasks[id] = nil }

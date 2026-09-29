@@ -2327,7 +2327,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 14,
+            guard version >= 15,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return
@@ -2663,6 +2663,7 @@ private struct CallsView: View {
                                         .frame(width: 28)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
+                                        Text(call.lineLabel).font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 3) {
@@ -2748,7 +2749,7 @@ private struct CallsView: View {
         formatter.timeStyle = .short
         let text = selected.map { call in
             let number = call.handles.first?.value ?? "Unbekannt"
-            return "\(formatter.string(from: call.date)) – \(number) – \(directionText(call))"
+            return "\(formatter.string(from: call.date)) – \(number) – \(directionText(call)) – \(call.lineLabel)"
         }.joined(separator: "\n")
         guard !text.isEmpty else { return }
         let controller = UIActivityViewController(activityItems: [text], applicationActivities: nil)

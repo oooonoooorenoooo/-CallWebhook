@@ -11,6 +11,15 @@ struct CallRecord: Identifiable, Codable, Equatable {
     var connectedAt: Date?
     var endedAt: Date?
     var reportedDuration: TimeInterval?
+    var line: Int?
+    var lineLabel: String {
+        switch line {
+        case 1: return "SIM 1"
+        case 2: return "SIM 2"
+        case 3: return "Festnetz"
+        default: return "Leitung unbekannt"
+        }
+    }
     var handles: [NumberHandle] { number.isEmpty ? [] : [NumberHandle(value: number)] }
     var duration: TimeInterval {
         if let reportedDuration { return reportedDuration }
@@ -37,10 +46,17 @@ final class LocalCallHistory: ObservableObject {
         persist()
     }
 
-    func begin(id: UUID, number: String, incoming: Bool, at date: Date = Date()) {
+    func begin(id: UUID, number: String, incoming: Bool, line: Int? = nil, at date: Date = Date()) {
         guard !entries.contains(where: { $0.id == id }) else { return }
-        entries.insert(CallRecord(id: id, date: date, number: number, direction: incoming ? "incoming" : "outgoing", status: "ringing"), at: 0)
+        entries.insert(CallRecord(id: id, date: date, number: number, direction: incoming ? "incoming" : "outgoing", status: "ringing", line: line.flatMap { (1...3).contains($0) ? $0 : nil }), at: 0)
         entries = Array(entries.prefix(1000))
+        persist()
+    }
+
+    func setLine(_ id: UUID, line: Int?) {
+        guard let line, (1...3).contains(line),
+              let index = entries.firstIndex(where: { $0.id == id }), entries[index].line == nil else { return }
+        entries[index].line = line
         persist()
     }
 
@@ -66,7 +82,7 @@ final class LocalCallHistory: ObservableObject {
         // local record, whose lifecycle we know, without duplicating that call.
         let remaining = system.filter { item in
             !ids.contains(item.id) && !local.contains { own in
-                own.direction == item.direction && !own.number.isEmpty &&
+                own.direction == item.direction && (own.line == nil || item.line == nil || own.line == item.line) && !own.number.isEmpty &&
                 (own.number == item.number ||
                  (!own.number.filter { $0.isNumber }.isEmpty &&
                   own.number.filter { $0.isNumber } == item.number.filter { $0.isNumber })) &&
@@ -83,6 +99,7 @@ final class LocalCallHistory: ObservableObject {
             let sameNumber = record.number == call.number ||
                 (!number.isEmpty && number == call.number.filter { $0.isNumber })
             return !record.number.isEmpty && sameNumber && record.direction == call.direction &&
+                (record.line == nil || call.line == nil || record.line == call.line) &&
                 abs(record.date.timeIntervalSince(call.date)) < 2
         }
     }

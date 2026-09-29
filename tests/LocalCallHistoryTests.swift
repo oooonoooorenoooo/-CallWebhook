@@ -9,9 +9,10 @@ struct LocalCallHistoryTests {
         let history = LocalCallHistory(defaults: defaults)
         let date = Date(timeIntervalSince1970: 1_000)
         let outgoing = UUID()
-        history.begin(id: outgoing, number: "030 12345", incoming: false, at: date)
+        history.begin(id: outgoing, number: "030 12345", incoming: false, line: 3, at: date)
         history.begin(id: outgoing, number: "duplicate", incoming: false, at: date)
         assert(history.entries.count == 1)
+        assert(history.entries[0].lineLabel == "Festnetz")
         history.connected(outgoing, at: date.addingTimeInterval(5))
         history.connected(outgoing, at: date.addingTimeInterval(10))
         history.end(outgoing, at: date.addingTimeInterval(65))
@@ -41,6 +42,25 @@ struct LocalCallHistoryTests {
         let merged = LocalCallHistory.merged(local: [own], system: [own, duplicate, later])
         assert(merged.count == 2 && merged.first?.id == later.id)
         assert(LocalCallHistory.merged(local: history.entries, system: []).count == history.entries.count)
+        let incoming = UUID()
+        history.begin(id: incoming, number: "123", incoming: true, at: date)
+        history.end(incoming, at: date.addingTimeInterval(2))
+        history.setLine(incoming, line: 2) // metadata may arrive after a declined push
+        history.setLine(incoming, line: 0)
+        history.setLine(incoming, line: 1) // do not overwrite an established assignment
+        assert(history.entries[0].lineLabel == "SIM 2")
+        assert(history.entries[0].status == "missed")
+        assert(LocalCallHistory(defaults: defaults).entries[0].line == 2)
+        var otherLine = duplicate
+        otherLine.line = 1
+        assert(!LocalCallHistory.isHidden(otherLine, records: [own]))
+        assert(LocalCallHistory.merged(local: [own], system: [otherLine]).count == 2)
+        let legacyData = try! JSONEncoder().encode([own])
+        var legacyJSON = try! JSONSerialization.jsonObject(with: legacyData) as! [[String: Any]]
+        legacyJSON[0].removeValue(forKey: "line")
+        let legacy = try! JSONDecoder().decode([CallRecord].self, from: JSONSerialization.data(withJSONObject: legacyJSON))
+        assert(legacy.count == 1 && legacy[0].line == nil && legacy[0].lineLabel == "Leitung unbekannt")
+        assert(otherLine.lineLabel == "SIM 1")
         print("Call history lifecycle, persistence, recovery and merge tests passed")
     }
 }

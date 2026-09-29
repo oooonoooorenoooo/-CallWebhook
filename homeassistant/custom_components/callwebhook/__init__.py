@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 14
+BACKEND_API_VERSION = 15
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -68,7 +68,7 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["message"] = "Asterisk wird neu gestartet und abschließend geprüft …"
         await hass.async_add_executor_job(wait_for_asterisk_started, actual_addon)
         async with _voip_lock:
-            value = dict(_voip, route_ready=push_route_applied and voip_configured(), incoming_route_revision=1)
+            value = dict(_voip, route_ready=push_route_applied and voip_configured(), incoming_route_revision=2)
             await hass.async_add_executor_job(save_voip, value)
             _voip.update(value)
         _asterisk_setup_state["progress_step"] = 7
@@ -1896,11 +1896,15 @@ exten => s,1,NoOp(CallWebhook incoming VoIP)
  same => n,Set(CW_ID=${UUID()})
  same => n,Set(CURLOPT(conntimeout)=2)
  same => n,Set(CURLOPT(httptimeout)=15)
- same => n,Set(CW_PUSH=${CURL(HOOK/ring?id=${CW_ID}&caller=${URIENCODE(${CALLERID(num)})})})
+ same => n,Set(CW_PUSH=${CURL(HOOK/ring?id=${CW_ID}&caller=${URIENCODE(${CALLERID(num)})}&line=${CW_LINE})})
  same => n,GotoIf($["${CW_PUSH}"="cancelled"]?done)
- same => n,Dial(${PJSIP_DIAL_CONTACTS(callwebhook-ios)},60,b(callwebhook-push-header^s^1(${CW_ID})))
+ same => n,Dial(${PJSIP_DIAL_CONTACTS(callwebhook-ios)},60,b(callwebhook-push-header^s^1(${CW_ID}^${CW_LINE})))
  same => n(done),Hangup()
-exten => _.,1,Goto(s,1)
+exten => _.,1,Set(__CW_LINE=0)
+ same => n,ExecIf($["${EXTEN}"="callwhapp1"]?Set(__CW_LINE=1))
+ same => n,ExecIf($["${EXTEN}"="callwhapp2"]?Set(__CW_LINE=2))
+ same => n,ExecIf($["${EXTEN}"="callwhapp3"]?Set(__CW_LINE=3))
+ same => n,Goto(s,1)
 exten => h,1,Set(CURLOPT(httptimeout)=2)
  same => n,Set(CW_END=${CURL(HOOK/end?id=${CW_ID})})
 
@@ -1910,6 +1914,7 @@ exten => _.,1,Goto(from-fritz,s,1)
 
 [callwebhook-push-header]
 exten => s,1,Set(PJSIP_HEADER(add,X-CallWebhook-ID)=${ARG1})
+ same => n,Set(PJSIP_HEADER(add,X-CallWebhook-Line)=${ARG2})
  same => n,Return()
 '''.replace("HOOK", hook)
     return "\n".join(kept).rstrip() + "\n" + route
@@ -1964,7 +1969,7 @@ class CallWebhookVoIPView(HomeAssistantView):
     async def get(self, request):
         return self.json({"configured": voip_configured(), "api_version": BACKEND_API_VERSION,
                           "mode": "relay" if _voip.get("relay_credential") else "direct",
-                          "route_ready": bool(_voip.get("route_ready") and _voip.get("incoming_route_revision") == 1),
+                          "route_ready": bool(_voip.get("route_ready") and _voip.get("incoming_route_revision") == 2),
                           "registered": bool(_voip.get("device")), "message": _voip_last_status})
 
     async def post(self, request):
@@ -2045,7 +2050,8 @@ class CallWebhookVoIPCallView(HomeAssistantView):
 
     async def get(self, request, call_id):
         call = _voip_calls.get(call_id)
-        return self.json({"active": bool(call and not call["ended"] and time.monotonic() - call["created"] < 90)})
+        return self.json({"active": bool(call and not call["ended"] and time.monotonic() - call["created"] < 90),
+                          "line": call.get("line") if call else None})
 
     async def post(self, request, call_id):
         call = _voip_calls.get(call_id)
@@ -2089,7 +2095,9 @@ class CallWebhookVoIPHookView(HomeAssistantView):
             return web.Response(text="cancelled" if _voip_calls[call_id]["ended"] else "duplicate")
         if len(_voip_calls) >= 64:
             return web.Response(status=429)
-        call = {"created": time.monotonic(), "ended": False, "ready": asyncio.Event()}
+        line = request.query.get("line")
+        call = {"created": time.monotonic(), "ended": False, "ready": asyncio.Event(),
+                "line": int(line) if line in ("1", "2", "3") else None}
         _voip_calls[call_id] = call
         caller = request.query.get("caller", "Unbekannt")[:80]
         if await send_voip_push(call_id, caller):

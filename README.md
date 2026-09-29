@@ -27,7 +27,7 @@ service is not yet available, the assistant reports it rather than pretending
 incoming background calls are ready. Extras retains only the wizard restart entry,
 not separate push/key-import/repair menus.
 
-HA backend API 14 is required: CallWebhook Bootstrap installs it and restarts HA.
+HA backend API 15 is required: CallWebhook Bootstrap installs it and restarts HA.
 It adds one inbound-only PJSIP endpoint matched to the configured FRITZ!Box host,
 so incoming calls also work when the router omits the registration's `line`
 parameter. All three outbound registrations and iPhone authentication are preserved.

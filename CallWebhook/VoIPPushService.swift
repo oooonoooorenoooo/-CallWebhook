@@ -155,6 +155,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             wakeTasks[id] = Task { @MainActor in
                 defer { self.wakeTasks[id] = nil }
                 do {
+                    guard IncomingCallProvider.shared.isWaiting(for: id) else { return }
                     guard let sent = data["sent_at"] as? TimeInterval, abs(Date().timeIntervalSince1970 - sent) < 60 else {
                         throw self.failure("Veralteter Anruf-Push")
                     }
@@ -168,13 +169,18 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                     let inviteDeadline = Date().addingTimeInterval(20)
                     while IncomingCallProvider.shared.isWaiting(for: id) && Date() < inviteDeadline {
                         try await Task.sleep(for: .seconds(1))
+                        guard IncomingCallProvider.shared.isWaiting(for: id) else { return }
                         let state = try await self.callState(id)
+                        guard IncomingCallProvider.shared.isWaiting(for: id) else { return }
                         if state["active"] as? Bool != true { throw self.failure("Anrufer hat aufgelegt") }
                     }
                     if IncomingCallProvider.shared.isWaiting(for: id) { throw self.failure("Kein SIP-Anruf nach Push empfangen") }
                 } catch is CancellationError {
                     return
                 } catch {
+                    // SIP owns the call once its INVITE arrives. A late HA status
+                    // response must not terminate an already ringing/connected call.
+                    guard IncomingCallProvider.shared.isWaiting(for: id) else { return }
                     self.status = error.localizedDescription
                     IncomingCallProvider.shared.end(id: id, failed: true)
                 }

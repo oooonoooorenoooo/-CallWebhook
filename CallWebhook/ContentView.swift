@@ -236,6 +236,7 @@ private struct SetupWizardView: View {
     @State private var asteriskInstalled = false
     @State private var asteriskInstallFailed = false
     @State private var isInstallingAsterisk = false
+    @State private var isContinuingHASetup = false
     @State private var bootstrapProgressStep = 0
     private let bootstrapProgressTotal = 5
     @State private var asteriskProgressStep = 0
@@ -555,16 +556,13 @@ private struct SetupWizardView: View {
                     Text(asteriskConfigStatus)
                         .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
                 }
-                if asteriskInstallFailed {
+                if callWebhookHAReady && (!asteriskInstalled || !callHelperReady) {
                     Button {
-                        Task {
-                            asteriskInstallFailed = false
-                            if !asteriskConfigReady { prepareAsteriskConfiguration() }
-                            if asteriskConfigReady { await installAsteriskConfiguration() }
-                        }
+                        Task { await continueHASetup() }
                     } label: {
-                        Label("Asterisk-Einrichtung erneut versuchen", systemImage: "arrow.clockwise")
+                        Label(asteriskInstallFailed ? "Asterisk-Einrichtung erneut versuchen" : "Asterisk-Einrichtung fortsetzen", systemImage: "arrow.clockwise")
                     }
+                    .disabled(isContinuingHASetup || isInstallingAsterisk || isCreatingCallHelper)
                 }
                 Label("Der Home-Assistant-Token wird ausschließlich sicher im iOS-Keychain gespeichert.", systemImage: "lock.shield")
                     .foregroundStyle(.secondary)
@@ -2090,9 +2088,36 @@ private struct SetupWizardView: View {
             callWebhookHAReady = true
             bootstrapProgressStep = bootstrapProgressTotal
             callWebhookHAStatus = "CallWebhook-Backend bereit (API \(version))"
+            homeAssistantReachable = true
+            await continueHASetup()
         } catch {
             callWebhookHAStatus = "CallWebhook-Prüfung fehlgeschlagen: \(error.localizedDescription)"
         }
+    }
+
+    @MainActor
+    private func continueHASetup() async {
+        // Both an existing backend and a newly bootstrapped backend enter here.
+        // Readiness of the backend alone never means the whole HA step is done.
+        guard step == 2, callWebhookHAReady, haAuthenticated,
+              !isContinuingHASetup, !isInstallingAsterisk, !isCreatingCallHelper else { return }
+        isContinuingHASetup = true
+        defer { isContinuingHASetup = false }
+
+        if !asteriskInstalled {
+            asteriskInstallFailed = false
+            if !asteriskConfigReady { prepareAsteriskConfiguration() }
+            guard asteriskConfigReady else {
+                asteriskInstallFailed = true
+                return
+            }
+            await installAsteriskConfiguration()
+        }
+        guard asteriskInstalled else { return }
+        if !callHelperReady { await ensureCallHelper() }
+        guard callHelperReady, setupSIP.registered else { return }
+        callWebhookHAStatus = "CallWebhook, Asterisk und Anrufstatus-Schalter bereit"
+        if step == 2 { step = 3 }
     }
 
     @MainActor
@@ -2114,21 +2139,9 @@ private struct SetupWizardView: View {
                 try await Task.sleep(nanoseconds: 500_000_000)
                 try Task.checkCancellation()
                 await checkCallWebhookHAIntegration(base: base)
-                if callWebhookHAReady {
-                    callWebhookHAStatus = "CallWebhook-HA-Integration bereit"
-                    if !asteriskConfigReady {
-                        prepareAsteriskConfiguration()
-                    }
-                    if asteriskConfigReady && !asteriskInstalled && !isInstallingAsterisk {
-                        await installAsteriskConfiguration()
-                    }
-                    if asteriskInstalled && callHelperReady {
-                        callWebhookHAStatus = "CallWebhook und Asterisk bereit – Einrichtung wird fortgesetzt"
-                        if step == 2 { step = 3 }
-                        return
-                    }
-                    return
-                }
+                // The successful readiness check already continues Asterisk and
+                // helper setup, including the pre-existing-backend path.
+                if callWebhookHAReady { return }
             } catch {
                 if Task.isCancelled { return }
             }

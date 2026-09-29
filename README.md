@@ -27,7 +27,7 @@ service is not yet available, the assistant reports it rather than pretending
 incoming background calls are ready. Extras retains only the wizard restart entry,
 not separate push/key-import/repair menus.
 
-HA backend API 9 is required: CallWebhook Bootstrap installs it and restarts HA.
+HA backend API 10 is required: CallWebhook Bootstrap installs it and restarts HA.
 In relay mode `/config/callwebhook/voip.json` is created automatically with mode
 0600 and contains the installation credential, not the Apple key. Existing direct
 APNs credentials remain supported for private installations.
@@ -43,3 +43,5 @@ create/reuse a profile with the same certificates and devices, preserving the
 calling/dialing entitlements. No existing profiles or certificates are revoked.
 The API key needs Certificates, Identifiers & Profiles permission; an unavailable
 permission is reported as a signing failure rather than silently removing push.
+
+The final wizard step can provision the operator relay on the existing HA Pi: verified repository discovery, installation, one-time APNs import, automatic startup and public reachability/device enrollment checks. Existing operator credentials are reused. Other users use the published relay URL and never install the operator service.

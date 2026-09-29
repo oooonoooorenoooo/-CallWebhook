@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 9
+BACKEND_API_VERSION = 10
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -841,6 +841,172 @@ async def forward_push_relay(request, endpoint):
         return web.json_response({"ready": False, "error": "Push-Dienst nicht erreichbar"}, status=502)
 
 
+
+_relay_setup_state = {"state": "idle", "progress_step": 0, "message": "Push-Dienst noch nicht eingerichtet"}
+
+
+def relay_operator_credentials(payload):
+    """Validate before mutating Supervisor; never include credentials in errors."""
+    import re
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from cryptography.hazmat.primitives.asymmetric import ec
+    values = {name: payload.get(name, "") for name in ("apns_team_id", "apns_key_id", "apns_private_key")}
+    if not any(values.values()):
+        return {}
+    try:
+        if any(not isinstance(value, str) for value in values.values()):
+            raise ValueError()
+        for name in ("apns_team_id", "apns_key_id"):
+            values[name] = values[name].strip()
+            if not re.fullmatch(r"[A-Z0-9]{10}", values[name]):
+                raise ValueError()
+        pem = values["apns_private_key"]
+        if len(pem) > 4096:
+            raise ValueError()
+        key = load_pem_private_key(pem.encode(), password=None)
+        if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+            raise ValueError()
+    except Exception:
+        raise ValueError("Gültige APNs-.p8-Datei, Team-ID und Key-ID erforderlich") from None
+    return values
+
+
+def provision_push_relay(credentials, report):
+    """Operator-only provisioning; the repository identity determines the slug."""
+    import re
+    repository = "https://github.com/oooonoooorenoooo/-CallWebhook"
+    def repositories(store):
+        return {r["slug"] for r in store.get("repositories", [])
+                if r.get("source", "").rstrip("/").removesuffix(".git").lower() == repository.lower()}
+    report(0, "Push-Repository wird geprüft …")
+    store = supervisor_request("GET", "/store")
+    if not repositories(store):
+        supervisor_request("POST", "/store/repositories", {"repository": repository})
+    supervisor_request("POST", "/store/reload", timeout=120)
+    deadline = time.monotonic() + 90
+    slug = None
+    while time.monotonic() < deadline:
+        store = supervisor_request("GET", "/store")
+        valid = repositories(store)
+        candidates = [a.get("slug", "") for a in store.get("addons", store.get("apps", []))
+            if re.fullmatch(r"[a-z0-9]+_callwebhook_push_relay", a.get("slug", ""))
+            and a["slug"].removesuffix("_callwebhook_push_relay") in valid]
+        if len(candidates) == 1:
+            slug = candidates[0]
+            break
+        time.sleep(0.5)
+    if not slug:
+        raise RuntimeError("Push-Dienst im richtigen Repository noch nicht verfügbar; erneut versuchen")
+    report(1, "Push-Dienst wird installiert …")
+    endpoint = f"/store/addons/{slug}"
+    info = supervisor_request("GET", endpoint)
+    if not info.get("installed") or info.get("update_available"):
+        action = "update" if info.get("installed") else "install"
+        supervisor_request("POST", endpoint + "/" + action, {"background": True})
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            info = supervisor_request("GET", endpoint)
+            if info.get("installed") and not info.get("update_available"):
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("Installation noch nicht fertig; Status später erneut prüfen")
+    report(2, "Push-Dienst wird konfiguriert …")
+    info = supervisor_request("GET", f"/addons/{slug}/info")
+    options = dict(info.get("options", {}))
+    if credentials:
+        options.update(credentials)
+    # Missing credentials are actionable, never falsely mark installation as ready.
+    relay_operator_credentials(options)
+    if not all(options.get(k) for k in ("apns_team_id", "apns_key_id", "apns_private_key")):
+        raise ValueError("Einmalig den APNs-Schlüssel im Assistenten auswählen")
+    changed = options != info.get("options", {})
+    if changed or info.get("boot") != "auto":
+        supervisor_request("POST", f"/addons/{slug}/options", {"options": options, "boot": "auto"})
+    report(3, "Push-Dienst wird gestartet …")
+    if changed and info.get("state") == "started":
+        supervisor_request("POST", f"/addons/{slug}/restart", timeout=120)
+    elif info.get("state") != "started":
+        supervisor_request("POST", f"/addons/{slug}/start", timeout=120)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        info = supervisor_request("GET", f"/addons/{slug}/info")
+        if info.get("state") == "started":
+            try:
+                health = requests.get("http://" + slug.replace("_", "-") + ":8080/healthz", timeout=3,
+                                      allow_redirects=False)
+                if health.status_code == 200 and health.json().get("ready") is True:
+                    return
+            except Exception:
+                pass
+        time.sleep(0.5)
+    raise RuntimeError("Push-Dienst startet noch nicht; Konfiguration und Add-on-Protokoll prüfen")
+
+
+async def run_push_relay_setup(hass, credentials):
+    global _relay_host_cache
+    def report(step, message):
+        # All public state mutations run on HA's event loop, including thread progress.
+        hass.loop.call_soon_threadsafe(_relay_setup_state.update,
+            {"state": "running", "progress_step": step, "message": message})
+    try:
+        deadline = time.monotonic() + 300
+        while not (await setup_readiness(hass))["ready_for_asterisk"]:
+            _relay_setup_state["message"] = "Home Assistant und Bootstrap werden noch gestartet …"
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Home Assistant ist noch nicht bereit; erneut versuchen")
+            await asyncio.sleep(0.5)
+        await hass.async_add_executor_job(provision_push_relay, credentials, report)
+        _relay_host_cache = (0, None)
+        _relay_setup_state.update(state="completed", progress_step=4,
+            message="Push-Dienst läuft; öffentliche Erreichbarkeit und iPhone-Anmeldung werden geprüft")
+    except ValueError as error:
+        _relay_setup_state.update(state="error", message=str(error))
+    except Exception:
+        # Supervisor responses can include option values; do not expose or log them.
+        _relay_setup_state.update(state="error", message="Push-Dienst konnte nicht eingerichtet werden. HA-Bereitschaft, Store und Add-on prüfen; anschließend erneut versuchen.")
+    finally:
+        credentials.clear()
+
+
+class CallWebhookPushRelaySetupView(HomeAssistantView):
+    url = RELAY_PUBLIC_PREFIX + "/setup"
+    name = "api:callwebhook:push-relay:setup"
+    requires_auth = True
+
+    def require_admin(self, request):
+        from homeassistant.components.http.const import KEY_HASS_USER
+        user = request.get(KEY_HASS_USER)
+        if not user or not user.is_admin:
+            raise web.HTTPForbidden()
+
+    async def get(self, request):
+        self.require_admin(request)
+        return self.json(dict(_relay_setup_state))
+
+    async def post(self, request):
+        self.require_admin(request)
+        if _relay_setup_state["state"] == "running":
+            return self.json(dict(_relay_setup_state))
+        if request.content_length is None or request.content_length > 8192:
+            raise web.HTTPRequestEntityTooLarge(max_size=8192, actual_size=request.content_length or 8193)
+        payload = await request.json()
+        if not isinstance(payload, dict) or payload.get("operator") is not True:
+            return self.json({"message": "Nur für den Betreiber des gemeinsamen Push-Dienstes"}, status_code=400)
+        try:
+            credentials = relay_operator_credentials(payload)
+        except ValueError as error:
+            return self.json({"message": str(error)}, status_code=400)
+        # Recheck after reading the body: two simultaneous POSTs must create one job.
+        if _relay_setup_state["state"] == "running":
+            credentials.clear()
+            return self.json(dict(_relay_setup_state))
+        _relay_setup_state.update(state="running", progress_step=0, message="Push-Dienst wird vorbereitet …")
+        request.app["hass"].async_create_background_task(
+            run_push_relay_setup(request.app["hass"], credentials), "CallWebhook Push setup")
+        return self.json(dict(_relay_setup_state))
+
+
 class CallWebhookPushRelayHostView(HomeAssistantView):
     url = RELAY_PUBLIC_PREFIX + "/host"
     name = "api:callwebhook:push-relay:host"
@@ -1535,6 +1701,7 @@ async def async_setup(
     hass.http.register_view(CallWebhookVoIPView)
     hass.http.register_view(CallWebhookVoIPCallView)
     hass.http.register_view(CallWebhookVoIPHookView)
+    hass.http.register_view(CallWebhookPushRelaySetupView)
     hass.http.register_view(CallWebhookPushRelayHostView)
     hass.http.register_view(CallWebhookPushRelayProxyView)
     hass.http.register_view(CallWebhookMailboxSetupView)

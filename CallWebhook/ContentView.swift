@@ -189,6 +189,7 @@ private struct SetupWizardView: View {
     @State private var step = 0
     @State private var functionTestRunning = false
     @ObservedObject private var setupPush = VoIPPushService.shared
+    @State private var operatorPushWorking = false
     @State private var functionTestResults: [String] = []
     @State private var mailboxNumbersVerified = false
     @State private var lineAssignmentStatus = ""
@@ -309,7 +310,7 @@ private struct SetupWizardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .disabled(isSavingMailboxes || setupPush.settingUp)
+                .disabled(isSavingMailboxes || setupPush.settingUp || operatorPushWorking)
 
                 if let mailboxSaveError {
                     Text(mailboxSaveError).foregroundStyle(.red).padding(.horizontal)
@@ -322,7 +323,7 @@ private struct SetupWizardView: View {
                 HStack {
                     if step > 0 {
                         Button("Zurück") { mailboxSaveError = nil; step -= 1 }
-                            .disabled(isSavingMailboxes || setupPush.settingUp)
+                            .disabled(isSavingMailboxes || setupPush.settingUp || operatorPushWorking)
                             .buttonStyle(.bordered)
                     }
                     Spacer()
@@ -337,14 +338,14 @@ private struct SetupWizardView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canContinue || isSavingMailboxes || setupPush.settingUp || (step == 3 && !mailboxSelectionVerified))
+                    .disabled(!canContinue || isSavingMailboxes || setupPush.settingUp || operatorPushWorking || (step == 3 && !mailboxSelectionVerified))
                 }
                 .padding()
             }
             .toolbar {
                 if let onCancel {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Schließen", action: onCancel).disabled(isSavingMailboxes || isProvisioningSIP || functionTestRunning || setupPush.settingUp)
+                        Button("Schließen", action: onCancel).disabled(isSavingMailboxes || isProvisioningSIP || functionTestRunning || setupPush.settingUp || operatorPushWorking)
                     }
                 }
             }
@@ -928,6 +929,9 @@ private struct SetupWizardView: View {
             setupCheck("Mailbox-Auswahl in der App", detail: mailboxSummary, ready: mailboxSelectionVerified)
             setupCheck("Reagierende Rufnummern der FRITZ!-Mailboxen", detail: mailboxNumbersVerified ? "Aus der FRITZ!Box gelesen und abgeglichen" : "Noch nicht geprüft – Funktionstest starten", ready: mailboxNumbersVerified)
             Section("Eingehende Anrufe bei gesperrtem iPhone") {
+                if PushRelayRegistration.shared.baseURL == nil || operatorPushWorking {
+                    VoIPPushSettingsView(working: $operatorPushWorking)
+                }
                 Text(setupPush.backendStatus).font(.caption)
                 if let relayURL = PushRelayRegistration.shared.baseURL {
                     Text(relayURL.absoluteString).font(.caption2).textSelection(.enabled)
@@ -935,8 +939,8 @@ private struct SetupWizardView: View {
                 if setupPush.settingUp { ProgressView("Anruf-Push wird eingerichtet …") }
                 Button("Anruf-Push automatisch einrichten / erneut prüfen") {
                     Task { await setupPush.completeSetup() }
-                }.disabled(setupPush.settingUp || setupSIP.active)
-                Text("Die Anmeldung erfolgt automatisch über CallWebhook. Kein Apple-Konto und keine Schlüsseldatei erforderlich. Für das Gespräch muss Asterisk weiterhin über Heimnetz oder VPN erreichbar sein.")
+                }.disabled(setupPush.settingUp || operatorPushWorking || setupSIP.active)
+                Text("Nach Bereitstellung des gemeinsamen Dienstes erfolgt die Anmeldung automatisch. Nutzer benötigen kein Apple-Konto und keine Schlüsseldatei. Für das Gespräch muss Asterisk weiterhin über Heimnetz oder VPN erreichbar sein.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Funktionstest") {
@@ -2226,7 +2230,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 9,
+            guard version >= 10,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

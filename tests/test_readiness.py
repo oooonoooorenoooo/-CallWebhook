@@ -73,7 +73,7 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
                      'CallWebhookMailboxDeleteView', 'CallWebhookMailboxArchiveView',
                      'CallWebhookAudioView', 'CallWebhookArchiveAudioView', 'CallWebhookVoIPView',
                      'CallWebhookVoIPCallView', 'CallWebhookVoIPHookView',
-                     'CallWebhookPushRelayHostView', 'CallWebhookPushRelayProxyView')
+                     'CallWebhookPushRelaySetupView', 'CallWebhookPushRelayHostView', 'CallWebhookPushRelayProxyView')
             async def mailbox_loop(hass):
                 pass
             async def executor(function, *args):

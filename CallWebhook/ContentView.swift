@@ -184,8 +184,12 @@ struct ContentView: View {
 
 private struct SetupWizardView: View {
     let onFinished: () -> Void
+    var onCancel: (() -> Void)? = nil
 
     @State private var step = 0
+    @State private var functionTestRunning = false
+    @State private var functionTestResults: [String] = []
+    @State private var mailboxNumbersVerified = false
     @State private var fritzHost = "192.168.178.1"
     @State private var fritzUser = ""
     @State private var fritzPassword = ""
@@ -330,6 +334,13 @@ private struct SetupWizardView: View {
                     .disabled(!canContinue || isSavingMailboxes || (step == 3 && !mailboxSelectionVerified))
                 }
                 .padding()
+            }
+            .toolbar {
+                if let onCancel {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Schließen", action: onCancel).disabled(isSavingMailboxes || isProvisioningSIP || functionTestRunning)
+                    }
+                }
             }
             .navigationTitle(titles[step])
             .navigationBarTitleDisplayMode(.inline)
@@ -855,9 +866,66 @@ private struct SetupWizardView: View {
             )
             setupCheck("Anrufstatus-Schalter", detail: callHelperStatus, ready: callHelperReady)
             setupCheck("Mobilfunk-Rufumleitungen", detail: forwardingReady ? "Aktivierung vom Benutzer nach Netzbestätigung bestätigt" : "Aktivierung für die Mobilfunkleitungen noch bestätigen", ready: forwardingReady)
-            setupCheck("Mailboxen", detail: mailboxSummary, ready: mailboxSelectionVerified)
+            setupCheck("Mailbox-Auswahl in der App", detail: mailboxSummary, ready: mailboxSelectionVerified)
+            setupCheck("Reagierende Rufnummern der FRITZ!-Mailboxen", detail: mailboxNumbersVerified ? "Aus der FRITZ!Box gelesen und abgeglichen" : "Noch nicht geprüft – Funktionstest starten", ready: mailboxNumbersVerified)
+            Section("Funktionstest") {
+                Button("Verbindungen und Mailbox-Zuordnung prüfen") {
+                    Task { await runFunctionTest() }
+                }.disabled(functionTestRunning || setupSIP.active)
+                if functionTestRunning { ProgressView("Prüfung läuft …") }
+                ForEach(Array(functionTestResults.enumerated()), id: \.offset) { _, result in
+                    Text(result).font(.caption)
+                }
+                Button("Anrufbeantworter in der FRITZ!Box bearbeiten") {
+                    if let url = URL(string: "http://\(fritzHost)/?lp=tam") { UIApplication.shared.open(url) }
+                }
+                Text("Unter Telefonie → Anrufbeantworter die reagierenden Rufnummern prüfen. Die Auswahl hier speichert die Zuordnung für die Nachrichtenanzeige; sie ändert keine Rufnummern auf der FRITZ!Box.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Anschließend einen ausgehenden Anruf testen, das iPhone sperren und von einem zweiten Telefon anrufen. Für den Mailbox-Test nicht annehmen und eine Nachricht hinterlassen.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             setupCheck("Asterisk + iPhone-SIP", detail: asteriskConfigStatus, ready: asteriskInstalled && setupSIP.registered)
         }
+    }
+
+    @MainActor
+    private func runFunctionTest() async {
+        guard !functionTestRunning else { return }
+        functionTestRunning = true
+        functionTestResults = []
+        mailboxNumbersVerified = false
+        defer { functionTestRunning = false }
+        do {
+            let base = URL(string: "http://192.168.178.\(homeAssistantURL):8123")!
+            let (_, status) = try await HomeAssistantConnection.request(base: base, path: "api/")
+            functionTestResults.append(status == 200 ? "✓ Home Assistant authentifiziert erreichbar" : "✗ Home Assistant: HTTP \(status)")
+        } catch { functionTestResults.append("✗ Home Assistant: \(error.localizedDescription)") }
+        functionTestResults.append(setupSIP.registered ? "✓ iPhone bei Asterisk registriert" : "✗ iPhone nicht bei Asterisk registriert")
+        await VoIPPushService.shared.refreshStatus()
+        functionTestResults.append("Push: \(VoIPPushService.shared.backendStatus)")
+        do {
+            let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = rawHost.contains("://") ? rawHost : "http://\(rawHost):49000"
+            guard let url = URL(string: base + "/tr64desc.xml") else { throw URLError(.badURL) }
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let description = String(decoding: data, as: UTF8.self)
+            guard let service = extractTR064Services(from: description).first(where: { $0.type.contains("X_AVM-DE_TAM") }) else { throw URLError(.unsupportedURL) }
+            let session = URLSession(configuration: .ephemeral, delegate: FritzAuthDelegate(username: fritzUser, password: fritzPassword), delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            let lines = [(1, line1Number, mailbox1TAM), (2, line2Number, sipLine2Enabled ? mailbox2TAM : -1), (3, line3Number, sipLine3Enabled ? mailbox3TAM : -1)]
+            var verified = true
+            for (line, number, tam) in lines where tam >= 0 {
+                let response = try await soapCall(session: session, base: base, serviceType: service.type, controlURL: service.controlURL, action: "GetInfo", arguments: [("NewIndex", String(tam))])
+                // An absent field is not the documented empty value (all numbers).
+                let supported = response.contains("NewPhoneNumbers")
+                let actual = extractSOAPValue("NewPhoneNumbers", from: response)
+                let enabled = ["1", "true"].contains(extractSOAPValue("NewEnable", from: response).lowercased())
+                let matches = supported && enabled && FritzPhoneNumbers.tamResponds(to: number, configured: actual)
+                verified = verified && matches
+                functionTestResults.append("\(matches ? "✓" : "✗") Leitung \(line), AB \(tam + 1): Soll \(number); FRITZ!Box: \(supported ? (actual.isEmpty ? "alle Rufnummern" : actual) : "nicht lesbar")\(enabled ? "" : " (deaktiviert)")")
+            }
+            mailboxNumbersVerified = verified
+        } catch { functionTestResults.append("✗ FRITZ!-Mailbox-Prüfung: \(error.localizedDescription)") }
     }
 
     private var fritzSIPProvisioned: Bool { fritzSIPVerified }
@@ -1827,6 +1895,9 @@ private struct SetupWizardView: View {
     }
 
     private func setClientArguments(index: Int, username: String, password: String, outgoing: String) throws -> [(String, String)] {
+        guard outgoing.filter({ $0.isNumber }).count >= 3 else {
+            throw NSError(domain: "CallWebhook.Setup", code: 4, userInfo: [NSLocalizedDescriptionKey: "Bitte eine echte Festnetzrufnummer auswählen. Ein Leitungsindex ist keine Rufnummer."])
+        }
         let effectiveOutgoing = outgoing.isEmpty ? (fritzVoIPNumbers.first ?? "") : outgoing
         var values: [String: String] = [
             "NewX_AVM-DE_ClientIndex": String(index),
@@ -2368,6 +2439,11 @@ private struct CallsView: View {
     @State private var isSelectingCalls = false
     @State private var selectedCallIDs: Set<UUID> = []
     @AppStorage("hiddenCallIDs") private var hiddenCallIDs = ""
+    @AppStorage("hiddenCallRecords") private var hiddenCallRecords = Data()
+
+    private var hiddenRecords: [CallRecord] {
+        (try? JSONDecoder().decode([CallRecord].self, from: hiddenCallRecords)) ?? []
+    }
 
     private var hiddenIDs: Set<String> {
         Set(hiddenCallIDs.split(separator: "\n").map(String.init))
@@ -2513,12 +2589,15 @@ private struct CallsView: View {
         var ids = hiddenIDs
         ids.formUnion(selectedCallIDs.map { $0.uuidString })
         hiddenCallIDs = ids.sorted().joined(separator: "\n")
+        let records = hiddenRecords + history.conversations.filter { selectedCallIDs.contains($0.id) }
+        if let data = try? JSONEncoder().encode(records) { hiddenCallRecords = data }
         selectedCallIDs.removeAll()
     }
 
     private var filteredCalls: [CallRecord] {
         history.conversations.filter {
             !hiddenIDs.contains($0.id.uuidString) &&
+            !LocalCallHistory.isHidden($0, records: hiddenRecords) &&
             (searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText))
         }
     }
@@ -2552,6 +2631,7 @@ private struct ContactsView: View {
     @ObservedObject var dialer: DialerModel
     @State private var area = ContactArea.privateContacts
     @State private var contacts: [CNContact] = []
+    @State private var showSortOptions = false
     @AppStorage("contactSort") private var sortValue = ContactSort.firstName.rawValue
     @AppStorage("businessContactIDs") private var businessContactIDs = ""
 
@@ -2639,14 +2719,41 @@ private struct ContactsView: View {
                 .pickerStyle(.segmented)
                 .padding()
 
-                Picker("Sortierung", selection: $sortValue) {
-                    ForEach(ContactSort.allCases, id: \.self) { option in
-                        Text(option.rawValue).tag(option.rawValue)
+                Button { showSortOptions = true } label: {
+                    HStack {
+                        Label("Sortierung", systemImage: "arrow.up.arrow.down")
+                        Spacer()
+                        Text(sortValue)
+                        Image(systemName: "chevron.down")
                     }
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .contentShape(Rectangle())
                 }
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .buttonStyle(.plain)
                 .padding(.horizontal)
+                .sheet(isPresented: $showSortOptions) {
+                    NavigationStack {
+                        List(ContactSort.allCases, id: \.self) { option in
+                            Button {
+                                sortValue = option.rawValue
+                                showSortOptions = false
+                            } label: {
+                                HStack {
+                                    Text(option.rawValue)
+                                    Spacer()
+                                    if sortValue == option.rawValue { Image(systemName: "checkmark") }
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .navigationTitle("Kontakte sortieren")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar { Button("Fertig") { showSortOptions = false } }
+                    }
+                    .presentationDetents([.medium])
+                }
 
                 List(visibleContacts, id: \.identifier) { contact in
                     NavigationLink {
@@ -3302,7 +3409,6 @@ private struct DialPadView: View {
 }
 
 private struct ExtrasView: View {
-    @ObservedObject private var incomingRepair = IncomingRouteRepair.shared
     @EnvironmentObject var monitor: CallMonitor
     private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, sipLine2Prefix, sipLine3Prefix, haToken, externalListName, externalListURL, blacklist, whitelist }
     @FocusState private var focusedInputField: InputField?
@@ -3330,7 +3436,7 @@ private struct ExtrasView: View {
     @State private var showMobile = false
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
-    @State private var showMailbox = false
+    @State private var showSetupWizard = false
     @State private var newBlacklistEntry = ""
     @State private var newWhitelistEntry = ""
 
@@ -3345,17 +3451,10 @@ private struct ExtrasView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Standard-Anruf-App") {
-                    Text("In den iPhone-Einstellungen unter Apps → Standard-Apps → Anrufen CallWebhook auswählen.")
-                        .font(.caption)
-                    Button("iPhone-App-Einstellungen öffnen") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    }
+                Section {
+                    Button("Einrichtungsassistent erneut starten") { showSetupWizard = true }
+                        .disabled(sip.active)
                 }
-
-                VoIPPushSettingsView()
 
                 DisclosureGroup("Asterisk / VoIP", isExpanded: $showSIP) {
                     Toggle("Anrufe über Asterisk", isOn: $sipEnabled)
@@ -3386,11 +3485,6 @@ private struct ExtrasView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Button("Eingehende Anrufe reparieren") {
-                        Task { await incomingRepair.run() }
-                    }.disabled(incomingRepair.running || sip.active)
-                    Text(incomingRepair.status).font(.caption)
-
                     Toggle("SIP-Leitung 2 aktiv", isOn: $sipLine2Enabled)
                     if sipLine2Enabled {
                         TextField("Asterisk-Präfix Leitung 2", text: $sipLine2Prefix)
@@ -3419,26 +3513,6 @@ private struct ExtrasView: View {
                         .focused($focusedInputField, equals: .secondary)
                         .submitLabel(.done)
 
-                }
-
-                DisclosureGroup("Mailbox", isExpanded: $showMailbox) {
-                    TextField("Mailbox-Rufnummer", text: $mailboxNumber)
-                        .focused($focusedInputField, equals: .mailbox)
-                        .keyboardType(.phonePad)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    HStack {
-                        Button("Telekom 3311") { mailboxNumber = "3311" }
-                        Spacer()
-                        Button("Vodafone 5500") { mailboxNumber = "5500" }
-                        Spacer()
-                        Button("O2 333") { mailboxNumber = "333" }
-                    }
-
-                    Text("Die Nummer wird lokal gespeichert. Im Mailbox-Reiter kann sie anschließend direkt über Mobilfunk angerufen werden.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 DisclosureGroup("Home Assistant", isExpanded: $showHomeAssistant) {
@@ -3546,6 +3620,9 @@ private struct ExtrasView: View {
                 }
             }
             .navigationTitle("Extras")
+            .fullScreenCover(isPresented: $showSetupWizard) {
+                SetupWizardView(onFinished: { showSetupWizard = false }, onCancel: { showSetupWizard = false })
+            }
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()

@@ -76,6 +76,17 @@ final class LocalCallHistory: ObservableObject {
         return (local + remaining).sorted { $0.date > $1.date }
     }
 
+    static func isHidden(_ call: CallRecord, records: [CallRecord]) -> Bool {
+        records.contains { record in
+            if record.id == call.id { return true }
+            let number = record.number.filter { $0.isNumber }
+            let sameNumber = record.number == call.number ||
+                (!number.isEmpty && number == call.number.filter { $0.isNumber })
+            return !record.number.isEmpty && sameNumber && record.direction == call.direction &&
+                abs(record.date.timeIntervalSince(call.date)) < 2
+        }
+    }
+
     private func persist() {
         if let data = try? JSONEncoder().encode(entries) { defaults.set(data, forKey: key) }
     }

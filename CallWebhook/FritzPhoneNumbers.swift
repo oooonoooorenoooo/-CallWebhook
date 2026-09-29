@@ -2,6 +2,14 @@ import Foundation
 
 /// Reads actual phone-number fields, never account counts or account indexes.
 enum FritzPhoneNumbers {
+    static func tamResponds(to number: String, configured: String) -> Bool {
+        let expected = number.filter { $0.isNumber }
+        // A line index or account count is never a public telephone number.
+        guard expected.count >= 3 else { return false }
+        if configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return configured.split(separator: ",").contains { $0.filter { $0.isNumber } == expected }
+    }
+
     static func parse(_ xml: String) -> [String] {
         let reader = NumberReader()
         let parser = XMLParser(data: Data(xml.utf8))

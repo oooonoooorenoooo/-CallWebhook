@@ -35,6 +35,9 @@ struct LocalCallHistoryTests {
         let own = history.entries.first { $0.id == outgoing }!
         let duplicate = CallRecord(id: UUID(), date: date.addingTimeInterval(1), number: "03012345", direction: "outgoing", status: "connected")
         let later = CallRecord(id: UUID(), date: date.addingTimeInterval(60), number: "03012345", direction: "outgoing", status: "connected")
+        assert(LocalCallHistory.isHidden(duplicate, records: [own]))
+        assert(!LocalCallHistory.isHidden(later, records: [own]))
+        assert(LocalCallHistory.isHidden(own, records: [own]))
         let merged = LocalCallHistory.merged(local: [own], system: [own, duplicate, later])
         assert(merged.count == 2 && merged.first?.id == later.id)
         assert(LocalCallHistory.merged(local: history.entries, system: []).count == history.entries.count)

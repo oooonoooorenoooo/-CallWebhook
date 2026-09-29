@@ -3,6 +3,10 @@ import Foundation
 @main
 struct FritzPhoneNumbersTests {
     static func main() {
+        precondition(!FritzPhoneNumbers.tamResponds(to: "03012345", configured: "3"))
+        precondition(!FritzPhoneNumbers.tamResponds(to: "3", configured: ""))
+        precondition(FritzPhoneNumbers.tamResponds(to: "03012345", configured: "030 12345,03099999"))
+        precondition(FritzPhoneNumbers.tamResponds(to: "03012345", configured: ""))
         let numbers = ["030111111", "030222222", "+4930333333", "030444444"]
         let list = "<List>" + numbers.map { "<Item><Number>\($0)</Number><Index>0</Index></Item>" }.joined() + "</List>"
         let escaped = list.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")

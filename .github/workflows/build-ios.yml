@@ -7,6 +7,22 @@ on:
     branches: [ main ]
 
 jobs:
+  push-relay-addon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Raspberry Pi push-service add-on
+        uses: docker/build-push-action@v6
+        with:
+          context: callwebhook_push_relay
+          platforms: linux/arm64
+          load: true
+          tags: callwebhook-push-relay:ci
+      - name: Verify ARM64 relay imports
+        run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import run; print('ARM64 relay dependencies ready')"
+
   development:
     runs-on: macos-26
     steps:
@@ -106,7 +122,7 @@ jobs:
           path: CallWebhook-signed.ipa
 
   testflight:
-    needs: development
+    needs: [development, push-relay-addon]
     runs-on: macos-26
     concurrency:
       group: callwebhook-testflight-main

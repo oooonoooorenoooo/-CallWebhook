@@ -57,8 +57,9 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             status = "iPhone für Anruf-Push registriert"
             let state = try await request(path: "api/callwebhook/voip")
             backendAPIVersion = state["api_version"] as? Int ?? 0
+            if backendAPIVersion >= 9 { try await PushRelayRegistration.shared.discoverOperatorService() }
             if PushRelayRegistration.shared.baseURL != nil {
-                guard (state["api_version"] as? Int ?? 0) >= 8 else {
+                guard (state["api_version"] as? Int ?? 0) >= 9 else {
                     throw failure("CallWebhook Bootstrap muss die HA-Komponente für den gemeinsamen Push-Dienst aktualisieren.")
                 }
                 let registration = try await PushRelayRegistration.shared.register(token: currentToken, environment: environment ?? "")
@@ -126,7 +127,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                 try await Task.sleep(for: .seconds(1))
                 if let (data, code) = try? await HomeAssistantConnection.request(base: base, path: "api/callwebhook/setup/status"),
                    code == 200, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (value["api_version"] as? Int ?? 0) >= 8, value["ready_for_asterisk"] as? Bool == true {
+                   (value["api_version"] as? Int ?? 0) >= 9, value["ready_for_asterisk"] as? Bool == true {
                     await synchronize()
                     await refreshStatus()
                     return

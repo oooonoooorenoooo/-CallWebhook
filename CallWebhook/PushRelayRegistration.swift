@@ -16,12 +16,33 @@ private final class PushRelaySessionDelegate: NSObject, URLSessionTaskDelegate, 
 final class PushRelayRegistration {
     static let shared = PushRelayRegistration()
     private let session = URLSession(configuration: .ephemeral, delegate: PushRelaySessionDelegate(), delegateQueue: nil)
+    private var discoveredURL: URL?
+
+    func discoverOperatorService() async throws {
+        guard baseURL == nil, let ha = HomeAssistantConnection.configuredBase else { return }
+        let (data, code) = try await HomeAssistantConnection.request(base: ha,
+            path: "api/callwebhook/push-relay/host", timeout: 35)
+        guard code == 200, let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard status["available"] as? Bool == true else {
+            if status["operator"] as? Bool == true {
+                throw failure(status["message"] as? String ?? "Betreiber-Push-Dienst noch nicht erreichbar")
+            }
+            return
+        }
+        discoveredURL = validatedURL(status["public_url"] as? String ?? "")
+    }
 
     var baseURL: URL? {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: "CallWebhookPushRelayURL") as? String,
-              let url = URL(string: value), url.scheme == "https", url.host != nil,
-              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-              url.path.isEmpty || url.path == "/" else { return nil }
+        if let value = Bundle.main.object(forInfoDictionaryKey: "CallWebhookPushRelayURL") as? String,
+           let configured = validatedURL(value) { return configured }
+        return discoveredURL
+    }
+
+    private func validatedURL(_ value: String) -> URL? {
+        guard let url = URL(string: value), url.scheme == "https", url.host != nil,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
+        let path = url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
+        guard ["", "/api/callwebhook/push-relay"].contains(path) else { return nil }
         return url
     }
 

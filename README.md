@@ -15,6 +15,10 @@ The app uses Apple App Attest to enroll automatically; each HA installation rece
 only its own device-scoped credential. **The operator must deploy the relay and
 set `CALLWEBHOOK_PUSH_RELAY_URL` before automatic background push can work.**
 No deployed URL or working live APNs service is included in the repository.
+For the operator's existing Home Assistant OS / Raspberry Pi, install the
+[`CallWebhook Push-Dienst` add-on](callwebhook_push_relay/DOCS.md). The HA component
+provides a narrow relay API over the existing Nabu Casa HTTPS connection; app
+users do not install this operator add-on.
 
 The final assistant step automatically registers push and provisions the Asterisk
 incoming route. Existing completed installations also attempt this on app start.
@@ -23,7 +27,7 @@ service is not yet available, the assistant reports it rather than pretending
 incoming background calls are ready. Extras retains only the wizard restart entry,
 not separate push/key-import/repair menus.
 
-HA backend API 8 is required: CallWebhook Bootstrap installs it and restarts HA.
+HA backend API 9 is required: CallWebhook Bootstrap installs it and restarts HA.
 In relay mode `/config/callwebhook/voip.json` is created automatically with mode
 0600 and contains the installation credential, not the Apple key. Existing direct
 APNs credentials remain supported for private installations.

@@ -929,6 +929,9 @@ private struct SetupWizardView: View {
             setupCheck("Reagierende Rufnummern der FRITZ!-Mailboxen", detail: mailboxNumbersVerified ? "Aus der FRITZ!Box gelesen und abgeglichen" : "Noch nicht geprüft – Funktionstest starten", ready: mailboxNumbersVerified)
             Section("Eingehende Anrufe bei gesperrtem iPhone") {
                 Text(setupPush.backendStatus).font(.caption)
+                if let relayURL = PushRelayRegistration.shared.baseURL {
+                    Text(relayURL.absoluteString).font(.caption2).textSelection(.enabled)
+                }
                 if setupPush.settingUp { ProgressView("Anruf-Push wird eingerichtet …") }
                 Button("Anruf-Push automatisch einrichten / erneut prüfen") {
                     Task { await setupPush.completeSetup() }
@@ -2223,7 +2226,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 8,
+            guard version >= 9,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

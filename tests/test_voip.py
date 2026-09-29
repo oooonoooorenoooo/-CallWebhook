@@ -32,7 +32,8 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
                  'CallWebhookVoIPView', 'CallWebhookVoIPCallView', 'CallWebhookVoIPHookView')
         nodes = [n for n in ast.parse(SOURCE.read_text()).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in names]
         self.ns = dict(json=json, asyncio=asyncio, os=os, secrets=secrets, time=time,
-            hashlib=hashlib, urlparse=urlparse, BACKEND_API_VERSION=8,
+            hashlib=hashlib, urlparse=urlparse, BACKEND_API_VERSION=9,
+            RELAY_PUBLIC_PREFIX='/api/callwebhook/push-relay',
             BASE_DIR=path, VOIP_FILE=path/'voip.json', VOIP_TOPIC='test.app.voip', _voip={},
             _voip_calls={}, _voip_clients={}, _voip_lock=asyncio.Lock(), _voip_last_status='',
             HomeAssistantView=View, web=SimpleNamespace(Response=lambda **kw: SimpleNamespace(**kw)))

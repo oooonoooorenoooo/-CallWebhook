@@ -6,7 +6,18 @@ bereits eingerichtete Apps registrieren sich automatisch, sobald die Dienst-URL
 im Build hinterlegt ist. Ohne diese URL zeigt die App den fehlenden Dienst an.
 Ein noch nicht betriebener Dienst bedeutet: Hintergrund-Push funktioniert noch nicht.
 
-## Einmalige Inbetriebnahme durch den Betreiber
+## Vorhandener Home-Assistant-Pi
+
+Für HA OS auf dem Raspberry Pi gibt es das Betreiber-Add-on
+[`CallWebhook Push-Dienst`](../callwebhook_push_relay/DOCS.md).
+Die HA-Komponente ab API 9 stellt einen begrenzten HTTPS-Zugang über die bestehende
+Nabu-Casa-Adresse bereit. Keine Router-Portfreigabe und kein separater Server
+sind dafür erforderlich. Die App erkennt diesen Betreiber-Dienst auf dem eigenen
+HA automatisch; für andere Nutzer wird seine URL einmal im App-Build hinterlegt.
+Diese Variante wurde automatisiert getestet, benötigt aber noch die Installation
+und einen echten Anruftest auf dem Betreiber-Pi.
+
+## Alternativ: eigener Docker-Server
 
 Benötigt werden ein dauerhaft erreichbarer Docker-Server, ein DNS-Name mit
 Port 80/443 und ein **APNs**-Schlüssel des Apple-Teams dieser App. Ein

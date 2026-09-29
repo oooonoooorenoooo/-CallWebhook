@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 8
+BACKEND_API_VERSION = 9
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -762,6 +762,136 @@ def supervisor_request(method, endpoint, payload=None, timeout=30):
     return body.get("data", {})
 
 
+def find_push_relay():
+    """Resolve only this repository's installed relay, never a request URL."""
+    import re
+    installed = supervisor_request("GET", "/addons", timeout=5)
+    candidates = [item.get("slug", "") for item in installed.get("addons", [])
+                  if re.fullmatch(r"[a-z0-9]+_callwebhook_push_relay", item.get("slug", ""))]
+    if not candidates:
+        return None
+    store = supervisor_request("GET", "/store", timeout=5)
+    repositories = {item["slug"] for item in store.get("repositories", [])
+        if item.get("source", "").rstrip("/").removesuffix(".git").lower()
+        == "https://github.com/oooonoooorenoooo/-callwebhook"}
+    candidates = [slug for slug in candidates if slug.removesuffix("_callwebhook_push_relay") in repositories]
+    if len(candidates) != 1:
+        return None
+    slug = candidates[0]
+    info = supervisor_request("GET", f"/addons/{slug}/info", timeout=5)
+    if info.get("state") != "started":
+        return None
+    return "http://" + slug.replace("_", "-") + ":8080"
+
+
+_relay_host_cache = (0, None)
+_relay_host_lock = asyncio.Lock()
+
+
+async def push_relay_target(hass):
+    global _relay_host_cache
+    async with _relay_host_lock:
+        if _relay_host_cache[0] <= time.monotonic():
+            try:
+                target = await hass.async_add_executor_job(find_push_relay)
+            except Exception:
+                # A transient store/Supervisor failure must not disconnect an
+                # already verified relay. Its own HTTP health remains decisive.
+                target = _relay_host_cache[1]
+            _relay_host_cache = (time.monotonic() + (300 if target else 30), target)
+        return _relay_host_cache[1]
+
+
+RELAY_PUBLIC_PREFIX = "/api/callwebhook/push-relay"
+RELAY_PUBLIC_ROUTES = {("GET", "healthz"), ("POST", "v1/challenge"),
+    ("POST", "v1/register"), ("GET", "v1/registration"),
+    ("DELETE", "v1/registration"), ("POST", "v1/ring")}
+
+
+async def forward_push_relay(request, endpoint):
+    import re
+    if (request.method, endpoint) not in RELAY_PUBLIC_ROUTES or request.query_string:
+        raise web.HTTPNotFound()
+    headers = {"Content-Type": "application/json"}
+    if endpoint in ("v1/registration", "v1/ring"):
+        authorization = request.headers.get("Authorization", "")
+        if not re.fullmatch(r"Bearer [0-9a-f]{64}", authorization):
+            raise web.HTTPUnauthorized()
+        headers["Authorization"] = authorization
+    if request.content_length is not None and request.content_length > 32768:
+        raise web.HTTPRequestEntityTooLarge(max_size=32768, actual_size=request.content_length)
+    body = bytearray()
+    async for chunk in request.content.iter_chunked(4096):
+        body.extend(chunk)
+        if len(body) > 32768:
+            raise web.HTTPRequestEntityTooLarge(max_size=32768, actual_size=len(body))
+    target = await push_relay_target(request.app["hass"])
+    if not target:
+        return web.json_response({"ready": False, "error": "Push-Dienst-Add-on nicht gestartet"}, status=503)
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=8)) as session:
+            async with session.request(request.method, target + "/" + endpoint,
+                    data=bytes(body) or None, headers=headers, allow_redirects=False) as response:
+                result = await response.read()
+                if len(result) > 65536 or 300 <= response.status < 400:
+                    raise ValueError("Invalid relay response")
+                return web.Response(body=result, status=response.status, content_type="application/json",
+                                    headers={"Cache-Control": "no-store"})
+    except Exception:
+        return web.json_response({"ready": False, "error": "Push-Dienst nicht erreichbar"}, status=502)
+
+
+class CallWebhookPushRelayHostView(HomeAssistantView):
+    url = RELAY_PUBLIC_PREFIX + "/host"
+    name = "api:callwebhook:push-relay:host"
+    requires_auth = True
+
+    async def get(self, request):
+        from homeassistant.helpers.network import get_url, NoURLAvailableError
+        hass = request.app["hass"]
+        target = await push_relay_target(hass)
+        if not target:
+            return self.json({"available": False, "message": "Betreiber-Add-on nicht gestartet"})
+        try:
+            public_url = get_url(hass, require_ssl=True, allow_internal=False,
+                                 allow_ip=False, prefer_cloud=True).rstrip("/") + RELAY_PUBLIC_PREFIX
+        except NoURLAvailableError:
+            return self.json({"available": False, "operator": True, "message": "Öffentliche HTTPS-Adresse fehlt. Nabu-Casa-Fernzugriff einschalten."})
+        local_ready = public_ready = False
+        async with ClientSession(timeout=ClientTimeout(total=8)) as session:
+            for url, local in ((target + "/healthz", True), (public_url + "/healthz", False)):
+                try:
+                    async with session.get(url, allow_redirects=False) as response:
+                        ready = response.status == 200 and (await response.json()).get("ready") is True
+                        if local:
+                            local_ready = ready
+                        else:
+                            public_ready = ready
+                except Exception:
+                    pass
+        return self.json({"available": local_ready and public_ready, "operator": True, "public_url": public_url,
+            "local_ready": local_ready, "public_ready": public_ready,
+            "message": "Push-Dienst öffentlich erreichbar" if local_ready and public_ready
+                       else "Push-Dienst noch nicht öffentlich erreichbar. Add-on und Nabu-Casa-Fernzugriff prüfen."})
+
+
+class CallWebhookPushRelayProxyView(HomeAssistantView):
+    # No HA login is needed by other app installations. The relay verifies App
+    # Attest proofs and device-scoped grants. This is not a general-purpose proxy.
+    url = RELAY_PUBLIC_PREFIX + "/{endpoint:.*}"
+    name = "api:callwebhook:push-relay:proxy"
+    requires_auth = False
+
+    async def get(self, request, endpoint):
+        return await forward_push_relay(request, endpoint)
+
+    async def post(self, request, endpoint):
+        return await forward_push_relay(request, endpoint)
+
+    async def delete(self, request, endpoint):
+        return await forward_push_relay(request, endpoint)
+
+
 def wait_for_asterisk_started(addon):
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
@@ -1282,7 +1412,7 @@ class CallWebhookVoIPView(HomeAssistantView):
                         raise ValueError()
                     parsed = urlparse(url)
                     if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-                            or parsed.query or parsed.fragment or parsed.path not in ("", "/")
+                            or parsed.query or parsed.fragment or parsed.path.rstrip("/") not in ("", RELAY_PUBLIC_PREFIX)
                             or not re.fullmatch(r"[0-9a-f]{64}", credential)):
                         raise ValueError()
                     url = url.rstrip("/")
@@ -1405,6 +1535,8 @@ async def async_setup(
     hass.http.register_view(CallWebhookVoIPView)
     hass.http.register_view(CallWebhookVoIPCallView)
     hass.http.register_view(CallWebhookVoIPHookView)
+    hass.http.register_view(CallWebhookPushRelayHostView)
+    hass.http.register_view(CallWebhookPushRelayProxyView)
     hass.http.register_view(CallWebhookMailboxSetupView)
 
     hass.http.register_view(

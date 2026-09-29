@@ -1,0 +1,19 @@
+name: CallWebhook Push-Dienst
+version: "1.0.0"
+slug: callwebhook_push_relay
+description: Gemeinsamer Anruf-Push-Dienst – nur auf dem HA des App-Betreibers installieren
+url: https://github.com/oooonoooorenoooo/-CallWebhook
+startup: application
+boot: auto
+init: false
+arch:
+  - aarch64
+  - amd64
+options:
+  apns_team_id: ""
+  apns_key_id: ""
+  apns_private_key: ""
+schema:
+  apns_team_id: str
+  apns_key_id: str
+  apns_private_key: password

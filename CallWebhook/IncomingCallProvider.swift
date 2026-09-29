@@ -9,6 +9,7 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
     private var callID: UUID?
     private var waitingForSIP = false
     private var finished: [UUID: Date] = [:]
+    var currentCallID: UUID? { callID }
     var hasCall: Bool { callID != nil }
 
     private override init() {
@@ -34,6 +35,7 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
             return
         }
         let busy = callID != nil || finished[id] != nil
+        LocalCallHistory.shared.begin(id: id, number: caller, incoming: true)
         if !busy { callID = id; waitingForSIP = true }
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: caller)
@@ -46,9 +48,11 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
             completion()
             Task { @MainActor in
                 if busy {
+                    LocalCallHistory.shared.end(id, reason: "declined")
                     if error == nil { self.provider.reportCall(with: id, endedAt: Date(), reason: .failed) }
                     VoIPPushService.shared.finish(id)
                 } else if let error, self.callID == id {
+                    LocalCallHistory.shared.end(id, reason: "failed")
                     self.callID = nil
                     self.waitingForSIP = false
                     VoIPPushService.shared.finish(id)
@@ -86,6 +90,7 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
 
     func ended(failed: Bool = false) {
         guard let id = callID else { return }
+        LocalCallHistory.shared.end(id, reason: failed ? "failed" : nil)
         finished[id] = Date()
         callID = nil
         waitingForSIP = false
@@ -124,6 +129,7 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
     nonisolated func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         Task { @MainActor in
             guard self.callID == action.callUUID else { action.fail(); return }
+            LocalCallHistory.shared.end(action.callUUID, reason: "declined")
             self.finished[action.callUUID] = Date()
             self.callID = nil
             self.waitingForSIP = false

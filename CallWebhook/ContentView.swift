@@ -171,32 +171,14 @@ struct ContentView: View {
                 .tag(4)
         }
         .tint(.blue)
-        .safeAreaInset(edge: .bottom) {
-            if callSIP.active || dialer.isDialing || dialer.status != "Bereit" {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(dialer.status).font(.subheadline)
-                        if !callSIP.callStatus.isEmpty {
-                            Text(callSIP.callStatus).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if callSIP.incoming {
-                        Button { IncomingCallProvider.shared.answer() } label: {
-                            Image(systemName: "phone.fill").foregroundStyle(.white).padding().background(.green, in: Circle())
-                        }.accessibilityLabel("Anruf annehmen")
-                    }
-                    if callSIP.active || dialer.isDialing {
-                        Button { dialer.hangup() } label: {
-                            Image(systemName: "phone.down.fill").foregroundStyle(.white).padding().background(.red, in: Circle())
-                        }.accessibilityLabel("Anruf beenden")
-                    }
-                }
-                .padding(12)
-                .background(.regularMaterial)
-            }
+        .onChange(of: dialer.isDialing) { _, dialing in
+            if dialing { selectedTab = 3 }
+        }
+        .onChange(of: callSIP.incoming) { _, incoming in
+            if incoming { selectedTab = 3 }
         }
     }
+
 }
 
 
@@ -2377,6 +2359,7 @@ private struct SetupWizardView: View {
 }
 
 private struct CallsView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     @StateObject private var history = CallHistoryModel()
@@ -2402,9 +2385,10 @@ private struct CallsView: View {
 
                 if selection == 0 {
                     if let error = history.errorMessage {
-                        ContentUnavailableView("Anrufliste nicht verfügbar", systemImage: "exclamationmark.triangle", description: Text(error))
-                    } else if filteredCalls.isEmpty {
-                        ContentUnavailableView(searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer", systemImage: "phone", description: Text("Die Mobilfunk-Anrufhistorie erscheint hier."))
+                        Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                    }
+                    if filteredCalls.isEmpty {
+                        ContentUnavailableView(searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer", systemImage: "phone", description: Text("Deine eingehenden, ausgehenden und verpassten Anrufe erscheinen hier."))
                     } else {
                         List(filteredCalls) { call in
                             Button {
@@ -2501,6 +2485,9 @@ private struct CallsView: View {
                 }
             }
             .task { await history.refresh() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { Task { await history.refresh() } }
+            }
         }
     }
 
@@ -2529,24 +2516,24 @@ private struct CallsView: View {
         selectedCallIDs.removeAll()
     }
 
-    private var filteredCalls: [ConversationHistoryManager.RecentConversation] {
+    private var filteredCalls: [CallRecord] {
         history.conversations.filter {
             !hiddenIDs.contains($0.id.uuidString) &&
             (searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText))
         }
     }
 
-    private func directionText(_ call: ConversationHistoryManager.RecentConversation) -> String {
+    private func directionText(_ call: CallRecord) -> String {
         String(describing: call.direction).lowercased().contains("incoming") ? "Eingehend" : "Ausgehend"
     }
 
-    private func directionIcon(_ call: ConversationHistoryManager.RecentConversation) -> String {
+    private func directionIcon(_ call: CallRecord) -> String {
         String(describing: call.direction).lowercased().contains("incoming") ? "phone.arrow.down.left" : "phone.arrow.up.right"
     }
 
-    private func callStatusColor(_ call: ConversationHistoryManager.RecentConversation) -> Color {
+    private func callStatusColor(_ call: CallRecord) -> Color {
         let status = String(describing: call.status).lowercased()
-        return status.contains("connected") ? .green : .red
+        return status == "connected" || call.connectedAt != nil || call.duration > 0 ? .green : .red
     }
 }
 
@@ -3122,6 +3109,7 @@ private struct DialPadView: View {
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     @ObservedObject private var sip = SIPService.shared
+    @State private var callStatus = "Bereit"
     let primaryPhoneNumber: String
     let secondaryPhoneNumber: String
     let sipLine2Enabled: Bool
@@ -3203,8 +3191,17 @@ private struct DialPadView: View {
                     }
                 }
 
-                HStack(spacing: 18) {
-                    if CellularRouting.cellularOnlyNumber(dialer.number) != nil {
+                HStack(spacing: 10) {
+                    if sip.incoming {
+                        Button { IncomingCallProvider.shared.answer() } label: {
+                            Image(systemName: "phone.fill")
+                                .font(.system(size: 27, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 72, height: 72)
+                                .background(.green, in: Circle())
+                        }.accessibilityLabel("Anruf annehmen")
+                        endCallButton
+                    } else if CellularRouting.cellularOnlyNumber(dialer.number) != nil {
                         callButton(line: nil)
                     } else if sipEnabled {
                         sipCallButton(line: 1)
@@ -3221,10 +3218,14 @@ private struct DialPadView: View {
                     }
                 }
 
-                Text(dialer.status)
-                    .font(.footnote)
+                Text(callStatus)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(height: 20)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .onAppear { callStatus = sip.active ? sip.callStatus : dialer.status }
+                    .onChange(of: dialer.status) { _, value in callStatus = value }
+                    .onChange(of: sip.callStatus) { _, value in callStatus = value }
 
                 Spacer()
             }
@@ -3241,10 +3242,10 @@ private struct DialPadView: View {
                 .font(.system(size: 27, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 72, height: 72)
-                .background((monitor.active || sip.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
+                .background((monitor.active || sip.active || dialer.isDialing) ? Color.red : Color.gray.opacity(0.45), in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!monitor.active && !sip.active)
+        .disabled(!monitor.active && !sip.active && !dialer.isDialing)
         .accessibilityLabel("Anruf beenden")
     }
 

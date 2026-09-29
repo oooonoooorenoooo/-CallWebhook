@@ -11,6 +11,7 @@ final class SIPService: ObservableObject {
 
     @Published private(set) var callStatus = ""
     @Published private(set) var incoming = false
+    private var historyID: UUID?
     private var trackedCall: Call?
     private var core: Core?
     private var iterateTimer: Timer?
@@ -107,6 +108,7 @@ final class SIPService: ObservableObject {
                 return
             }
             trackedCall = call
+            historyID = IncomingCallProvider.shared.currentCallID
             active = true
             incoming = true
             callStatus = "Eingehender Anruf: \(caller)"
@@ -114,18 +116,21 @@ final class SIPService: ObservableObject {
         guard let call = trackedCall else { return }
         let state = String(describing: call.state).lowercased()
         if state.contains("error") {
+            finishHistory(reason: "failed")
             callStatus = "Anruf fehlgeschlagen: \(call.errorInfo?.phrase ?? "SIP-Verbindung abgelehnt")"
             active = false
             trackedCall = nil
             incoming = false
             IncomingCallProvider.shared.ended(failed: state.contains("error"))
         } else if state == "end" || state.contains("released") {
+            finishHistory()
             callStatus = "Anruf beendet"
             active = false
             trackedCall = nil
             incoming = false
             IncomingCallProvider.shared.ended(failed: state.contains("error"))
         } else if state.contains("streamsrunning") || state == "connected" {
+            if let historyID { LocalCallHistory.shared.connected(historyID) }
             incoming = false
             callStatus = "Gespräch verbunden"
         } else if state.contains("incoming") {
@@ -177,11 +182,15 @@ final class SIPService: ObservableObject {
         let targetNumber = prefix + dialNumber
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
         core.configureAudioSession()
+        let callID = UUID()
+        LocalCallHistory.shared.begin(id: callID, number: number, incoming: false)
         guard let call = core.inviteAddress(addr: target) else {
+            LocalCallHistory.shared.end(callID, reason: "failed")
             callStatus = "SIP konnte den Anruf nicht starten"
             throw SIPError.inviteFailed
         }
         trackedCall = call
+        historyID = callID
         callStatus = "Leitung \(line): \(number) – Verbindung wird aufgebaut …"
         active = true
         status = "SIP Leitung \(line): \(number)"
@@ -204,6 +213,11 @@ final class SIPService: ObservableObject {
         callStatus = "Anruf konnte nicht angezeigt/angenommen werden: \(error.localizedDescription)"
     }
 
+    private func finishHistory(reason: String? = nil) {
+        if let historyID { LocalCallHistory.shared.end(historyID, reason: reason) }
+        historyID = nil
+    }
+
     func hangup() {
         guard let core else { IncomingCallProvider.shared.ended(); return }
         do {
@@ -212,8 +226,10 @@ final class SIPService: ObservableObject {
             status = "SIP-Auflegen fehlgeschlagen: \(error.localizedDescription)"
             return
         }
+        finishHistory(reason: incoming ? "declined" : "cancelled")
         active = false
         incoming = false
+        callStatus = "Anruf beendet"
         trackedCall = nil
         IncomingCallProvider.shared.ended()
         status = "SIP-Anruf beendet"

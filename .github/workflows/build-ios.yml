@@ -25,6 +25,10 @@ jobs:
         run: |
           swiftc CallWebhook/CellularRouting.swift tests/CellularRoutingTests.swift -o "$RUNNER_TEMP/cellular-routing-tests"
           "$RUNNER_TEMP/cellular-routing-tests"
+      - name: Test existing FRITZ SIP client readiness
+        run: |
+          swiftc CallWebhook/FritzSIPReadiness.swift tests/FritzSIPReadinessTests.swift -o "$RUNNER_TEMP/fritz-sip-readiness-tests"
+          "$RUNNER_TEMP/fritz-sip-readiness-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Install development signing

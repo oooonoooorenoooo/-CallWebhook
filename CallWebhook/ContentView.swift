@@ -225,7 +225,7 @@ private struct SetupWizardView: View {
     @State private var fritzSIPWriteAction = ""
     @State private var fritzSIPWriteStatus = "Schreibschnittstelle noch nicht geprüft"
     @State private var fritzSIPWriteArguments: [String] = []
-    @State private var sipProvisionStatus = "Noch nicht ausgeführt"
+    @State private var sipProvisionStatus = "Vorhandene SIP-Nebenstellen werden beim FRITZ!Box-Test geprüft"
     @State private var isProvisioningSIP = false
     @State private var homeAssistantReachable = false
     @State private var homeAssistantStatus = "Noch nicht geprüft"
@@ -264,21 +264,6 @@ private struct SetupWizardView: View {
         var id: Int { index }
         var displayName: String {
             "\(name.isEmpty ? "Anrufbeantworter \(index + 1)" : name)\(enabled ? "" : " (aus)")"
-        }
-    }
-
-    private struct FritzSIPClient: Identifiable, Hashable {
-        let index: Int
-        let username: String
-        let phoneName: String
-        let outgoingNumber: String
-        let internalNumber: String
-
-        var id: Int { index }
-        var displayName: String {
-            let name = phoneName.isEmpty ? username : phoneName
-            let number = outgoingNumber.isEmpty ? "" : " – \(outgoingNumber)"
-            return "\(name)\(number)"
         }
     }
 
@@ -451,14 +436,14 @@ private struct SetupWizardView: View {
                             .foregroundStyle(fritzSIPProvisioned ? .green : .blue)
                         }
                         .disabled(fritzSIPProvisioned || isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil || (sipLine3Enabled && sipClient3Index == nil))
-                        Text(sipProvisionStatus)
+                        Text(fritzSIPVerified && !isProvisioningSIP ? fritzSIPSummary : sipProvisionStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
             Section {
-                Label("Nach erfolgreicher Erreichbarkeitsprüfung werden im nächsten Ausbauschritt TR-064-Anmeldung und SIP-Nebenstellen automatisch provisioniert.", systemImage: "gearshape.2")
+                Label("Vorhandene CallWebhook-SIP-Nebenstellen werden wiederverwendet. Nur fehlende Nebenstellen müssen eingerichtet werden.", systemImage: "gearshape.2")
             }
         }
     }
@@ -737,21 +722,20 @@ private struct SetupWizardView: View {
         }
     }
 
+    private var missingFritzSIPClients: [String] {
+        FritzSIPReadiness.missingClients(in: fritzSIPClients, thirdLineEnabled: sipLine3Enabled)
+    }
+
     private var fritzSIPVerified: Bool {
-        let expected2 = line2Number.isEmpty ? line1Number : line2Number
-        let first = fritzSIPClients.contains {
-            ($0.username == "callwhapp1" || $0.phoneName == "callwhapp1")
-                && (line1Number.isEmpty || $0.outgoingNumber == line1Number)
+        fritzAuthenticated && missingFritzSIPClients.isEmpty
+    }
+
+    private var fritzSIPSummary: String {
+        if fritzSIPVerified {
+            return "Alle benötigten SIP-Nebenstellen sind vorhanden und werden verwendet. Keine Neuanlage erforderlich."
         }
-        let second = fritzSIPClients.contains {
-            ($0.username == "callwhapp2" || $0.phoneName == "callwhapp2")
-                && (expected2.isEmpty || $0.outgoingNumber == expected2)
-        }
-        let third = !sipLine3Enabled || fritzSIPClients.contains {
-            ($0.username == "callwhapp3" || $0.phoneName == "callwhapp3")
-                && (line3Number.isEmpty || $0.outgoingNumber == line3Number)
-        }
-        return first && second && third
+        if !fritzAuthenticated { return "FRITZ!Box-Anmeldung noch nicht bestätigt" }
+        return "Noch fehlend: " + missingFritzSIPClients.joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -858,7 +842,7 @@ private struct SetupWizardView: View {
             setupCheck("Leitung 3", detail: sipLine3Enabled ? "\(line3Label) – \(line3Number)" : "Deaktiviert", ready: !sipLine3Enabled || !line3Number.isEmpty)
             setupCheck(
                 "FRITZ-SIP-Nebenstellen",
-                detail: fritzSIPClients.isEmpty ? "Keine CallWebhook-SIP-Nebenstellen verifiziert" : fritzSIPClients.map(\.displayName).joined(separator: " · "),
+                detail: fritzSIPSummary,
                 ready: fritzSIPVerified
             )
             setupCheck("Anrufstatus-Schalter", detail: callHelperStatus, ready: callHelperReady)
@@ -868,12 +852,7 @@ private struct SetupWizardView: View {
         }
     }
 
-    private var fritzSIPProvisioned: Bool {
-        let first = fritzSIPClients.contains { $0.username == "callwhapp1" || $0.phoneName == "callwhapp1" }
-        let second = fritzSIPClients.contains { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
-        let third = !sipLine3Enabled || fritzSIPClients.contains { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }
-        return first && second && third
-    }
+    private var fritzSIPProvisioned: Bool { fritzSIPVerified }
 
     private var mailboxSummary: String {
         if fritzTAMs.isEmpty { return "Keine FRITZ!-Mailbox erkannt" }
@@ -1790,27 +1769,11 @@ private struct SetupWizardView: View {
 
             await checkFritzBox()
 
-            let verified1 = fritzSIPClients.first {
-                ($0.username == "callwhapp1" || $0.phoneName == "callwhapp1")
-                    && (line1Number.isEmpty || $0.outgoingNumber == line1Number)
-            }
-            let expected2 = line2Number.isEmpty ? line1Number : line2Number
-            let verified2 = fritzSIPClients.first {
-                ($0.username == "callwhapp2" || $0.phoneName == "callwhapp2")
-                    && (expected2.isEmpty || $0.outgoingNumber == expected2)
-            }
-            let verified3 = !sipLine3Enabled || fritzSIPClients.contains {
-                ($0.username == "callwhapp3" || $0.phoneName == "callwhapp3")
-                    && (line3Number.isEmpty || $0.outgoingNumber == line3Number)
-            }
-
-            guard verified1 != nil, verified2 != nil, verified3 else {
-                sipProvisionStatus = "FRITZ-SIP wurde geschrieben, aber die Leitungszuordnung konnte nicht vollständig verifiziert werden"
+            guard fritzSIPVerified else {
+                sipProvisionStatus = "FRITZ-SIP wurde geschrieben. " + fritzSIPSummary
                 return
             }
-            sipProvisionStatus = sipLine3Enabled
-                ? "FRITZ-SIP verifiziert: callwhapp1, callwhapp2 und callwhapp3 mit korrekter Leitungszuordnung"
-                : "FRITZ-SIP verifiziert: callwhapp1 und callwhapp2 mit korrekter Leitungszuordnung"
+            sipProvisionStatus = fritzSIPSummary
         } catch {
             sipProvisionStatus = "Provisionierung abgebrochen: \(error.localizedDescription)"
         }

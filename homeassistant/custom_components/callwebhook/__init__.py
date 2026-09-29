@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 15
+BACKEND_API_VERSION = 16
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -68,7 +68,7 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["message"] = "Asterisk wird neu gestartet und abschließend geprüft …"
         await hass.async_add_executor_job(wait_for_asterisk_started, actual_addon)
         async with _voip_lock:
-            value = dict(_voip, route_ready=push_route_applied and voip_configured(), incoming_route_revision=2)
+            value = dict(_voip, route_ready=push_route_applied and voip_configured(), incoming_route_revision=3)
             await hass.async_add_executor_job(save_voip, value)
             _voip.update(value)
         _asterisk_setup_state["progress_step"] = 7
@@ -1398,6 +1398,136 @@ def wait_fritz_confirmation(web_request, state, confirmation):
 _tam_confirmation = FritzConfirmation()
 
 
+def fritz_tam_wizard_form(html, stage):
+    """Read the native wizard's successful controls and labelled number choices."""
+    from html.parser import HTMLParser
+    class Form(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.inside = False
+            self.found = False
+            self.fields, self.checks, self.labels = {}, {}, {}
+            self.label = None
+            self.text = []
+            self.select = None
+            self.options = []
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "form":
+                self.inside = a.get("name") == "mainform"
+                if self.inside:
+                    if self.found or urlparse(a.get("action", "")).path != "/assis/assi_tam_intern.lua":
+                        raise FritzTAMConfigurationError("Unbekanntes FRITZ!-Neuanlageformular")
+                    self.found = True
+            if not self.inside:
+                return
+            name = a.get("name")
+            if tag == "input" and name and "disabled" not in a:
+                kind = a.get("type", "text").lower()
+                if kind == "checkbox" and name.startswith("NewFnc_"):
+                    self.checks[a.get("id", "")] = name
+                if kind in ("button", "submit", "reset", "file", "image"):
+                    return
+                if kind in ("radio", "checkbox") and "checked" not in a:
+                    return
+                self.fields[name] = a.get("value", "on" if kind in ("radio", "checkbox") else "")
+            elif tag == "select":
+                self.select = name if "disabled" not in a else None
+                self.options = []
+            elif tag == "option" and self.select and "disabled" not in a:
+                self.options.append((a.get("value", ""), "selected" in a))
+            elif tag == "label":
+                self.label, self.text = a.get("for"), []
+        def handle_data(self, data):
+            if self.label:
+                self.text.append(data)
+        def handle_endtag(self, tag):
+            if tag == "label" and self.label:
+                self.labels.setdefault(self.label, []).append("".join(self.text).strip())
+                self.label = None
+            if tag == "select" and self.select:
+                if self.options:
+                    self.fields[self.select] = next((v for v, selected in self.options if selected), self.options[0][0])
+                self.select = None
+            if tag == "form":
+                self.inside = False
+    form = Form()
+    form.feed(html)
+    if (not form.found or form.fields.get("New_CurrSide") != stage
+            or form.fields.get("Old_WhoAmI") != "/assis/assi_tam_intern.lua"
+            or form.fields.get("Old_TamNr") not in ("0", "1", "2", "3", "4")):
+        raise FritzTAMConfigurationError("FRITZ!-Neuanlage nicht bereit oder kein freier Anrufbeantworter verfügbar")
+    form.fields.pop("sid", None)
+    return form
+
+
+def create_fritz_tam(line, number, report, confirmation=None):
+    """Create a visible TAM through FRITZ!OS's own three-step wizard."""
+    name = {1: "CallWebhook SIM 1", 2: "CallWebhook SIM 2", 3: "CallWebhook Festnetz"}[line]
+    normalize = lambda value: "".join(c for c in value if c.isdigit())
+    expected = normalize(number)
+    if len(expected) < 3:
+        raise FritzTAMConfigurationError("Echte Festnetznummer für die Neuanlage erforderlich")
+    sid = fritz_web_sid()
+    with requests.Session() as session:
+        def web_request(path, fields, method="GET"):
+            args = {"params" if method == "GET" else "data": dict(fields, sid=sid)}
+            response = session.request(method, f"http://{HOST}" + path, timeout=15, allow_redirects=False, **args)
+            if response.status_code != 200:
+                raise FritzTAMConfigurationError("FRITZ!-Neuanlage nicht erreichbar oder Anmeldung abgelaufen")
+            return response
+        inventory = web_request("/query.lua", {
+            **{f"d{i}": f"tam:settings/TAM{i}/Display" for i in range(5)},
+            **{f"n{i}": f"tam:settings/TAM{i}/Name" for i in range(5)}}).json()
+        if not isinstance(inventory, dict) or any(inventory.get(f"d{i}") not in ("0", "1") for i in range(5)):
+            raise FritzTAMConfigurationError("Vorhandene FRITZ!-Anrufbeantworter konnten nicht sicher gelesen werden")
+        # Retrying a partially completed setup must not create duplicate mailboxes.
+        for i in range(5):
+            if inventory[f"d{i}"] == "1" and inventory.get(f"n{i}") == name:
+                if tam_numbers_match(read_tam_info(i), [number]):
+                    return i
+                raise FritzTAMConfigurationError(f"{name} ist bereits mit anderer Rufnummer vorhanden; vorhandenen AB auswählen")
+        path = "/assis/assi_tam_intern.lua"
+        report(f"Leitung {line}: neuen FRITZ!-Anrufbeantworter vorbereiten …")
+        form = fritz_tam_wizard_form(web_request(path, {}).text, "AssiTamInternEinrichten")
+        index = int(form.fields["Old_TamNr"])
+        if inventory[f"d{index}"] != "0":
+            raise FritzTAMConfigurationError("FRITZ!Box meldet keinen freien AB-Platz; vorhandene AB bleiben erhalten")
+        fields = dict(form.fields, New_TamName=name, New_OperationMode="1", New_Delay="6",
+                      New_RecordingLen="180", Submit_Next="")
+        form = fritz_tam_wizard_form(web_request(path, fields, "POST").text, "AssiTamInternIncoming")
+        if form.fields["Old_TamNr"] != str(index):
+            raise FritzTAMConfigurationError("AB-Platz während Neuanlage geändert")
+        choices = [field for identifier, field in form.checks.items()
+                   if any(normalize(label.replace("●", "")) == expected for label in form.labels.get(identifier, []))]
+        if len(choices) != 1:
+            raise FritzTAMConfigurationError("Gewählte Rufnummer im FRITZ!-Neuanlageassistenten nicht eindeutig gefunden")
+        fields = {key: value for key, value in form.fields.items() if key not in form.checks.values()}
+        fields.update({choices[0]: "on", "NewFnc_ConnectToAll": "F", "Submit_Next": ""})
+        form = fritz_tam_wizard_form(web_request(path, fields, "POST").text, "AssiTamInternSummary")
+        selected = [value for key, value in form.fields.items() if key.startswith("OldFnc_IncomingNr") and value]
+        if (form.fields["Old_TamNr"] != str(index) or form.fields.get("OldFnc_ConnectToAll") != "F"
+                or selected != [choices[0].removeprefix("NewFnc_")]):
+            raise FritzTAMConfigurationError("FRITZ!-Zusammenfassung bestätigt die ausgewählte Rufnummer nicht")
+        fields = dict(form.fields, Submit_Save="", page="assi_tam_intern", xhr="1", lang="de")
+        report(f"Leitung {line}: {name} mit Rufnummer {number} anlegen …")
+        result = web_request("/data.lua", fields, "POST").json().get("data", {})
+        if result.get("Submit_Save") == "twofactor":
+            report("FRITZ!Box-Bestätigung für die AB-Neuanlage erforderlich …")
+            wait_fritz_confirmation(web_request, result.get("twofactor", ""), confirmation)
+            fields.update(confirmed="", twofactor="")
+            result = web_request("/data.lua", fields, "POST").json().get("data", {})
+        if result.get("Submit_Save") != "ok":
+            raise FritzTAMConfigurationError("FRITZ!Box hat die AB-Neuanlage nicht bestätigt")
+        visible = web_request("/query.lua", {"display": f"tam:settings/TAM{index}/Display"}).json()
+        after = read_tam_info(index)
+        if (visible.get("display") != "1" or not tam_numbers_match(after, [number])
+                or after.get("NewEnable", "").lower() not in ("1", "true")):
+            raise FritzTAMConfigurationError("AB-Neuanlage beim Zurücklesen nicht vollständig bestätigt")
+        report(f"Leitung {line}: AB {index + 1} angelegt und Rufnummer zurückgelesen")
+        return index
+
+
 def configure_fritz_tams(groups, report, confirmation=None):
     with requests.Session() as session:
         sid = None
@@ -1448,6 +1578,15 @@ async def run_mailbox_setup(hass, payload, groups):
     def report(message):
         hass.loop.call_soon_threadsafe(_tam_setup_state.update, {"message": message})
     try:
+        payload = dict(payload)
+        groups = {key: list(value) for key, value in groups.items()}
+        for line in range(1, 4):
+            key = f"mailbox_tam_{line}"
+            if payload[key] == -2:
+                number = payload["line_numbers"][str(line)]
+                index = await hass.async_add_executor_job(create_fritz_tam, line, number, report, _tam_confirmation)
+                payload[key] = index
+                groups.setdefault(index, []).append(number)
         await hass.async_add_executor_job(configure_fritz_tams, groups, report, _tam_confirmation)
         keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
         async with _refresh_lock:
@@ -1495,7 +1634,7 @@ class CallWebhookMailboxSetupView(HomeAssistantView):
                 return self.json({"ok": True})
             keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
             if not isinstance(payload, dict) or any(
-                type(payload.get(key)) is not int or not -1 <= payload[key] <= 9
+                type(payload.get(key)) is not int or not (-2 if "line_numbers" in payload else -1) <= payload[key] <= 9
                 for key in keys
             ):
                 raise ValueError("Ungültige Anrufbeantworter-Zuordnung")
@@ -1517,12 +1656,12 @@ class CallWebhookMailboxSetupView(HomeAssistantView):
             if not isinstance(numbers, dict):
                 return self.json({"ok": False, "error": "Rufnummern fehlen"}, status_code=400)
             for n, key in enumerate(keys, 1):
-                if payload[key] < 0:
+                if payload[key] == -1:
                     continue
                 number = numbers.get(str(n), "")
                 if not isinstance(number, str) or not re.fullmatch(r"[+0-9 ()/-]{3,32}", number) or len(re.sub(r"\D", "", number)) < 3:
                     return self.json({"ok": False, "error": "Echte Festnetznummern erforderlich"}, status_code=400)
-                groups.setdefault(payload[key], []).append(number)
+                groups.setdefault(payload[key] if payload[key] >= 0 else -n - 1, []).append(number)
             owners = {}
             for index, values in groups.items():
                 for number in values:
@@ -1530,6 +1669,7 @@ class CallWebhookMailboxSetupView(HomeAssistantView):
                     if normalized in owners and owners[normalized] != index:
                         return self.json({"ok": False, "error": "Eine Rufnummer darf nur einem Anrufbeantworter zugeordnet sein"}, status_code=400)
                     owners[normalized] = index
+            groups = {key: values for key, values in groups.items() if key >= 0}
             _tam_confirmation.clear()
             _tam_confirmation.owner = user.id
             _tam_setup_state.update(state="running", message="FRITZ!-Anrufbeantworter werden eingerichtet …", assignments={}, ok=False)
@@ -1897,6 +2037,7 @@ exten => s,1,NoOp(CallWebhook incoming VoIP)
  same => n,Set(CURLOPT(conntimeout)=2)
  same => n,Set(CURLOPT(httptimeout)=15)
  same => n,Set(CW_PUSH=${CURL(HOOK/ring?id=${CW_ID}&caller=${URIENCODE(${CALLERID(num)})}&line=${CW_LINE})})
+ same => n,NoOp(CallWebhook push result: ${CW_PUSH})
  same => n,GotoIf($["${CW_PUSH}"="cancelled"]?done)
  same => n,Dial(${PJSIP_DIAL_CONTACTS(callwebhook-ios)},60,b(callwebhook-push-header^s^1(${CW_ID}^${CW_LINE})))
  same => n(done),Hangup()
@@ -1907,6 +2048,7 @@ exten => _.,1,Set(__CW_LINE=0)
  same => n,Goto(s,1)
 exten => h,1,Set(CURLOPT(httptimeout)=2)
  same => n,Set(CW_END=${CURL(HOOK/end?id=${CW_ID})})
+ same => n,Hangup()
 
 [from-easybell]
 exten => s,1,Goto(from-fritz,s,1)
@@ -1935,6 +2077,12 @@ async def send_voip_push(call_id, caller):
                 raise RuntimeError("Push nicht angenommen")
             _voip_last_status = "Anruf-Push von Apple angenommen (Zustellung noch nicht bestätigt)"
             return True
+        except RuntimeError as error:
+            # relay_request creates these messages locally without credentials.
+            message = str(error)
+            safe = message if message.startswith("Push-Dienst antwortet mit HTTP ") or message == "Push nicht angenommen" else "Push-Dienst nicht erreichbar"
+            _voip_last_status = "Anruf-Push fehlgeschlagen: " + safe
+            return False
         except Exception:
             _voip_last_status = "Anruf-Push über den gemeinsamen Dienst fehlgeschlagen"
             return False
@@ -1969,7 +2117,7 @@ class CallWebhookVoIPView(HomeAssistantView):
     async def get(self, request):
         return self.json({"configured": voip_configured(), "api_version": BACKEND_API_VERSION,
                           "mode": "relay" if _voip.get("relay_credential") else "direct",
-                          "route_ready": bool(_voip.get("route_ready") and _voip.get("incoming_route_revision") == 2),
+                          "route_ready": bool(_voip.get("route_ready") and _voip.get("incoming_route_revision") == 3),
                           "registered": bool(_voip.get("device")), "message": _voip_last_status})
 
     async def post(self, request):
@@ -2100,12 +2248,19 @@ class CallWebhookVoIPHookView(HomeAssistantView):
                 "line": int(line) if line in ("1", "2", "3") else None}
         _voip_calls[call_id] = call
         caller = request.query.get("caller", "Unbekannt")[:80]
+        global _voip_last_status
+        outcome = "push_failed"
         if await send_voip_push(call_id, caller):
             try:
                 await asyncio.wait_for(call["ready"].wait(), timeout=8)
+                outcome = "ready"
+                if not call["ended"]:
+                    _voip_last_status = "iPhone hat den Anruf-Push bestätigt und SIP vorbereitet"
             except asyncio.TimeoutError:
-                pass  # Keep direct SIP as fallback if APNs cannot wake this device.
-        return web.Response(text="cancelled" if call["ended"] else "ready")
+                outcome = "wake_timeout"
+                _voip_last_status = "Apple hat den Push angenommen; keine Bereitschaftsbestätigung vom iPhone innerhalb von 8 Sekunden"
+        # Direct SIP remains available, but a failed push must never claim ready.
+        return web.Response(text="cancelled" if call["ended"] else outcome)
 
 
 async def async_setup(

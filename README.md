@@ -27,7 +27,12 @@ service is not yet available, the assistant reports it rather than pretending
 incoming background calls are ready. Extras retains only the wizard restart entry,
 not separate push/key-import/repair menus.
 
-HA backend API 15 is required: CallWebhook Bootstrap installs it and restarts HA.
+The FRITZ step asks for one, two or three CallWebhook LAN phones before provisioning.
+On an empty router, each active line defaults to creating its own answering machine
+when continuing from the phone-line step. Existing answering machines can still
+be selected. Creation uses the router wizard and verifies the real number.
+
+HA backend API 16 is required: CallWebhook Bootstrap installs it and restarts HA.
 It adds one inbound-only PJSIP endpoint matched to the configured FRITZ!Box host,
 so incoming calls also work when the router omits the registration's `line`
 parameter. All three outbound registrations and iPhone authentication are preserved.
@@ -64,3 +69,5 @@ number field names/values and all existing options; the stored timer is preserve
 The assistant handles the physical FRITZ!Box confirmation when requested and
 reports a failed write or mismatched readback instead of accepting all numbers.
 No firmware, raw router configuration or existing recordings are replaced.
+
+Der Einrichtungsassistent startet den Bootstrap nach erfolgreicher HA-Autorisierung automatisch, wenn das Backend fehlt oder veraltet ist. Nach dem HA-Neustart setzt er Asterisk fort; ein Wiederholungsbutton erscheint nur bei Fehlern. Anruf-Push unterscheidet jetzt Sendefehler, fehlende iPhone-Bestätigung und bestätigte Bereitschaft. Die Hangup-Route endet explizit, damit sie keine neuen Push-Anrufe auslöst.

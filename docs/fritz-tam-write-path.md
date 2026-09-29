@@ -32,9 +32,19 @@ is not success. Empty (all numbers), extra numbers, disabled TAMs or a mismatch
 fail verification. HA stores the app's mapping only after all writes verify.
 Partial writes are idempotent: a retry skips already matching TAMs.
 
-This path currently edits TAMs already visible in the FRITZ!Box. It does not
-create hidden empty TAM slots by briefly enabling catch-all routing. Firmware
-contract tests use synthetic forms; a live 5690 Pro save still needs device testing.
+Existing TAMs use the edit path above. For a fresh installation, selection -2
+means “create for this line”. HA walks the native `assis/assi_tam_intern.lua`
+wizard through `AssiTamInternEinrichten`, `AssiTamInternIncoming` and
+`AssiTamInternSummary`, preserving successful controls on every page. It selects
+the real number using its labelled `NewFnc_*` checkbox, requires the summary's
+specific-number mode and corresponding number identifier, then submits
+`Submit_Save` through `data.lua`. Router-advertised 2FA uses the same confirmed
+flow. Before writing, the selected slot must have Display=0; after writing,
+Display=1, enabled status and exact numbers are independently checked. New TAMs
+record after 30 seconds, up to 180 seconds. Existing USB settings are retained.
+The returned actual indexes replace -2 in the app and persisted HA assignments.
+Retries reuse matching visible CallWebhook-named TAMs instead of duplicating them.
+Contract tests use synthetic forms; live creation still needs device testing.
 
 
 ## Confirmation choices

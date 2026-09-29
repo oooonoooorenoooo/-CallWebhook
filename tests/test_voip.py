@@ -128,7 +128,7 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.ns['send_voip_push'] = send
         self.assertEqual((await view.get(request, 'wrong', 'ring')).status, 401)
         secret = self.ns['_voip']['hook_secret']
-        self.assertEqual((await view.get(request, secret, 'ring')).text, 'ready')
+        self.assertEqual((await view.get(request, secret, 'ring')).text, 'push_failed')
         self.assertEqual((await view.get(request, secret, 'ring')).text, 'duplicate')
         send.assert_awaited_once_with(call_id, '030123')
         await view.get(request, secret, 'end')
@@ -222,7 +222,7 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         view = self.ns['CallWebhookVoIPView']()
         self.ns['_voip'].update(route_ready=True)
         self.assertFalse((await view.get(self.request()))[1]['route_ready'])
-        self.ns['_voip']['incoming_route_revision'] = 2
+        self.ns['_voip']['incoming_route_revision'] = 3
         self.assertTrue((await view.get(self.request()))[1]['route_ready'])
         self.ns['_voip']['route_ready'] = False
         self.assertFalse((await view.get(self.request()))[1]['route_ready'])
@@ -252,3 +252,21 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('s^1(${CW_ID}^${CW_LINE})', plan)
         self.assertIn('Set(PJSIP_HEADER(add,X-CallWebhook-Line)=${ARG2})', plan)
         self.assertEqual(plan, self.ns['voip_dialplan'](plan))
+
+    def test_hangup_stops_before_wildcard_can_reenter_ring(self):
+        self.ns['_voip'].update(device={'token': 'a'*64}, key='private')
+        plan = self.ns['voip_dialplan']('')
+        hangup = plan.split('exten => h,1,')[1].split('\n\n')[0]
+        self.assertEqual(hangup.splitlines()[-1].strip(), 'same => n,Hangup()')
+        self.assertNotIn('Goto(', hangup)
+
+    async def test_accepted_push_without_iphone_ack_reports_timeout(self):
+        self.ns['send_voip_push'] = AsyncMock(return_value=True)
+        async def timeout(awaitable, **kwargs):
+            awaitable.close()
+            raise asyncio.TimeoutError
+        with patch.object(asyncio, 'wait_for', timeout):
+            response = await self.ns['CallWebhookVoIPHookView']().get(
+                self.request(query={'id': str(uuid4())}), self.ns['_voip']['hook_secret'], 'ring')
+        self.assertEqual(response.text, 'wake_timeout')
+        self.assertIn('keine Bereitschaftsbestätigung', self.ns['_voip_last_status'])

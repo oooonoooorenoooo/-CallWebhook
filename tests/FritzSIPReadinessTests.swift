@@ -17,6 +17,9 @@ struct FritzSIPReadinessTests {
         precondition(FritzSIPReadiness.missingClients(in: [], thirdLineEnabled: false) == ["callwhapp1", "callwhapp2"])
         let unrelated = FritzSIPClient(index: 0, username: "other", phoneName: "Telephone", outgoingNumber: "1234567", internalNumber: "620")
         precondition(FritzSIPReadiness.missingClients(in: [unrelated, existing[1]], thirdLineEnabled: false) == ["callwhapp1"])
+        precondition(FritzSIPReadiness.missingClients(in: [existing[0]], secondLineEnabled: false, thirdLineEnabled: false).isEmpty)
+        precondition(FritzSIPReadiness.missingClients(in: [], secondLineEnabled: false, thirdLineEnabled: false) == ["callwhapp1"])
+        precondition(FritzSIPReadiness.missingClients(in: existing, secondLineEnabled: true, thirdLineEnabled: true) == ["callwhapp3"])
         print("Existing and missing FRITZ SIP client readiness passed")
     }
 }

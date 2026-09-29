@@ -16,10 +16,9 @@ struct FritzSIPClient: Identifiable, Hashable {
 }
 
 enum FritzSIPReadiness {
-    // The generated Asterisk configuration currently uses both base clients.
-    // The direct FRITZ path additionally requires client 3 when enabled.
-    static func missingClients(in clients: [FritzSIPClient], thirdLineEnabled: Bool) -> [String] {
-        let required = thirdLineEnabled ? ["callwhapp1", "callwhapp2", "callwhapp3"] : ["callwhapp1", "callwhapp2"]
+    // Require exactly the selected lines, including the third before provisioning.
+    static func missingClients(in clients: [FritzSIPClient], secondLineEnabled: Bool = true, thirdLineEnabled: Bool) -> [String] {
+        let required = ["callwhapp1"] + (secondLineEnabled ? ["callwhapp2"] : []) + (thirdLineEnabled ? ["callwhapp3"] : [])
         return required.filter { name in
             !clients.contains { $0.username == name || $0.phoneName == name }
         }

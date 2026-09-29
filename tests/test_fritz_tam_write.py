@@ -12,7 +12,7 @@ SOURCE = Path(__file__).parents[1] / 'homeassistant/custom_components/callwebhoo
 
 
 def load():
-    names = {'FritzTAMConfigurationError', 'fritz_web_sid', 'fritz_tam_form', 'tam_numbers_match', 'configure_fritz_tams', 'FritzConfirmation', 'wait_fritz_confirmation'}
+    names = {'fritz_tam_wizard_form', 'create_fritz_tam', 'FritzTAMConfigurationError', 'fritz_web_sid', 'fritz_tam_form', 'tam_numbers_match', 'configure_fritz_tams', 'FritzConfirmation', 'wait_fritz_confirmation'}
     nodes = [n for n in ast.parse(SOURCE.read_text()).body if getattr(n, 'name', '') in names]
     ns = dict(ET=ET, urlparse=urlparse, parse_qs=parse_qs, HOST='192.168.178.1', secrets=secrets, time=time)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), ns)
@@ -241,3 +241,125 @@ class ConfirmationTests(unittest.TestCase):
                     self.ns['wait_fritz_confirmation'](request, 'button', self.factor)
                 self.assertEqual(calls[-1], {'tfa_cancel':''})
                 self.assertEqual(self.factor.snapshot(), {})
+
+
+class TAMCreationTests(unittest.TestCase):
+    def form(self, stage, body='', index=0):
+        return f'''<form name="mainform" action="/assis/assi_tam_intern.lua">
+        <input type="hidden" name="New_CurrSide" value="{stage}">
+        <input type="hidden" name="Old_WhoAmI" value="/assis/assi_tam_intern.lua">
+        <input type="hidden" name="Old_TamNr" value="{index}">
+        <input type="hidden" name="Old_UseUsbStick" value="1">
+        <input type="hidden" name="sid" value="secret">
+        {body}</form>'''
+
+    def setup_wizard(self, *, mismatch=False, confirmation=False, wrong_summary=False):
+        ns = load()
+        session = Mock()
+        session.__enter__ = Mock(return_value=session)
+        session.__exit__ = Mock(return_value=False)
+        posted = []
+        inventory = {**{f'd{i}':'0' for i in range(5)}, **{f'n{i}':'' for i in range(5)}}
+        def response(method, url, **kwargs):
+            fields = kwargs.get('data', kwargs.get('params', {}))
+            text, data = '', {}
+            if url.endswith('query.lua'):
+                data = {'display':'1'} if 'display' in fields else inventory
+            elif url.endswith('assi_tam_intern.lua'):
+                if method == 'GET':
+                    text = self.form('AssiTamInternEinrichten')
+                elif fields['New_CurrSide'] == 'AssiTamInternEinrichten':
+                    self.assertEqual(fields['New_OperationMode'], '1')
+                    self.assertEqual(fields['New_Delay'], '6')
+                    self.assertEqual(fields['New_TamName'], 'CallWebhook SIM 1')
+                    self.assertEqual(fields['Old_UseUsbStick'], '1')
+                    text = self.form('AssiTamInternIncoming', '''
+                    <input type="radio" name="NewFnc_ConnectToAll" value="T" checked>
+                    <input type="checkbox" name="NewFnc_Sip0" id="nr0" checked><label for="nr0">030 10001</label>
+                    <input type="checkbox" name="NewFnc_Sip2" id="nr2"><label for="nr2">030 10002<span> ●</span></label>
+                    <label for="nr2">Internetrufnummer (2)</label>''')
+                else:
+                    self.assertEqual(fields['NewFnc_ConnectToAll'], 'F')
+                    self.assertNotIn('NewFnc_Sip0', fields)
+                    self.assertEqual(fields['NewFnc_Sip2'], 'on')
+                    text = self.form('AssiTamInternSummary', f'''
+                    <input type="hidden" name="OldFnc_ConnectToAll" value="{'T' if wrong_summary else 'F'}">
+                    <input type="hidden" name="OldFnc_IncomingNr1" value="Sip2">
+                    <input type="hidden" name="OldFnc_IncomingNr2" value="">''')
+            elif url.endswith('data.lua'):
+                posted.append(fields)
+                data = {'data': {'Submit_Save': 'twofactor', 'twofactor': 'button'}} if confirmation and len(posted)==1 else {'data': {'Submit_Save': 'ok'}}
+            return SimpleNamespace(status_code=200, text=text, json=lambda:data)
+        session.request.side_effect = response
+        ns.update(requests=SimpleNamespace(Session=lambda:session), fritz_web_sid=lambda:'sid',
+                  read_tam_info=Mock(return_value={'NewPhoneNumbers':'03010001' if mismatch else '03010002', 'NewEnable':'1'}),
+                  wait_fritz_confirmation=Mock())
+        return ns, posted, inventory
+
+    def test_creates_visible_mailbox_with_exact_number_and_confirmation(self):
+        ns, posted, _ = self.setup_wizard(confirmation=True)
+        self.assertEqual(ns['create_fritz_tam'](1, '03010002', lambda _:None), 0)
+        self.assertEqual(len(posted), 2)
+        ns['wait_fritz_confirmation'].assert_called_once()
+        self.assertNotIn('confirmed', posted[0])
+        self.assertIn('confirmed', posted[1])
+        self.assertEqual(posted[1]['OldFnc_IncomingNr1'], 'Sip2')
+
+    def test_wrong_readback_fails_and_catch_all_summary_never_saved(self):
+        ns, posted, _ = self.setup_wizard(mismatch=True)
+        with self.assertRaisesRegex(ns['FritzTAMConfigurationError'], 'Zurücklesen'):
+            ns['create_fritz_tam'](1, '03010002', lambda _:None)
+        self.assertEqual(len(posted), 1)
+        ns, posted, _ = self.setup_wizard(wrong_summary=True)
+        with self.assertRaises(ns['FritzTAMConfigurationError']):
+            ns['create_fritz_tam'](1, '03010002', lambda _:None)
+        self.assertEqual(posted, [])
+
+    def test_existing_visible_slot_is_not_overwritten_and_retry_is_idempotent(self):
+        ns, posted, inventory = self.setup_wizard()
+        inventory['d0'] = '1'
+        inventory['n0'] = 'Other mailbox'
+        with self.assertRaises(ns['FritzTAMConfigurationError']):
+            ns['create_fritz_tam'](1, '03010002', lambda _:None)
+        self.assertFalse(posted)
+        inventory['n0'] = 'CallWebhook SIM 1'
+        self.assertEqual(ns['create_fritz_tam'](1, '03010002', lambda _:None), 0)
+        self.assertFalse(posted)
+
+    def test_wizard_rejects_unknown_page_full_router_or_sign_in_form(self):
+        ns = load()
+        for html in ('<form name="login"></form>', self.form('AssiTamInternEinrichten', index=-1),
+                     self.form('AssiTamInternSummary'),
+                     self.form('AssiTamInternEinrichten').replace('/assis/assi_tam_intern.lua', '/other.lua')):
+            with self.assertRaises(ns['FritzTAMConfigurationError']):
+                ns['fritz_tam_wizard_form'](html, 'AssiTamInternEinrichten')
+
+
+class FreshMailboxSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_three_new_lines_resolve_real_indexes_before_saving(self):
+        import asyncio
+        nodes = [node for node in ast.parse(SOURCE.read_text()).body if getattr(node, 'name', '') == 'run_mailbox_setup']
+        created, configured, saved = [], [], []
+        def create(line, number, report, confirmation):
+            created.append((line, number))
+            return {1:2, 2:0, 3:4}[line]
+        async def executor(fn, *args): return fn(*args)
+        ns = dict(_tam_setup_state={}, _tam_confirmation=object(), _refresh_lock=asyncio.Lock(),
+                  create_fritz_tam=create, configure_fritz_tams=lambda groups, *args:configured.append(groups),
+                  save_setup=lambda *args:saved.append(args), FritzTAMConfigurationError=ValueError)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), ns)
+        hass = SimpleNamespace(loop=SimpleNamespace(call_soon_threadsafe=lambda fn,*args:fn(*args)), async_add_executor_job=executor)
+        payload = {**{f'mailbox_tam_{i}':-2 for i in range(1,4)}, 'line_numbers':{'1':'03010001','2':'03010002','3':'03010003'}}
+        await ns['run_mailbox_setup'](hass, payload, {})
+        self.assertEqual(created, [(1,'03010001'),(2,'03010002'),(3,'03010003')])
+        self.assertEqual(configured, [{2:['03010001'],0:['03010002'],4:['03010003']}])
+        self.assertEqual(saved, [(2,0,4)])
+        self.assertEqual(ns['_tam_setup_state']['state'], 'completed')
+        self.assertEqual(ns['_tam_setup_state']['assignments'], {'mailbox_tam_1':2,'mailbox_tam_2':0,'mailbox_tam_3':4})
+        self.assertEqual(payload['mailbox_tam_1'], -2)
+        # No persisted success if a subsequent router operation fails.
+        ns['create_fritz_tam'] = Mock(side_effect=ValueError('router rejected creation'))
+        saved.clear()
+        await ns['run_mailbox_setup'](hass, payload, {})
+        self.assertEqual(ns['_tam_setup_state']['state'], 'error')
+        self.assertFalse(saved)

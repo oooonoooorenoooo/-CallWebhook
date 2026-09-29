@@ -98,11 +98,11 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         }
         guard await synchronize() else { return }
         guard configured else { return }
-        if backendAPIVersion < 15 {
+        if backendAPIVersion < 16 {
             routeReady = false
             backendStatus = "Eingehende FRITZ!Box-Anrufe: HA-Komponente wird aktualisiert …"
             await updateBackend()
-            guard backendAPIVersion >= 15, configured else { return }
+            guard backendAPIVersion >= 16, configured else { return }
         }
         if !routeReady {
             guard backendAPIVersion >= 8 else {
@@ -145,7 +145,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                 try await Task.sleep(for: .seconds(1))
                 if let (data, code) = try? await HomeAssistantConnection.request(base: base, path: "api/callwebhook/setup/status"),
                    code == 200, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (value["api_version"] as? Int ?? 0) >= 15, value["ready_for_asterisk"] as? Bool == true {
+                   (value["api_version"] as? Int ?? 0) >= 16, value["ready_for_asterisk"] as? Bool == true {
                     await synchronize()
                     await refreshStatus()
                     return
@@ -164,7 +164,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             routeReady = route && configured
             backendStatus = verification.message(configured: stored, routeReady: route,
                 serviceAvailable: PushRelayRegistration.shared.baseURL != nil)
-            if configured, let last = value["message"] as? String, last != "Noch kein Anruf-Push gesendet" {
+            if configured, let last = value["message"] as? String, !last.isEmpty {
                 backendStatus += " " + last
             }
         } catch {

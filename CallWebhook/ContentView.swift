@@ -269,6 +269,8 @@ private struct SetupWizardView: View {
     @State private var setupHAToken = ""
     @State private var isAuthenticatingHA = false
     @State private var isBootstrappingHA = false
+    @State private var bootstrapInstallationNeeded = false
+    @State private var bootstrapAttemptFailed = false
     @ScaledMetric(relativeTo: .body) private var setupStatusIconSize: CGFloat = 18
     @State private var bootstrapRestartPending = false
     @State private var isCheckingBackend = false
@@ -445,6 +447,23 @@ private struct SetupWizardView: View {
                     SecureField("Kennwort", text: $fritzPassword)
                 }
             }
+            Section("CallWebhook-LAN-Telefone") {
+                Picker("Wie viele Geräte möchtest du einrichten?", selection: Binding(
+                    get: { sipLine3Enabled ? 3 : (sipLine2Enabled ? 2 : 1) },
+                    set: { count in
+                        sipLine2Enabled = count >= 2
+                        sipLine3Enabled = count >= 3
+                        asteriskConfigReady = false
+                        asteriskInstalled = false
+                        if fritzAuthenticated { Task { await checkFritzBox() } }
+                    })) {
+                    Text("1 · SIM 1").tag(1)
+                    Text("2 · SIM 1 und SIM 2").tag(2)
+                    Text("3 · SIM 1, SIM 2 und Festnetz").tag(3)
+                }.disabled(isChecking || isProvisioningSIP)
+                Text("Die gewählte Anzahl wird im nächsten Schritt vollständig angelegt. Vorhandene CallWebhook-Geräte werden wiederverwendet.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section {
                 Button {
                     Task { await checkFritzBox() }
@@ -482,8 +501,7 @@ private struct SetupWizardView: View {
                         Divider()
                         Text("callwhapp1: \(sipClient1Plan)")
                             .font(.caption)
-                        Text("callwhapp2: \(sipClient2Plan)")
-                            .font(.caption)
+                        if sipLine2Enabled { Text("callwhapp2: \(sipClient2Plan)").font(.caption) }
                         if sipLine3Enabled {
                             Text("callwhapp3: \(sipClient3Plan)")
                                 .font(.caption)
@@ -502,7 +520,7 @@ private struct SetupWizardView: View {
                             )
                             .foregroundStyle(fritzSIPProvisioned ? .green : .blue)
                         }
-                        .disabled(fritzSIPProvisioned || isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || sipClient2Index == nil || (sipLine3Enabled && sipClient3Index == nil))
+                        .disabled(fritzSIPProvisioned || isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || (sipLine2Enabled && sipClient2Index == nil) || (sipLine3Enabled && sipClient3Index == nil))
                         Text(fritzSIPVerified && !isProvisioningSIP ? fritzSIPSummary : sipProvisionStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -553,12 +571,12 @@ private struct SetupWizardView: View {
                     Label("Der Assistent findet und installiert den Bootstrap automatisch, startet ihn und wartet auf den vollständigen Neustart von Home Assistant.", systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button {
-                        Task { await installBootstrapAutomatically() }
-                    } label: {
-                        Label("CallWebhook Bootstrap automatisch einrichten", systemImage: "shippingbox.and.arrow.backward")
+                    if bootstrapAttemptFailed {
+                        Button("Automatische Einrichtung erneut versuchen") {
+                            Task { await installBootstrapAutomatically() }
+                        }
+                        .disabled(isBootstrappingHA || isWaitingForHARestart)
                     }
-                    .disabled(isBootstrappingHA || isWaitingForHARestart)
 
                 }
                 HStack(spacing: 8) {
@@ -680,7 +698,7 @@ private struct SetupWizardView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Leitung 2") {
-                Toggle("Aktiv", isOn: $sipLine2Enabled)
+                Text(sipLine2Enabled ? "Im FRITZ!Box-Schritt ausgewählt" : "Nicht ausgewählt – Anzahl im FRITZ!Box-Schritt ändern")
                 if sipLine2Enabled {
                     TextField("Bezeichnung", text: $line2Label)
                     fritzNumberPicker("Absenderrufnummer", selection: $line2Number)
@@ -692,14 +710,7 @@ private struct SetupWizardView: View {
                 }
             }
             Section("Leitung 3") {
-                Toggle("Aktiv", isOn: $sipLine3Enabled)
-                    .onChange(of: sipLine3Enabled) { _, enabled in
-                        guard enabled else { return }
-                        Task {
-                            await checkFritzBox()
-                            await provisionMissingSIPClients()
-                        }
-                    }
+                Text(sipLine3Enabled ? "Im FRITZ!Box-Schritt ausgewählt" : "Nicht ausgewählt – Anzahl im FRITZ!Box-Schritt ändern")
                 if sipLine3Enabled {
                     TextField("Bezeichnung", text: $line3Label)
                     if line3ManualNumber || fritzVoIPNumbers.isEmpty {
@@ -777,7 +788,7 @@ private struct SetupWizardView: View {
     }
 
     private var missingFritzSIPClients: [String] {
-        FritzSIPReadiness.missingClients(in: fritzSIPClients, thirdLineEnabled: sipLine3Enabled)
+        FritzSIPReadiness.missingClients(in: fritzSIPClients, secondLineEnabled: sipLine2Enabled, thirdLineEnabled: sipLine3Enabled)
     }
 
     private var fritzSIPVerified: Bool {
@@ -795,6 +806,7 @@ private struct SetupWizardView: View {
     @ViewBuilder
     private func fritzMailboxPicker(selection: Binding<Int>) -> some View {
         Picker("Anrufbeantworter", selection: selection) {
+            Text("Neu anlegen – für diese Leitung").tag(-2)
             Text("Nicht verwenden").tag(-1)
             ForEach(fritzTAMs) { tam in
                 Text("\(tam.index + 1) · \(tam.displayName)").tag(tam.index)
@@ -804,7 +816,7 @@ private struct SetupWizardView: View {
             }
         }
         if fritzTAMs.isEmpty {
-            Text("Keine aktiven Anrufbeantworter erkannt. In der FRITZ!Box einrichten und anschließend erneut auslesen.")
+            Text("Noch kein aktiver Anrufbeantworter vorhanden. Bei Weiter wird für diese Leitung ein neuer AB mit der gewählten Festnetznummer angelegt.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -812,7 +824,7 @@ private struct SetupWizardView: View {
     private var mailboxSelectionVerified: Bool {
         let selected = [mailbox1TAM, sipLine2Enabled ? mailbox2TAM : -1, sipLine3Enabled ? mailbox3TAM : -1]
         return selected.allSatisfy { value in
-            value == -1 || fritzTAMs.contains { $0.index == value }
+            value == -2 || value == -1 || fritzTAMs.contains { $0.index == value }
         }
     }
 
@@ -831,11 +843,11 @@ private struct SetupWizardView: View {
                 guard status == 200 else { return 0 }
                 return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["api_version"] as? Int ?? 0
             }
-            if try await backendVersion() < 13 {
+            if try await backendVersion() < 16 {
                 lineAssignmentStatus = "HA-Komponente für FRITZ!-Anrufbeantworter wird aktualisiert …"
                 await setupPush.updateBackend()
             }
-            guard try await backendVersion() >= 13 else {
+            guard try await backendVersion() >= 16 else {
                 throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Die HA-Aktualisierung für das Schreiben der Anrufbeantworter ist noch nicht abgeschlossen."])
             }
             try await synchronizeFritzLineNumbers()
@@ -904,13 +916,25 @@ private struct SetupWizardView: View {
             let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                   result["ok"] as? Bool == true, result["state"] as? String == "completed",
-                  result["assignments"] as? [String: Int] == assignments else {
+                  let confirmed = result["assignments"] as? [String: Int],
+                  assignments.allSatisfy({ key, value in
+                      guard let actual = confirmed[key] else { return false }
+                      return value == -2 ? (0...4).contains(actual) : actual == value
+                  }) else {
                 throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey:
                     result["error"] as? String ?? "FRITZ!-Anrufbeantworter-Zuordnung nicht bestätigt"])
             }
+            mailbox1TAM = confirmed["mailbox_tam_1"] ?? -1
+            mailbox2TAM = confirmed["mailbox_tam_2"] ?? -1
+            mailbox3TAM = confirmed["mailbox_tam_3"] ?? -1
+            for (key, value) in confirmed where value >= 0 && !fritzTAMs.contains(where: { $0.index == value }) {
+                let line = key.suffix(1)
+                fritzTAMs.append(FritzTAM(index: value, name: "CallWebhook Leitung \(line)", enabled: true))
+            }
+            fritzTAMCount = fritzTAMs.count
             mailboxNumbersVerified = true
             for line in 1...3 {
-                UserDefaults.standard.set(assignments["mailbox_tam_\(line)"], forKey: "setupMailbox\(line)TAM")
+                UserDefaults.standard.set(confirmed["mailbox_tam_\(line)"], forKey: "setupMailbox\(line)TAM")
             }
             return true
         } catch {
@@ -936,7 +960,8 @@ private struct SetupWizardView: View {
         defer { session.finishTasksAndInvalidate() }
         var secondFactorToken: String?
         // The second base client is still used by the generated Asterisk config.
-        var lines = [(1, line1Number), (2, sipLine2Enabled ? line2Number : line1Number)]
+        var lines = [(1, line1Number)]
+        if sipLine2Enabled { lines.append((2, line2Number)) }
         if sipLine3Enabled { lines.append((3, line3Number)) }
         for (line, number) in lines {
             let username = "callwhapp\(line)"
@@ -1270,8 +1295,9 @@ private struct SetupWizardView: View {
         }
         easybellPassword = ""
 
+        let password2 = SetupKeychain.get(account: "fritz-sip-callwhapp2")
         guard let password1 = SetupKeychain.get(account: "fritz-sip-callwhapp1"),
-              let password2 = SetupKeychain.get(account: "fritz-sip-callwhapp2") else {
+              !sipLine2Enabled || password2 != nil else {
             asteriskConfigReady = false
             asteriskConfigStatus = "FRITZ-SIP-Zugangsdaten fehlen noch"
             return
@@ -1387,6 +1413,41 @@ private struct SetupWizardView: View {
         endpoint=fritz3-endpoint
         """ : ""
 
+        let fritz2 = sipLine2Enabled ? """
+        [fritz2-auth]
+        type=auth
+        auth_type=userpass
+        username=callwhapp2
+        password=\(password2 ?? "")
+
+        [fritz2-aor]
+        type=aor
+        contact=sip:\(host)
+
+        [fritz2-endpoint]
+        type=endpoint
+        transport=transport-udp
+        context=from-fritz
+        disallow=all
+        allow=alaw,ulaw
+        outbound_auth=fritz2-auth
+        aors=fritz2-aor
+        from_user=callwhapp2
+        from_domain=\(host)
+        direct_media=no
+
+        [fritz2-registration]
+        type=registration
+        transport=transport-udp
+        outbound_auth=fritz2-auth
+        server_uri=sip:\(host)
+        client_uri=sip:callwhapp2@\(host)
+        contact_user=callwhapp2
+        retry_interval=60
+        line=yes
+        endpoint=fritz2-endpoint
+        """ : ""
+
         let pjsip = """
         [global]
         type=global
@@ -1454,38 +1515,7 @@ private struct SetupWizardView: View {
         line=yes
         endpoint=fritz1-endpoint
 
-        [fritz2-auth]
-        type=auth
-        auth_type=userpass
-        username=callwhapp2
-        password=\(password2)
-
-        [fritz2-aor]
-        type=aor
-        contact=sip:\(host)
-
-        [fritz2-endpoint]
-        type=endpoint
-        transport=transport-udp
-        context=from-fritz
-        disallow=all
-        allow=alaw,ulaw
-        outbound_auth=fritz2-auth
-        aors=fritz2-aor
-        from_user=callwhapp2
-        from_domain=\(host)
-        direct_media=no
-
-        [fritz2-registration]
-        type=registration
-        transport=transport-udp
-        outbound_auth=fritz2-auth
-        server_uri=sip:\(host)
-        client_uri=sip:callwhapp2@\(host)
-        contact_user=callwhapp2
-        retry_interval=60
-        line=yes
-        endpoint=fritz2-endpoint
+        \(fritz2)
         \(fritz3)
         """
 
@@ -1546,7 +1576,7 @@ private struct SetupWizardView: View {
 
     private var canContinue: Bool {
         switch step {
-        case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated
+        case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated && fritzSIPVerified
         case 2: return homeAssistantReachable && haAuthenticated && callWebhookHAReady && asteriskInstalled && callHelperReady
         case 3:
             let linesReady = !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
@@ -1569,6 +1599,8 @@ private struct SetupWizardView: View {
                 && forwardingReady
                 && asteriskInstalled
                 && setupSIP.registered
+                && setupPush.configured
+                && setupPush.routeReady
         default: return true
         }
     }
@@ -1728,7 +1760,9 @@ private struct SetupWizardView: View {
                 }
                 if line1Number.isEmpty, let first = fritzVoIPNumbers.first { line1Number = first }
                 if line2Number.isEmpty, fritzVoIPNumbers.count > 1 { line2Number = fritzVoIPNumbers[1] }
-                if line3Number.isEmpty, let first = fritzVoIPNumbers.first { line3Number = first }
+                if line3Number.isEmpty {
+                    line3Number = fritzVoIPNumbers.first(where: { $0 != line1Number && (!sipLine2Enabled || $0 != line2Number) }) ?? ""
+                }
 
                 var clients: [FritzSIPClient] = []
                 for index in 0..<20 {
@@ -1846,6 +1880,11 @@ private struct SetupWizardView: View {
                     }
                     fritzTAMs = discovered
                     fritzTAMCount = discovered.count
+                    if discovered.isEmpty {
+                        mailbox1TAM = -2
+                        mailbox2TAM = -2
+                        mailbox3TAM = -2
+                    }
                 }
 
                 fritzStatus = "FRITZ-Anmeldung erfolgreich – Telefonie ausgelesen"
@@ -1894,7 +1933,7 @@ private struct SetupWizardView: View {
         guard fritzAuthenticated,
               !fritzSIPWriteAction.isEmpty,
               let index1 = sipClient1Index,
-              let index2 = sipClient2Index else {
+              (!sipLine2Enabled || sipClient2Index != nil) else {
             sipProvisionStatus = "FRITZ-SIP ist noch nicht vollständig geprüft"
             return
         }
@@ -1903,9 +1942,9 @@ private struct SetupWizardView: View {
         let client2 = fritzSIPClients.first { $0.username == "callwhapp2" || $0.phoneName == "callwhapp2" }
         let client3 = fritzSIPClients.first { $0.username == "callwhapp3" || $0.phoneName == "callwhapp3" }
         let secret1Missing = SetupKeychain.get(account: "fritz-sip-callwhapp1") == nil
-        let secret2Missing = SetupKeychain.get(account: "fritz-sip-callwhapp2") == nil
+        let secret2Missing = sipLine2Enabled && SetupKeychain.get(account: "fritz-sip-callwhapp2") == nil
         let secret3Missing = sipLine3Enabled && SetupKeychain.get(account: "fritz-sip-callwhapp3") == nil
-        if client1 != nil && client2 != nil && (!sipLine3Enabled || client3 != nil)
+        if client1 != nil && (!sipLine2Enabled || client2 != nil) && (!sipLine3Enabled || client3 != nil)
             && !secret1Missing && !secret2Missing && !secret3Missing {
             sipProvisionStatus = "CallWebhook-SIP-Nebenstellen und sichere Zugangsdaten sind vollständig"
             return
@@ -1951,11 +1990,11 @@ private struct SetupWizardView: View {
                 }
             }
 
-            if client2 == nil || secret2Missing {
+            if sipLine2Enabled && (client2 == nil || secret2Missing) {
                 let password = randomSIPPassword()
                 try SetupKeychain.set(password, account: "fritz-sip-callwhapp2")
                 do {
-                    let targetIndex = client2?.index ?? index2
+                    let targetIndex = client2?.index ?? sipClient2Index!
                     let number2 = line2Number.isEmpty ? line1Number : line2Number
                     let args = try setClientArguments(index: targetIndex, username: "callwhapp2", password: password, outgoing: number2)
                     do {
@@ -2217,7 +2256,7 @@ private struct SetupWizardView: View {
             setupHAToken = token
             haAuthenticated = true
             homeAssistantStatus = "Home Assistant autorisiert"
-            await checkCallWebhookHAIntegration(base: base)
+            await prepareConnectedHomeAssistant(base: base)
         } catch {
             haAuthenticated = false
             callWebhookHAReady = false
@@ -2255,7 +2294,7 @@ private struct SetupWizardView: View {
             }
             homeAssistantReachable = true
             homeAssistantStatus = "Home Assistant erreichbar"
-            await checkCallWebhookHAIntegration(base: base)
+            await prepareConnectedHomeAssistant(base: base)
         } catch {
             homeAssistantStatus = "Lokalen Netzwerkzugriff bestätigen – prüfe automatisch erneut …"
             for _ in 0..<5 {
@@ -2265,7 +2304,7 @@ private struct SetupWizardView: View {
                     if let retryHTTP = retryResponse as? HTTPURLResponse, (200..<400).contains(retryHTTP.statusCode) {
                         homeAssistantReachable = true
                         homeAssistantStatus = "Home Assistant erreichbar"
-                        await checkCallWebhookHAIntegration(base: base)
+                        await prepareConnectedHomeAssistant(base: base)
                         return
                     }
                 } catch {
@@ -2277,9 +2316,21 @@ private struct SetupWizardView: View {
     }
 
     @MainActor
+    private func prepareConnectedHomeAssistant(base: URL) async {
+        guard !isBootstrappingHA, !isWaitingForHARestart else { return }
+        await checkCallWebhookHAIntegration(base: base)
+        // Install only after a confirmed missing/old backend, never after a
+        // network/authentication error. The backend check has released its lock.
+        if haAuthenticated && bootstrapInstallationNeeded {
+            await installBootstrapAutomatically()
+        }
+    }
+
+    @MainActor
     private func checkCallWebhookHAIntegration(base: URL) async {
         guard !isCheckingBackend else { return }
         isCheckingBackend = true
+        bootstrapInstallationNeeded = false
         defer { isCheckingBackend = false }
         callWebhookHAReady = false
         guard let url = URL(string: "/api/callwebhook/setup/status", relativeTo: base)?.absoluteURL else {
@@ -2312,6 +2363,19 @@ private struct SetupWizardView: View {
                 return
             }
             if http.statusCode == 404 {
+                // Validate the stored authorization independently: an absent
+                // custom route can return 404 even for an expired token.
+                var authRequest = URLRequest(url: base.appendingPathComponent("api/"))
+                authRequest.timeoutInterval = 8
+                authRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                let (_, authResponse) = try await URLSession.shared.data(for: authRequest)
+                guard (authResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                    haAuthenticated = false
+                    callWebhookHAStatus = "Home Assistant erneut verbinden"
+                    return
+                }
+                haAuthenticated = true
+                bootstrapInstallationNeeded = true
                 callWebhookHAStatus = "CallWebhook-HA-Integration fehlt – Bootstrap erforderlich"
                 return
             }
@@ -2327,9 +2391,11 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 15,
+            guard version >= 16,
                   (json["asterisk_provisioning"] as? Bool) == true else {
-                callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
+                haAuthenticated = true
+                bootstrapInstallationNeeded = true
+                callWebhookHAStatus = "CallWebhook-Backend veraltet – Update wird automatisch gestartet"
                 return
             }
             setupHAToken = token
@@ -2489,9 +2555,13 @@ private struct SetupWizardView: View {
 
     @MainActor
     private func installBootstrapAutomatically() async {
-        guard !isBootstrappingHA else { return }
+        guard !isBootstrappingHA, !isWaitingForHARestart else { return }
         isBootstrappingHA = true
-        defer { isBootstrappingHA = false }
+        bootstrapAttemptFailed = false
+        defer {
+            isBootstrappingHA = false
+            bootstrapAttemptFailed = !callWebhookHAReady
+        }
         let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let base = URL(string: "http://192.168.178.\(input):8123"),
               let savedToken = SetupKeychain.get(account: "home-assistant-token"), !savedToken.isEmpty else {

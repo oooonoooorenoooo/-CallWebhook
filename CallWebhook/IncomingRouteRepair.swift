@@ -6,8 +6,9 @@ final class IncomingRouteRepair: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var status = "Aktualisiert die Rufweiterleitung zum iPhone und startet Asterisk neu."
 
-    func run(requireVoIP: Bool = false) async {
-        guard !running, !SIPService.shared.active, !IncomingCallProvider.shared.hasCall else { return }
+    @discardableResult
+    func run(requireVoIP: Bool = false) async -> Bool {
+        guard !running, !SIPService.shared.active, !IncomingCallProvider.shared.hasCall else { return false }
         running = true
         defer { running = false }
         do {
@@ -20,7 +21,7 @@ final class IncomingRouteRepair: ObservableObject {
                 let (data, code) = try await HomeAssistantConnection.request(base: base, path: "api/callwebhook/voip")
                 guard code == 200, let state = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       state["configured"] as? Bool == true, state["registered"] as? Bool == true else {
-                    throw failure("Apple-Push-Schlüssel und iPhone müssen zuerst registriert sein.")
+                    throw failure("Push-Dienst und iPhone müssen zuerst registriert sein.")
                 }
             }
             let extensions = IncomingDialplan.addingIncomingRoute(to: old)
@@ -53,12 +54,12 @@ final class IncomingRouteRepair: ObservableObject {
                     }
                     try SetupKeychain.set(extensions, account: "asterisk-extensions-generated")
                     try SIPService.shared.configureAndStart()
-                    status = "Rufweiterleitung installiert. SIP verbindet sich erneut. Anruf-Push-Status unter Extras prüfen."
-                    return
+                    status = "Anrufstrecke installiert. SIP verbindet sich erneut. Bitte einen eingehenden Anruf bei gesperrtem iPhone testen."
+                    return true
                 }
             }
             throw failure("Zeitlimit erreicht. Der HA-Auftrag kann noch laufen; Status dort prüfen.")
-        } catch { status = "Reparatur nicht bestätigt: \(error.localizedDescription)" }
+        } catch { status = "Einrichtung nicht bestätigt: \(error.localizedDescription)"; return false }
     }
 
     private func failure(_ message: String) -> NSError {

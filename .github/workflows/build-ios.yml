@@ -13,6 +13,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test Home Assistant setup
         run: python3 -m unittest discover -s tests -v
+      - name: Test authenticated push relay
+        run: |
+          python3 -m venv "$RUNNER_TEMP/relay-tests"
+          "$RUNNER_TEMP/relay-tests/bin/pip" install -r push_relay/requirements.txt
+          "$RUNNER_TEMP/relay-tests/bin/python" -m unittest discover -s push_relay/tests -v
       - name: Test FRITZ phone-number list parsing
         run: |
           swiftc CallWebhook/FritzPhoneNumbers.swift tests/FritzPhoneNumbersTests.swift -o "$RUNNER_TEMP/fritz-number-tests"
@@ -81,8 +86,9 @@ jobs:
       - name: Build development IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CALLWEBHOOK_PUSH_RELAY_URL: ${{ vars.CALLWEBHOOK_PUSH_RELAY_URL }}
         run: |
-          xcodebuild -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -derivedDataPath build DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Development" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" build
+          xcodebuild -project CallWebhook.xcodeproj CALLWEBHOOK_PUSH_RELAY_URL="$CALLWEBHOOK_PUSH_RELAY_URL" -scheme CallWebhook -configuration Release -sdk iphoneos -derivedDataPath build DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Development" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" build
           APP_PATH="build/Build/Products/Release-iphoneos/CallWebhook.app"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign -d --entitlements :- "$APP_PATH" > "$RUNNER_TEMP/development-entitlements.plist" 2>/dev/null
@@ -147,8 +153,9 @@ jobs:
       - name: Archive for App Store Connect
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CALLWEBHOOK_PUSH_RELAY_URL: ${{ vars.CALLWEBHOOK_PUSH_RELAY_URL }}
         run: |
-          xcodebuild archive -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CURRENT_PROJECT_VERSION="${{ github.run_number }}" APS_ENVIRONMENT=production
+          xcodebuild archive -project CallWebhook.xcodeproj CALLWEBHOOK_PUSH_RELAY_URL="$CALLWEBHOOK_PUSH_RELAY_URL" -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CURRENT_PROJECT_VERSION="${{ github.run_number }}" APS_ENVIRONMENT=production
       - name: Verify archived Default Dialer entitlement
         run: |
           APP_PATH="$RUNNER_TEMP/CallWebhook.xcarchive/Products/Applications/CallWebhook.app"

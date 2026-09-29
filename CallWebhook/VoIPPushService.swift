@@ -8,6 +8,9 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
     @Published private(set) var status = "Anruf-Push wird vorbereitet"
     @Published private(set) var backendStatus = ""
     @Published private(set) var configured = false
+    @Published private(set) var routeReady = false
+    @Published private(set) var settingUp = false
+    private var synchronizing = false
     private var registry: PKPushRegistry?
     private var token = ""
     private var wakeTasks: [UUID: Task<Void, Never>] = [:]
@@ -32,16 +35,59 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         registry.desiredPushTypes = [.voIP]
     }
 
-    func synchronize() async {
+    @discardableResult
+    func synchronize() async -> Bool {
         start()
-        guard !token.isEmpty else { return }
+        guard !synchronizing, HomeAssistantConnection.configuredBase != nil else { return false }
+        guard !token.isEmpty else {
+            backendStatus = "Apple hat noch keinen VoIP-Push-Token geliefert. Anmeldung wird nach Empfang fortgesetzt."
+            return false
+        }
+        synchronizing = true
+        let currentToken = token
+        defer {
+            synchronizing = false
+            if currentToken != token { Task { await self.synchronize() } }
+        }
         do {
             _ = try await request(path: "api/callwebhook/voip", method: "POST", body: [
-                "action": "register", "token": token, "environment": environment ?? ""
+                "action": "register", "token": currentToken, "environment": environment ?? ""
             ])
             status = "iPhone für Anruf-Push registriert"
+            let state = try await request(path: "api/callwebhook/voip")
+            if PushRelayRegistration.shared.baseURL != nil {
+                guard (state["api_version"] as? Int ?? 0) >= 8 else {
+                    throw failure("CallWebhook Bootstrap muss die HA-Komponente für den gemeinsamen Push-Dienst aktualisieren.")
+                }
+                let registration = try await PushRelayRegistration.shared.register(token: currentToken, environment: environment ?? "")
+                do {
+                    _ = try await request(path: "api/callwebhook/voip", method: "POST", body: [
+                        "action": "relay", "url": registration.url, "credential": registration.credential
+                    ])
+                } catch {
+                    PushRelayRegistration.shared.invalidateRegistration()
+                    throw error
+                }
+            }
             await refreshStatus()
-        } catch { status = error.localizedDescription }
+            return true
+        } catch { status = error.localizedDescription; backendStatus = error.localizedDescription; return false }
+    }
+
+    func completeSetup() async {
+        guard !settingUp, !SIPService.shared.active, !IncomingCallProvider.shared.hasCall else { return }
+        settingUp = true
+        defer { settingUp = false }
+        while synchronizing {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+        }
+        guard await synchronize() else { return }
+        guard configured else { return }
+        if !routeReady {
+            let success = await IncomingRouteRepair.shared.run(requireVoIP: true)
+            guard success else { backendStatus = IncomingRouteRepair.shared.status; return }
+            await refreshStatus()
+        }
     }
 
     func updateBackend() async {
@@ -74,7 +120,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                 try await Task.sleep(for: .seconds(1))
                 if let (data, code) = try? await HomeAssistantConnection.request(base: base, path: "api/callwebhook/setup/status"),
                    code == 200, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (value["api_version"] as? Int ?? 0) >= 7, value["ready_for_asterisk"] as? Bool == true {
+                   (value["api_version"] as? Int ?? 0) >= 8, value["ready_for_asterisk"] as? Bool == true {
                     await synchronize()
                     await refreshStatus()
                     return
@@ -88,7 +134,15 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         do {
             let value = try await request(path: "api/callwebhook/voip")
             configured = value["configured"] as? Bool == true
-            backendStatus = configured ? (value["message"] as? String ?? "Push-Schlüssel hinterlegt") : "Apple-Push-Schlüssel auf Home Assistant fehlt"
+            routeReady = value["route_ready"] as? Bool == true
+            if configured {
+                backendStatus = routeReady ? "Anruf-Push eingerichtet. Eingehenden Anruf bei gesperrtem iPhone testen." : "Push-Zugang hinterlegt; Asterisk-Anrufstrecke noch einrichten."
+                if let last = value["message"] as? String, last != "Noch kein Anruf-Push gesendet" { backendStatus += " " + last }
+            } else {
+                backendStatus = PushRelayRegistration.shared.baseURL == nil
+                    ? "Der gemeinsame Push-Dienst wurde vom App-Anbieter noch nicht bereitgestellt. Du musst keinen Apple-Schlüssel eintragen."
+                    : "Automatische Anmeldung beim Push-Dienst noch nicht abgeschlossen."
+            }
         } catch { backendStatus = error.localizedDescription }
     }
 
@@ -146,7 +200,14 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
 
     nonisolated func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
         let value = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
-        Task { @MainActor in self.token = value; await self.synchronize() }
+        Task { @MainActor in
+            self.token = value
+            if UserDefaults.standard.bool(forKey: "setupCompleted") && !SIPService.shared.active && !IncomingCallProvider.shared.hasCall {
+                await self.completeSetup()
+            } else {
+                await self.synchronize()
+            }
+        }
     }
 
     nonisolated func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {

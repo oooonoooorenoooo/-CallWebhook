@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime
 import asyncio
 import json
+import hashlib
 import os
 import secrets
 import time
@@ -9,13 +10,13 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, parse_qs, quote
 
 import requests
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 7
+BACKEND_API_VERSION = 8
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -55,7 +56,9 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["progress_step"] = 5
         _asterisk_setup_state["message"] = "Asterisk läuft – Konfiguration wird geschrieben …"
         actual_path = f"/addon_configs/{actual_addon}/asterisk/custom"
-        files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), voip_dialplan(payload.get("extensions") or ""), actual_addon, actual_path)
+        extensions = voip_dialplan(payload.get("extensions") or "")
+        push_route_applied = f"/api/callwebhook/voip/hook/{_voip.get('hook_secret', '')}" in extensions
+        files = await hass.async_add_executor_job(install_asterisk_config, payload.get("pjsip"), extensions, actual_addon, actual_path)
         _asterisk_setup_state["progress_step"] = 6
         configured_tams = await hass.async_add_executor_job(save_setup, payload.get("mailbox_tam_1"), payload.get("mailbox_tam_2"), payload.get("mailbox_tam_3"))
         _asterisk_setup_state["message"] = "Asterisk-Konfiguration geschrieben – Neustart läuft …"
@@ -63,6 +66,10 @@ async def _run_asterisk_setup(hass, payload):
         _asterisk_setup_state["progress_step"] = 6
         _asterisk_setup_state["message"] = "Asterisk wird neu gestartet und abschließend geprüft …"
         await hass.async_add_executor_job(wait_for_asterisk_started, actual_addon)
+        async with _voip_lock:
+            value = dict(_voip, route_ready=push_route_applied and voip_configured())
+            await hass.async_add_executor_job(save_voip, value)
+            _voip.update(value)
         _asterisk_setup_state["progress_step"] = 7
         result = {"addon": actual_addon, "files": files, "config_verified": True, "mailbox_tams": configured_tams}
         _asterisk_setup_state = {"state": "done", "message": "Asterisk installiert, gestartet und konfiguriert", "progress_step": 7, "progress_total": 7, "result": result}
@@ -1139,10 +1146,25 @@ def save_voip(value):
     temp.replace(VOIP_FILE)
 
 
+def voip_configured():
+    return bool(_voip.get("key") or (_voip.get("relay_url") and _voip.get("relay_credential")))
+
+
+async def relay_request(url, credential, path, payload=None):
+    # Never follow redirects with the installation's bearer credential.
+    async with ClientSession(timeout=ClientTimeout(total=6)) as session:
+        async with session.request("POST" if payload is not None else "GET", url + path,
+                headers={"Authorization": "Bearer " + credential}, json=payload,
+                allow_redirects=False) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Push-Dienst antwortet mit HTTP {response.status}")
+            return await response.json()
+
+
 def voip_dialplan(original):
     """Replace only the app-owned incoming contexts; preserve outgoing routes."""
     import re
-    if not _voip.get("device") or not _voip.get("key"):
+    if not _voip.get("device") or not voip_configured():
         return original
     secret = _voip["hook_secret"]
     # Supervisor's HA hostname is reachable from the Asterisk add-on network.
@@ -1184,9 +1206,20 @@ async def send_voip_push(call_id, caller):
     global _voip_last_status
     from aioapns import APNs, NotificationRequest, PushType
     device = _voip.get("device")
-    if not device or not _voip.get("key"):
-        _voip_last_status = "Apple-Push-Schlüssel oder iPhone-Registrierung fehlt"
+    if not device or not voip_configured():
+        _voip_last_status = "Push-Dienst oder iPhone-Registrierung fehlt"
         return False
+    if _voip.get("relay_url") and _voip.get("relay_credential"):
+        try:
+            response = await relay_request(_voip["relay_url"], _voip["relay_credential"], "/v1/ring",
+                {"call_id": call_id, "caller": caller[:128]})
+            if response.get("accepted") is not True:
+                raise RuntimeError("Push nicht angenommen")
+            _voip_last_status = "Anruf-Push von Apple angenommen (Zustellung noch nicht bestätigt)"
+            return True
+        except Exception:
+            _voip_last_status = "Anruf-Push über den gemeinsamen Dienst fehlgeschlagen"
+            return False
     environment = device["environment"]
     client = _voip_clients.get(environment)
     if client is None:
@@ -1216,7 +1249,9 @@ class CallWebhookVoIPView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request):
-        return self.json({"configured": bool(_voip.get("key")),
+        return self.json({"configured": voip_configured(), "api_version": BACKEND_API_VERSION,
+                          "mode": "relay" if _voip.get("relay_credential") else "direct",
+                          "route_ready": bool(_voip.get("route_ready")),
                           "registered": bool(_voip.get("device")), "message": _voip_last_status})
 
     async def post(self, request):
@@ -1236,6 +1271,26 @@ class CallWebhookVoIPView(HomeAssistantView):
                 elif action == "unregister":
                     if payload.get("token") == value.get("device", {}).get("token"):
                         value.pop("device", None)
+                elif action == "relay":
+                    url, credential = payload.get("url", ""), payload.get("credential", "")
+                    if not isinstance(url, str) or not isinstance(credential, str):
+                        raise ValueError()
+                    parsed = urlparse(url)
+                    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                            or parsed.query or parsed.fragment or parsed.path not in ("", "/")
+                            or not re.fullmatch(r"[0-9a-f]{64}", credential)):
+                        raise ValueError()
+                    url = url.rstrip("/")
+                    device = value.get("device", {})
+                    try:
+                        registered = await relay_request(url, credential, "/v1/registration")
+                    except Exception:
+                        return self.json({"ok": False, "error": "Push-Dienst nicht erreichbar oder Anmeldung ungültig"}, status_code=502)
+                    if (registered.get("registered") is not True
+                            or registered.get("environment") != device.get("environment")
+                            or registered.get("token_hash") != hashlib.sha256(device.get("token", "").encode()).hexdigest()):
+                        raise ValueError()
+                    value.update(relay_url=url, relay_credential=credential)
                 elif action == "credentials":
                     from cryptography.hazmat.primitives.serialization import load_pem_private_key
                     from cryptography.hazmat.primitives.asymmetric import ec

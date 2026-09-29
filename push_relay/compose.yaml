@@ -1,0 +1,39 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: push_relay/Dockerfile
+    restart: unless-stopped
+    environment:
+      APNS_TEAM_ID: ${APNS_TEAM_ID:?Set the Apple team ID}
+      APNS_KEY_ID: ${APNS_KEY_ID:?Set the APNs key ID}
+      APNS_KEY_FILE: /run/secrets/apns_key
+    secrets:
+      - apns_key
+    volumes:
+      - relay_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  https:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      PUSH_HOST: ${PUSH_HOST:?Set the public DNS hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [relay]
+secrets:
+  apns_key:
+    file: ${APNS_KEY_FILE:?Set the absolute path to the APNs p8 file}
+volumes:
+  relay_data:
+  caddy_data:
+  caddy_config:

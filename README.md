@@ -10,18 +10,27 @@ acknowledges readiness. Asterisk then dials the new contact; its SIP header and
 push payload share one call UUID. Declines, duplicate pushes and expired calls are
 handled without presenting a second call. No setup-progress pushes are used.
 
-One-time setup in **Extras → Anrufe im Hintergrund / VoIP-Push**:
+The shared push relay is implemented under [`push_relay`](push_relay/README.md).
+The app uses Apple App Attest to enroll automatically; each HA installation receives
+only its own device-scoped credential. **The operator must deploy the relay and
+set `CALLWEBHOOK_PUSH_RELAY_URL` before automatic background push can work.**
+No deployed URL or working live APNs service is included in the repository.
 
-1. Install/update the HA backend with the provided Bootstrap button and wait for
-   HA to finish restarting. The existing Bootstrap downloads the updated backend
-   and manifest; no wizard reset is needed.
-2. If an APNs key is already saved on HA, use **Vorhandene Push-Einrichtung wieder aktivieren**. Token renewal preserves the existing key. Otherwise select an existing valid Apple **APNs** `.p8` key, its Key ID and Team ID. App Store Connect API
-   keys cannot send APNs notifications. The APNs key stays on HA in
-   `/config/callwebhook/voip.json` (permissions 0600), never in the app bundle/git.
-3. Save and activate. This registers the iPhone and provisions the incoming
-   Asterisk push route using the existing mailbox assignments and SIP accounts.
-4. Verify a real incoming call with the iPhone locked. SIP/RTP still need access
-   to Asterisk (home network or VPN). APNs acceptance alone is not a delivery test.
+The final assistant step automatically registers push and provisions the Asterisk
+incoming route. Existing completed installations also attempt this on app start.
+No Apple key file or Apple developer account is required from app users. When the
+service is not yet available, the assistant reports it rather than pretending
+incoming background calls are ready. Extras retains only the wizard restart entry,
+not separate push/key-import/repair menus.
+
+HA backend API 8 is required: CallWebhook Bootstrap installs it and restarts HA.
+In relay mode `/config/callwebhook/voip.json` is created automatically with mode
+0600 and contains the installation credential, not the Apple key. Existing direct
+APNs credentials remain supported for private installations.
+
+Test with a real incoming call while the iPhone is locked. The iPhone still needs
+SIP/RTP access to Asterisk (home network or VPN). APNs acceptance alone is not a
+delivery test. There is currently one iPhone per HA/Asterisk installation.
 
 CI checks the signed `aps-environment` against the app configuration: development
 for the direct IPA, production for TestFlight. When the old profile lacks push,

@@ -188,6 +188,7 @@ private struct SetupWizardView: View {
 
     @State private var step = 0
     @State private var functionTestRunning = false
+    @ObservedObject private var setupPush = VoIPPushService.shared
     @State private var functionTestResults: [String] = []
     @State private var mailboxNumbersVerified = false
     @State private var lineAssignmentStatus = ""
@@ -308,7 +309,7 @@ private struct SetupWizardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .disabled(isSavingMailboxes)
+                .disabled(isSavingMailboxes || setupPush.settingUp)
 
                 if let mailboxSaveError {
                     Text(mailboxSaveError).foregroundStyle(.red).padding(.horizontal)
@@ -321,7 +322,7 @@ private struct SetupWizardView: View {
                 HStack {
                     if step > 0 {
                         Button("Zurück") { mailboxSaveError = nil; step -= 1 }
-                            .disabled(isSavingMailboxes)
+                            .disabled(isSavingMailboxes || setupPush.settingUp)
                             .buttonStyle(.bordered)
                     }
                     Spacer()
@@ -336,14 +337,14 @@ private struct SetupWizardView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canContinue || isSavingMailboxes || (step == 3 && !mailboxSelectionVerified))
+                    .disabled(!canContinue || isSavingMailboxes || setupPush.settingUp || (step == 3 && !mailboxSelectionVerified))
                 }
                 .padding()
             }
             .toolbar {
                 if let onCancel {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Schließen", action: onCancel).disabled(isSavingMailboxes || isProvisioningSIP || functionTestRunning)
+                        Button("Schließen", action: onCancel).disabled(isSavingMailboxes || isProvisioningSIP || functionTestRunning || setupPush.settingUp)
                     }
                 }
             }
@@ -822,6 +823,9 @@ private struct SetupWizardView: View {
                   result["assignments"] as? [String: Int] == assignments else {
                 throw URLError(.badServerResponse)
             }
+            for line in 1...3 {
+                UserDefaults.standard.set(assignments["mailbox_tam_\(line)"], forKey: "setupMailbox\(line)TAM")
+            }
             return true
         } catch {
             mailboxSaveError = "Leitungs-/Anrufbeantworter-Zuordnung nicht gespeichert: \(error.localizedDescription). Bitte erneut auf Weiter tippen."
@@ -923,6 +927,15 @@ private struct SetupWizardView: View {
             setupCheck("Mobilfunk-Rufumleitungen", detail: forwardingReady ? "Aktivierung vom Benutzer nach Netzbestätigung bestätigt" : "Aktivierung für die Mobilfunkleitungen noch bestätigen", ready: forwardingReady)
             setupCheck("Mailbox-Auswahl in der App", detail: mailboxSummary, ready: mailboxSelectionVerified)
             setupCheck("Reagierende Rufnummern der FRITZ!-Mailboxen", detail: mailboxNumbersVerified ? "Aus der FRITZ!Box gelesen und abgeglichen" : "Noch nicht geprüft – Funktionstest starten", ready: mailboxNumbersVerified)
+            Section("Eingehende Anrufe bei gesperrtem iPhone") {
+                Text(setupPush.backendStatus).font(.caption)
+                if setupPush.settingUp { ProgressView("Anruf-Push wird eingerichtet …") }
+                Button("Anruf-Push automatisch einrichten / erneut prüfen") {
+                    Task { await setupPush.completeSetup() }
+                }.disabled(setupPush.settingUp || setupSIP.active)
+                Text("Die Anmeldung erfolgt automatisch über CallWebhook. Kein Apple-Konto und keine Schlüsseldatei erforderlich. Für das Gespräch muss Asterisk weiterhin über Heimnetz oder VPN erreichbar sein.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Funktionstest") {
                 Button("Verbindungen und Mailbox-Zuordnung prüfen") {
                     Task { await runFunctionTest() }
@@ -941,6 +954,7 @@ private struct SetupWizardView: View {
             }
             setupCheck("Asterisk + iPhone-SIP", detail: asteriskConfigStatus, ready: asteriskInstalled && setupSIP.registered)
         }
+        .task { await setupPush.completeSetup() }
     }
 
     @MainActor
@@ -2209,7 +2223,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 7,
+            guard version >= 8,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

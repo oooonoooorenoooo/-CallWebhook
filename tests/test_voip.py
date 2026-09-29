@@ -2,6 +2,7 @@
 import ast
 import asyncio
 import json
+import hashlib
 import os
 from pathlib import Path
 import secrets
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+from urllib.parse import urlparse
 
 SOURCE = Path(__file__).parents[1] / 'homeassistant/custom_components/callwebhook/__init__.py'
 
@@ -26,10 +28,11 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         path = Path(self.directory.name)
-        names = ('load_voip', 'save_voip', 'voip_dialplan', 'send_voip_push',
+        names = ('load_voip', 'save_voip', 'voip_configured', 'voip_dialplan', 'send_voip_push',
                  'CallWebhookVoIPView', 'CallWebhookVoIPCallView', 'CallWebhookVoIPHookView')
         nodes = [n for n in ast.parse(SOURCE.read_text()).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name in names]
         self.ns = dict(json=json, asyncio=asyncio, os=os, secrets=secrets, time=time,
+            hashlib=hashlib, urlparse=urlparse, BACKEND_API_VERSION=8,
             BASE_DIR=path, VOIP_FILE=path/'voip.json', VOIP_TOPIC='test.app.voip', _voip={},
             _voip_calls={}, _voip_clients={}, _voip_lock=asyncio.Lock(), _voip_last_status='',
             HomeAssistantView=View, web=SimpleNamespace(Response=lambda **kw: SimpleNamespace(**kw)))
@@ -80,6 +83,38 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
                      {'action':'register', 'token':'a'*64, 'environment':'test'}):
             self.assertEqual((await view.post(self.request(body)))[0], 400)
         self.assertFalse(self.ns['VOIP_FILE'].exists())
+
+    async def test_relay_registration_bound_to_device_and_credentials_never_returned(self):
+        view = self.ns['CallWebhookVoIPView']()
+        token = 'b'*64
+        await view.post(self.request(dict(action='register', token=token, environment='production')))
+        relay = AsyncMock(return_value=dict(registered=True, token_hash=hashlib.sha256(token.encode()).hexdigest(), environment='production'))
+        self.ns['relay_request'] = relay
+        payload = dict(action='relay', url='https://push.example.com', credential='d'*64)
+        self.assertEqual((await view.post(self.request(payload)))[0], 200)
+        state = (await view.get(self.request()))[1]
+        self.assertTrue(state['configured'])
+        self.assertEqual(state['mode'], 'relay')
+        self.assertFalse(state['route_ready'])
+        self.assertNotIn('d'*64, json.dumps(state))
+        self.assertNotIn('key', self.ns['_voip'])
+        self.assertIn('X-CallWebhook-ID', self.ns['voip_dialplan']('[outgoing]\n'))
+        relay.return_value['token_hash'] = 'wrong-device'
+        self.assertEqual((await view.post(self.request(payload)))[0], 400)
+        for url in ('http://push.example.com', 'https://user:pass@push.example.com', 'https://push.example.com/?query=1'):
+            self.assertEqual((await view.post(self.request(dict(payload, url=url))))[0], 400)
+
+    async def test_relay_sends_only_call_metadata_not_device_token_or_apple_key(self):
+        self.ns['_voip'].update(relay_url='https://push.example.com', relay_credential='d'*64,
+                               device=dict(token='b'*64, environment='production'))
+        relay = AsyncMock(return_value={'accepted': True})
+        self.ns['relay_request'] = relay
+        with patch.dict(sys.modules, aioapns=SimpleNamespace(APNs=None, NotificationRequest=None, PushType=None)):
+            call_id = str(uuid4())
+            self.assertTrue(await self.ns['send_voip_push'](call_id, '030123'))
+            relay.assert_awaited_once_with('https://push.example.com', 'd'*64, '/v1/ring', {'call_id': call_id, 'caller': '030123'})
+            relay.side_effect = RuntimeError('offline')
+            self.assertFalse(await self.ns['send_voip_push'](str(uuid4()), '030123'))
 
     async def test_hook_requires_secret_and_deduplicates_push(self):
         view = self.ns['CallWebhookVoIPHookView']()

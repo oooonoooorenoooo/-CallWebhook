@@ -12,15 +12,24 @@ struct CallWebhookApp: App {
                 .environmentObject(monitor)
                 .task {
                     connectSIPIfConfigured()
-                    await VoIPPushService.shared.synchronize()
+                    await synchronizePush()
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
                         connectSIPIfConfigured()
                         monitor.sendCurrentState()
-                        Task { await VoIPPushService.shared.synchronize() }
+                        Task { await synchronizePush() }
                     }
                 }
+        }
+    }
+
+    @MainActor
+    private func synchronizePush() async {
+        if UserDefaults.standard.bool(forKey: "setupCompleted") {
+            await VoIPPushService.shared.completeSetup()
+        } else {
+            await VoIPPushService.shared.synchronize()
         }
     }
 

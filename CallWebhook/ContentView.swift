@@ -792,9 +792,24 @@ private struct SetupWizardView: View {
     private func saveMailboxSelection() async -> Bool {
         guard !isSavingMailboxes, mailboxSelectionVerified else { return false }
         isSavingMailboxes = true
+        mailboxNumbersVerified = false
+        functionTestResults = []
         mailboxSaveError = nil
         defer { isSavingMailboxes = false }
         do {
+            guard let ha = HomeAssistantConnection.configuredBase else { throw URLError(.badURL) }
+            func backendVersion() async throws -> Int {
+                let (data, status) = try await HomeAssistantConnection.request(base: ha, path: "api/callwebhook/setup/status")
+                guard status == 200 else { return 0 }
+                return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["api_version"] as? Int ?? 0
+            }
+            if try await backendVersion() < 11 {
+                lineAssignmentStatus = "HA-Komponente für FRITZ!-Anrufbeantworter wird aktualisiert …"
+                await setupPush.updateBackend()
+            }
+            guard try await backendVersion() >= 11 else {
+                throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Die HA-Aktualisierung für das Schreiben der Anrufbeantworter ist noch nicht abgeschlossen."])
+            }
             try await synchronizeFritzLineNumbers()
             let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let base = URL(string: "http://192.168.178.\(input):8123"),
@@ -810,7 +825,12 @@ private struct SetupWizardView: View {
             let assignments = ["mailbox_tam_1": mailbox1TAM,
                                "mailbox_tam_2": sipLine2Enabled ? mailbox2TAM : -1,
                                "mailbox_tam_3": sipLine3Enabled ? mailbox3TAM : -1]
-            request.httpBody = try JSONSerialization.data(withJSONObject: assignments)
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "mailbox_tam_1": assignments["mailbox_tam_1"]!,
+                "mailbox_tam_2": assignments["mailbox_tam_2"]!,
+                "mailbox_tam_3": assignments["mailbox_tam_3"]!,
+                "line_numbers": ["1": line1Number, "2": line2Number, "3": line3Number]
+            ])
             var (data, response) = try await URLSession.shared.data(for: request)
             if (response as? HTTPURLResponse)?.statusCode == 401 {
                 token = try await HomeAssistantAuth.shared.refresh(instance: base)
@@ -818,12 +838,32 @@ private struct SetupWizardView: View {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
                 (data, response) = try await URLSession.shared.data(for: request)
             }
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                  let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  result["ok"] as? Bool == true,
-                  result["assignments"] as? [String: Int] == assignments else {
-                throw URLError(.badServerResponse)
+            if (response as? HTTPURLResponse)?.statusCode == 202 {
+                let deadline = Date().addingTimeInterval(600)
+                var completed = false
+                while Date() < deadline {
+                    let (bytes, status) = try await HomeAssistantConnection.request(base: base,
+                        path: "api/callwebhook/setup/mailboxes", timeout: 15)
+                    guard status == 200, let state = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+                        throw URLError(.badServerResponse)
+                    }
+                    lineAssignmentStatus = state["message"] as? String ?? "FRITZ!-Anrufbeantworter werden gespeichert …"
+                    if state["state"] as? String == "error" {
+                        throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: lineAssignmentStatus])
+                    }
+                    if state["state"] as? String == "completed" { data = bytes; completed = true; break }
+                    try await Task.sleep(for: .milliseconds(500))
+                }
+                guard completed else { throw URLError(.timedOut) }
             }
+            let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  result["ok"] as? Bool == true, result["state"] as? String == "completed",
+                  result["assignments"] as? [String: Int] == assignments else {
+                throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    result["error"] as? String ?? "FRITZ!-Anrufbeantworter-Zuordnung nicht bestätigt"])
+            }
+            mailboxNumbersVerified = true
             for line in 1...3 {
                 UserDefaults.standard.set(assignments["mailbox_tam_\(line)"], forKey: "setupMailbox\(line)TAM")
             }
@@ -954,10 +994,13 @@ private struct SetupWizardView: View {
                 ForEach(mailboxAssignmentInstructions, id: \.self) { instruction in
                     Text(instruction).font(.caption).textSelection(.enabled)
                 }
-                Button("Anrufbeantworter in der FRITZ!Box bearbeiten") {
+                Button("Anrufbeantworter-Zuordnung auf FRITZ!Box speichern") {
+                    Task { if await saveMailboxSelection() { await runFunctionTest() } }
+                }.disabled(isSavingMailboxes || functionTestRunning || setupSIP.active)
+                Button("Anrufbeantworter in der FRITZ!Box öffnen") {
                     if let url = URL(string: "http://\(fritzHost)/?lp=tam") { UIApplication.shared.open(url) }
                 }
-                Text("Unter Telefonie → Anrufbeantworter → Einstellungen nur die zugehörigen Festnetznummern auswählen und speichern. ‚Alle Rufnummern‘ passt nicht zur getrennten Zuordnung. Danach den Funktionstest erneut starten.")
+                Text("Beim Speichern überträgt CallWebhook die gewählten Rufnummern auf die FRITZ!Box und liest sie zur Kontrolle zurück. Falls die FRITZ!Box es verlangt, die Änderung mit einer Gerätetaste bestätigen.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Anschließend einen ausgehenden Anruf testen, das iPhone sperren und von einem zweiten Telefon anrufen. Für den Mailbox-Test nicht annehmen und eine Nachricht hinterlassen.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -2220,7 +2263,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 10,
+            guard version >= 11,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

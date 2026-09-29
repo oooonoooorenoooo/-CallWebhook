@@ -27,7 +27,7 @@ service is not yet available, the assistant reports it rather than pretending
 incoming background calls are ready. Extras retains only the wizard restart entry,
 not separate push/key-import/repair menus.
 
-HA backend API 10 is required: CallWebhook Bootstrap installs it and restarts HA.
+HA backend API 11 is required: CallWebhook Bootstrap installs it and restarts HA.
 In relay mode `/config/callwebhook/voip.json` is created automatically with mode
 0600 and contains the installation credential, not the Apple key. Existing direct
 APNs credentials remain supported for private installations.
@@ -52,9 +52,9 @@ using the public HTTPS service. Enrollment/TLS failures are retained in the fina
 function test instead of being replaced by a stored configuration flag. Error
 messages distinguish HA relay enrollment from Apple App Attest.
 
-TAM verification requires the exact selected phone-number set. An empty FRITZ!
-PhoneNumbers value means all numbers and fails separate-line verification. The
-wizard no longer activates unused TAM slots without assigned numbers: SetEnable
-cannot write that assignment. Use the FRITZ!Box answering-machine settings for
-number assignment and rerun the function test; the wizard displays the expected
-AB-to-number mapping.
+TAM assignments are now written through FRITZ!OS's authenticated `edit_tam`
+WebGUI handler and independently read back through TR-064. The real form provides
+number field names/values and all existing options; the stored timer is preserved.
+The assistant handles the physical FRITZ!Box confirmation when requested and
+reports a failed write or mismatched readback instead of accepting all numbers.
+No firmware, raw router configuration or existing recordings are replaced.

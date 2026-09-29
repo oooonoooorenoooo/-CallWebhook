@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 10
+BACKEND_API_VERSION = 11
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1166,10 +1166,208 @@ class CallWebhookSetupStatusView(HomeAssistantView):
         })
 
 
+# FRITZ!OS 8.25 edit_tam.lua uses num_<slot> values (real numbers),
+# num_selection=sel_nums and apply. Read the complete form before posting because
+# the same handler also saves recording, PIN, mail and calendar settings.
+class FritzTAMConfigurationError(ValueError):
+    pass
+
+
+def fritz_tam_form(html, index, numbers, timer_xml):
+    import re
+    from html.parser import HTMLParser
+    class Form(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.inside = False
+            self.found = False
+            self.fields = {}
+            self.choices = {}
+            self.select = None
+            self.options = []
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "form":
+                self.inside = a.get("id") == "main_form"
+                if self.inside:
+                    if self.found or urlparse(a.get("action", "")).path != "/fon_devices/edit_tam.lua":
+                        raise FritzTAMConfigurationError("Unbekanntes FRITZ!-Anrufbeantworterformular")
+                    self.found = True
+                return
+            if not self.inside:
+                return
+            name = a.get("name", "")
+            if tag == "input" and name:
+                kind = a.get("type", "text").lower()
+                if re.fullmatch(r"num_\d+", name) and "disabled" not in a:
+                    self.choices[name] = a.get("value", "")
+                if "disabled" in a or kind in ("submit", "button", "reset", "file", "image"):
+                    return
+                if kind in ("checkbox", "radio") and "checked" not in a:
+                    return
+                self.fields[name] = a.get("value", "on" if kind in ("checkbox", "radio") else "")
+            elif tag == "select":
+                self.select = name if name and "disabled" not in a else None
+                self.options = []
+            elif tag == "option" and self.select and "disabled" not in a:
+                self.options.append((a.get("value", ""), "selected" in a))
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.inside = False
+            if tag == "select" and self.select:
+                if self.options:
+                    self.fields[self.select] = next((v for v, selected in self.options if selected), self.options[0][0])
+                self.select = None
+    form = Form()
+    form.feed(html)
+    fields = form.fields
+    if not form.found or fields.get("TamNr") != str(index):
+        raise FritzTAMConfigurationError("Anrufbeantworterformular oder Web-Anmeldung nicht bestätigt")
+    required = ("tam_name", "call_delay", "rec_len", "operation_mode")
+    if any(not fields.get(key) or fields[key] == "tochoose" for key in required):
+        raise FritzTAMConfigurationError("Vorhandene Anrufbeantworter-Einstellungen nicht vollständig lesbar")
+    normalize = lambda value: "".join(c for c in value if c.isdigit())
+    expected = {normalize(value) for value in numbers}
+    if not expected or any(len(value) < 3 for value in expected):
+        raise FritzTAMConfigurationError("Echte Festnetznummern erforderlich")
+    chosen = {key: value for key, value in form.choices.items() if normalize(value) in expected}
+    if {normalize(value) for value in chosen.values()} != expected:
+        raise FritzTAMConfigurationError("Gewählte Rufnummer fehlt im echten FRITZ!-Anrufbeantworterformular")
+    fields = {key: value for key, value in fields.items() if not re.fullmatch(r"num_\d+", key)
+              and not key.startswith("timer_")}
+    fields.update(chosen)
+    fields.update(num_selection="sel_nums", apply="", page="edit_tam", xhr="1", lang="de")
+    # Preserve the raw stored timer rather than inventing a default schedule.
+    if not isinstance(timer_xml, str) or len(timer_xml) > 65536 or "<!" in timer_xml:
+        raise FritzTAMConfigurationError("Zeitplan konnte nicht sicher übernommen werden")
+    if timer_xml.strip():
+        try:
+            root = ET.fromstring(timer_xml)
+            if root.tag != "rule" or root.get("id") != str(index):
+                raise ValueError()
+            for n, item in enumerate(root):
+                t, action, day = item.get("time", ""), item.get("action", ""), item.get("day", "")
+                if (item.tag != "item" or not re.fullmatch(r"(?:[01]\d|2[0-3])[0-5]\d", t)
+                        or action not in ("0", "1", "2", "3") or not day.isdigit() or not 1 <= int(day) <= 127):
+                    raise ValueError()
+                fields[f"timer_item_{n}"] = f"{t};{action};{day}"
+        except Exception:
+            raise FritzTAMConfigurationError("Zeitplanformat unbekannt; keine Änderung geschrieben") from None
+    elif fields["operation_mode"] == "timectrl":
+        raise FritzTAMConfigurationError("Aktiver Zeitplan fehlt; keine Änderung geschrieben")
+    return fields
+
+
+def fritz_web_sid():
+    import re
+    service = "urn:dslforum-org:service:DeviceConfig:1"
+    action = "X_AVM-DE_CreateUrlSID"
+    soap = f'<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:{action} xmlns:u="{service}"/></s:Body></s:Envelope>'
+    response = requests.post(f"http://{HOST}:49000/upnp/control/deviceconfig", data=soap.encode(),
+        headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{service}#{action}"'},
+        auth=get_auth(), timeout=10)
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    url = next((e.text for e in root.iter() if e.tag.endswith("NewX_AVM-DE_UrlSID")), "")
+    sid = parse_qs(urlparse(url or "").query).get("sid", [""])[0]
+    if not re.fullmatch(r"[0-9a-fA-F]{16}", sid) or sid == "0" * 16:
+        raise FritzTAMConfigurationError("FRITZ!-Web-Anmeldung fehlt; Benutzerrechte für Einstellungen prüfen")
+    return sid
+
+
+def read_tam_info(index):
+    response = tam_control_request("GetInfo", f"<NewIndex>{index}</NewIndex>")
+    return {element.tag.split("}")[-1]: element.text or "" for element in ET.fromstring(response.content).iter()}
+
+
+def tam_numbers_match(info, numbers):
+    normalize = lambda value: "".join(c for c in value if c.isdigit())
+    actual = {normalize(value) for value in info.get("NewPhoneNumbers", "").split(",")}
+    expected = {normalize(value) for value in numbers}
+    return bool(expected) and all(len(value) >= 3 for value in actual | expected) and actual == expected
+
+
+def configure_fritz_tams(groups, report):
+    with requests.Session() as session:
+        sid = None
+        for index, numbers in sorted(groups.items()):
+            before = read_tam_info(index)
+            if tam_numbers_match(before, numbers) and before.get("NewEnable", "").lower() in ("1", "true"):
+                report(f"AB {index + 1}: Rufnummern bereits richtig")
+                continue
+            if sid is None:
+                sid = fritz_web_sid()
+            def web_request(path, fields, method="GET"):
+                args = {"params" if method == "GET" else "data": dict(fields, sid=sid)}
+                response = session.request(method, f"http://{HOST}" + path, timeout=15, allow_redirects=False, **args)
+                if response.status_code != 200:
+                    raise FritzTAMConfigurationError("FRITZ!-Webzugriff nicht bestätigt; Benutzerrechte für Einstellungen prüfen")
+                return response
+            report(f"AB {index + 1}: bestehende Einstellungen und Zeitplan lesen …")
+            html = web_request("/fon_devices/edit_tam.lua", {"TamNr": str(index)}).text
+            timer = web_request("/query.lua", {"cw_timer": f"timer:settings/TamTimerXML{index}"}).json()
+            if not isinstance(timer, dict) or "cw_timer" not in timer:
+                raise FritzTAMConfigurationError("Vorhandener Zeitplan nicht lesbar; keine Änderung geschrieben")
+            fields = fritz_tam_form(html, index, numbers, timer["cw_timer"])
+            report(f"AB {index + 1}: ausgewählte Festnetznummern speichern …")
+            result = web_request("/data.lua", fields, "POST").json().get("data", {})
+            if result.get("apply") == "twofactor":
+                state = result.get("twofactor", "")
+                if "starterror" in state:
+                    raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung durch anderen Auftrag belegt; erneut versuchen")
+                report("Bitte die Änderung mit einer Taste an der FRITZ!Box bestätigen …")
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
+                    check = web_request("/twofactor.lua", {"tfa_active": ""}, "POST").json()
+                    if check.get("done") is True:
+                        if check.get("active") is not True:
+                            raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung abgebrochen")
+                        break
+                    time.sleep(0.5)
+                else:
+                    raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung nicht rechtzeitig erfolgt")
+                fields.update(confirmed="", twofactor="")
+                result = web_request("/data.lua", fields, "POST").json().get("data", {})
+            if result.get("apply") != "ok":
+                raise FritzTAMConfigurationError("FRITZ!Box hat die AB-Einstellungen nicht übernommen")
+            after = read_tam_info(index)
+            if not tam_numbers_match(after, numbers):
+                raise FritzTAMConfigurationError(f"AB {index + 1}: zurückgelesene Rufnummern stimmen nicht überein")
+            if after.get("NewEnable", "").lower() not in ("1", "true"):
+                tam_control_request("SetEnable", f"<NewIndex>{index}</NewIndex><NewEnable>1</NewEnable>")
+                after = read_tam_info(index)
+            if not tam_numbers_match(after, numbers) or after.get("NewEnable", "").lower() not in ("1", "true"):
+                raise FritzTAMConfigurationError(f"AB {index + 1}: Aktivierung nicht bestätigt")
+            report(f"AB {index + 1}: Rufnummern gespeichert und aus FRITZ!Box zurückgelesen")
+
+
+_tam_setup_state = {"state": "idle", "message": "Noch nicht gestartet", "assignments": {}}
+
+
+async def run_mailbox_setup(hass, payload, groups):
+    def report(message):
+        hass.loop.call_soon_threadsafe(_tam_setup_state.update, {"message": message})
+    try:
+        await hass.async_add_executor_job(configure_fritz_tams, groups, report)
+        keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
+        async with _refresh_lock:
+            await hass.async_add_executor_job(save_setup, *(payload[key] for key in keys))
+        _tam_setup_state.update(state="completed", message="FRITZ!-Anrufbeantworter gespeichert und geprüft",
+            assignments={key: payload[key] for key in keys}, ok=True)
+    except FritzTAMConfigurationError as error:
+        _tam_setup_state.update(state="error", message=str(error), ok=False)
+    except Exception:
+        # Never expose a requests exception containing a session ID or form PIN.
+        _tam_setup_state.update(state="error", message="FRITZ!-Anrufbeantworter nicht vollständig gespeichert. Verbindung und Benutzerrechte prüfen; erneut versuchen.", ok=False)
+
+
 class CallWebhookMailboxSetupView(HomeAssistantView):
     url = "/api/callwebhook/setup/mailboxes"
     name = "api:callwebhook:setup:mailboxes"
     requires_auth = True
+
+    async def get(self, request):
+        return self.json(dict(_tam_setup_state))
 
     async def post(self, request):
         try:
@@ -1185,6 +1383,35 @@ class CallWebhookMailboxSetupView(HomeAssistantView):
         if _asterisk_setup_state.get("state") == "running":
             return self.json({"ok": False, "error": "Asterisk-Einrichtung läuft noch"}, status_code=409)
         hass = request.app["hass"]
+        if "line_numbers" in payload:
+            from homeassistant.components.http.const import KEY_HASS_USER
+            user = request.get(KEY_HASS_USER)
+            if not user or not user.is_admin:
+                raise web.HTTPForbidden()
+            if _tam_setup_state["state"] == "running":
+                return self.json(dict(_tam_setup_state), status_code=202)
+            import re
+            numbers = payload["line_numbers"]
+            groups = {}
+            if not isinstance(numbers, dict):
+                return self.json({"ok": False, "error": "Rufnummern fehlen"}, status_code=400)
+            for n, key in enumerate(keys, 1):
+                if payload[key] < 0:
+                    continue
+                number = numbers.get(str(n), "")
+                if not isinstance(number, str) or not re.fullmatch(r"[+0-9 ()/-]{3,32}", number) or len(re.sub(r"\D", "", number)) < 3:
+                    return self.json({"ok": False, "error": "Echte Festnetznummern erforderlich"}, status_code=400)
+                groups.setdefault(payload[key], []).append(number)
+            owners = {}
+            for index, values in groups.items():
+                for number in values:
+                    normalized = re.sub(r"\D", "", number)
+                    if normalized in owners and owners[normalized] != index:
+                        return self.json({"ok": False, "error": "Eine Rufnummer darf nur einem Anrufbeantworter zugeordnet sein"}, status_code=400)
+                    owners[normalized] = index
+            _tam_setup_state.update(state="running", message="FRITZ!-Anrufbeantworter werden eingerichtet …", assignments={}, ok=False)
+            hass.async_create_background_task(run_mailbox_setup(hass, payload, groups), "CallWebhook TAM setup")
+            return self.json(dict(_tam_setup_state), status_code=202)
         async with _refresh_lock:
             await hass.async_add_executor_job(save_setup, *(payload[key] for key in keys))
         return self.json({"ok": True, "assignments": {key: payload[key] for key in keys}})

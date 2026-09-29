@@ -1,0 +1,18 @@
+name: CallWebhook vollständig entfernen
+version: "1.0.0"
+slug: callwebhook_cleanup
+description: "Starten löscht CallWebhook, Asterisk, Push-Dienst und deren Daten dauerhaft und startet Home Assistant neu."
+url: https://github.com/oooonoooorenoooo/-CallWebhook
+startup: once
+boot: manual
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armv7
+map:
+  - homeassistant_config:rw
+hassio_api: true
+hassio_role: manager
+options: {}
+schema: {}

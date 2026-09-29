@@ -7,6 +7,23 @@ on:
     branches: [ main ]
 
 jobs:
+  cleanup-addon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Raspberry Pi cleanup tool
+        uses: docker/build-push-action@v6
+        with:
+          context: callwebhook_cleanup
+          platforms: linux/arm64
+          build-args: BUILD_FROM=ghcr.io/home-assistant/aarch64-base:3.22
+          load: true
+          tags: callwebhook-cleanup:ci
+      - name: Verify cleanup imports without executing deletion
+        run: docker run --rm --platform linux/arm64 --entrypoint python3 callwebhook-cleanup:ci -c "import cleanup; print('Cleanup tool imports ready')"
+
   push-relay-addon:
     runs-on: ubuntu-latest
     steps:
@@ -28,7 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test Home Assistant setup
-        run: python3 -m unittest discover -s tests -v
+        run: |
+          python3 -m venv "$RUNNER_TEMP/backend-tests"
+          "$RUNNER_TEMP/backend-tests/bin/pip" install PyYAML
+          "$RUNNER_TEMP/backend-tests/bin/python" -m unittest discover -s tests -v
       - name: Test authenticated push relay
         run: |
           python3 -m venv "$RUNNER_TEMP/relay-tests"
@@ -130,7 +150,7 @@ jobs:
           path: CallWebhook-signed.ipa
 
   testflight:
-    needs: [development, push-relay-addon]
+    needs: [development, push-relay-addon, cleanup-addon]
     runs-on: macos-26
     concurrency:
       group: callwebhook-testflight-main

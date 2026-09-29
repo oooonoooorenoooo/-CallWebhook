@@ -71,3 +71,7 @@ reports a failed write or mismatched readback instead of accepting all numbers.
 No firmware, raw router configuration or existing recordings are replaced.
 
 Der Einrichtungsassistent startet den Bootstrap nach erfolgreicher HA-Autorisierung automatisch, wenn das Backend fehlt oder veraltet ist. Nach dem HA-Neustart setzt er Asterisk fort; ein Wiederholungsbutton erscheint nur bei Fehlern. Anruf-Push unterscheidet jetzt Sendefehler, fehlende iPhone-Bestätigung und bestätigte Bereitschaft. Die Hangup-Route endet explizit, damit sie keine neuen Push-Anrufe auslöst.
+
+## Vollständige HA-Deinstallation
+
+Im App-Store des vorhandenen Repositorys **CallWebhook vollständig entfernen** installieren und starten. Das eigenständige Werkzeug entfernt CallWebhook, Bootstrap, Asterisk und den lokalen Push-Dienst samt Konfiguration und Standard-Anrufstatus-Helfer, startet HA wieder und deinstalliert sich selbst. Details und Löschumfang: [Anleitung](callwebhook_cleanup/DOCS.md).

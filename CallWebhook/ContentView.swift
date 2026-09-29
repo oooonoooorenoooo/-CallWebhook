@@ -181,6 +181,11 @@ struct ContentView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    if callSIP.incoming {
+                        Button { IncomingCallProvider.shared.answer() } label: {
+                            Image(systemName: "phone.fill").foregroundStyle(.white).padding().background(.green, in: Circle())
+                        }.accessibilityLabel("Anruf annehmen")
+                    }
                     if callSIP.active || dialer.isDialing {
                         Button { dialer.hangup() } label: {
                             Image(systemName: "phone.down.fill").foregroundStyle(.white).padding().background(.red, in: Circle())
@@ -1291,7 +1296,7 @@ private struct SetupWizardView: View {
 
         do {
             try SetupKeychain.set(pjsip, account: "asterisk-pjsip-generated")
-            try SetupKeychain.set(dialplan, account: "asterisk-extensions-generated")
+            try SetupKeychain.set(IncomingDialplan.addingIncomingRoute(to: dialplan), account: "asterisk-extensions-generated")
             asteriskConfigReady = true
             asteriskConfigStatus = "Konfiguration sicher vorbereitet – Übergabe an Home Assistant folgt"
         } catch {
@@ -3114,7 +3119,6 @@ private struct VoicemailPlayerView: View {
 }
 
 private struct DialPadView: View {
-    @ObservedObject private var sip = SIPService.shared
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     @ObservedObject private var sip = SIPService.shared
@@ -3297,6 +3301,7 @@ private struct DialPadView: View {
 }
 
 private struct ExtrasView: View {
+    @ObservedObject private var incomingRepair = IncomingRouteRepair.shared
     @EnvironmentObject var monitor: CallMonitor
     private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, sipLine2Prefix, sipLine3Prefix, haToken, externalListName, externalListURL, blacklist, whitelist }
     @FocusState private var focusedInputField: InputField?
@@ -3377,6 +3382,11 @@ private struct ExtrasView: View {
                     Text(sip.status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    Button("Eingehende Anrufe reparieren") {
+                        Task { await incomingRepair.run() }
+                    }.disabled(incomingRepair.running || sip.active)
+                    Text(incomingRepair.status).font(.caption)
 
                     Toggle("SIP-Leitung 2 aktiv", isOn: $sipLine2Enabled)
                     if sipLine2Enabled {

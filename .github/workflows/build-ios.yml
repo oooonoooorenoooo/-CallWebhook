@@ -35,6 +35,10 @@ jobs:
           "$RUNNER_TEMP/mailbox-connection-tests"
           swiftc CallWebhook/SIPDialNumber.swift tests/SIPDialNumberTests.swift -o "$RUNNER_TEMP/sip-dial-number-tests"
           "$RUNNER_TEMP/sip-dial-number-tests"
+      - name: Test incoming dialplan
+        run: |
+          swiftc CallWebhook/IncomingDialplan.swift tests/IncomingDialplanTests.swift -o "$RUNNER_TEMP/incoming-dialplan-tests"
+          "$RUNNER_TEMP/incoming-dialplan-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Install development signing

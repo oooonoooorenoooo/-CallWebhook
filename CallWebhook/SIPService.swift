@@ -10,6 +10,7 @@ final class SIPService: ObservableObject {
     @Published private(set) var registered = false
 
     @Published private(set) var callStatus = ""
+    @Published private(set) var incoming = false
     private var trackedCall: Call?
     private var core: Core?
     private var iterateTimer: Timer?
@@ -88,18 +89,34 @@ final class SIPService: ObservableObject {
     }
 
     private func updateCallState() {
+        if trackedCall == nil, let call = core?.currentCall,
+           String(describing: call.state).lowercased().contains("incoming") {
+            trackedCall = call
+            active = true
+            incoming = true
+            let caller = call.remoteAddress?.username ?? "Unbekannt"
+            callStatus = "Eingehender Anruf: \(caller)"
+            IncomingCallProvider.shared.report(caller: caller)
+        }
         guard let call = trackedCall else { return }
         let state = String(describing: call.state).lowercased()
         if state.contains("error") {
             callStatus = "Anruf fehlgeschlagen: \(call.errorInfo?.phrase ?? "SIP-Verbindung abgelehnt")"
             active = false
             trackedCall = nil
+            incoming = false
+            IncomingCallProvider.shared.ended(failed: state.contains("error"))
         } else if state == "end" || state.contains("released") {
             callStatus = "Anruf beendet"
             active = false
             trackedCall = nil
+            incoming = false
+            IncomingCallProvider.shared.ended(failed: state.contains("error"))
         } else if state.contains("streamsrunning") || state == "connected" {
+            incoming = false
             callStatus = "Gespräch verbunden"
+        } else if state.contains("incoming") {
+            return
         } else if state.contains("ringing") {
             callStatus = "Gegenstelle klingelt …"
         } else {
@@ -140,6 +157,7 @@ final class SIPService: ObservableObject {
         default:
             prefix = ""
         }
+        guard !IncomingRouteRepair.shared.running else { throw SIPError.provisioning }
         guard registered else { throw SIPError.notRegistered }
         guard !active else { throw SIPError.alreadyActive }
         guard let dialNumber = SIPDialNumber.normalized(number) else { throw SIPError.invalidNumber }
@@ -156,6 +174,23 @@ final class SIPService: ObservableObject {
         status = "SIP Leitung \(line): \(number)"
     }
 
+    func answerIncoming() throws {
+        guard incoming, let call = trackedCall else { throw SIPError.notConfigured }
+        core?.configureAudioSession()
+        try call.accept()
+        incoming = false
+        callStatus = "Anruf wird angenommen …"
+    }
+
+    func activateCallAudio(_ enabled: Bool) {
+        core?.activateAudioSession(activated: enabled)
+    }
+
+    func incomingPresentationFailed(_ error: Error) {
+        hangup()
+        callStatus = "Anruf konnte nicht angezeigt/angenommen werden: \(error.localizedDescription)"
+    }
+
     func hangup() {
         guard let core else { return }
         do {
@@ -165,11 +200,14 @@ final class SIPService: ObservableObject {
             return
         }
         active = false
+        incoming = false
+        trackedCall = nil
+        IncomingCallProvider.shared.ended()
         status = "SIP-Anruf beendet"
     }
 
     enum SIPError: LocalizedError {
-        case notConfigured, notRegistered, invalidNumber, inviteFailed, alreadyActive
+        case notConfigured, notRegistered, invalidNumber, inviteFailed, alreadyActive, provisioning
 
         var errorDescription: String? {
             switch self {
@@ -177,6 +215,7 @@ final class SIPService: ObservableObject {
             case .notRegistered: return "Keine SIP-Registrierung bei Asterisk. Verbindung zum Heimnetz/VPN und SIP-Zugang prüfen."
             case .invalidNumber: return "Die Rufnummer enthält ungültige Zeichen."
             case .inviteFailed: return "Asterisk/SIP konnte keinen Anruf starten."
+            case .provisioning: return "Asterisk wird gerade aktualisiert. Bitte warten."
             case .alreadyActive: return "Es läuft bereits ein SIP-Anruf."
             }
         }

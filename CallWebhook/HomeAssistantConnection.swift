@@ -13,6 +13,7 @@ enum HomeAssistantConnection {
             throw URLError(.userAuthenticationRequired)
         }
         var request = URLRequest(url: base.appendingPathComponent(path))
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpMethod = method
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

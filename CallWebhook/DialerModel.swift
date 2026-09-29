@@ -1,12 +1,15 @@
 import Foundation
 import LiveCommunicationKit
 import UIKit
+import AVFoundation
 
 @MainActor
 final class DialerModel: ObservableObject {
     @Published var number = ""
     @Published private(set) var status = "Bereit"
     @Published private(set) var lastDialedNumber = UserDefaults.standard.string(forKey: "lastDialedNumber") ?? ""
+    @Published private(set) var isDialing = false
+    private var dialingTask: Task<Void, Never>?
     private let sip = SIPService.shared
 
     func append(_ digit: String) {
@@ -23,7 +26,7 @@ final class DialerModel: ObservableObject {
 
     func call(line: Int) {
         let value = number.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty else { status = "Bitte zuerst eine Rufnummer eingeben"; return }
         if let cellularNumber = CellularRouting.cellularOnlyNumber(value) {
             callSystemNumber(cellularNumber)
             return
@@ -35,17 +38,12 @@ final class DialerModel: ObservableObject {
         status = "Anruf wird gestartet …"
         lastDialedNumber = value
         UserDefaults.standard.set(value, forKey: "lastDialedNumber")
-        do {
-            try sip.call(value, line: line)
-            status = "SIP Leitung \(line): \(value)"
-        } catch {
-            status = "SIP-Fehler: \(error.localizedDescription)"
-        }
+        startSIPCall(value, line: line)
     }
 
     func call(_ phoneNumber: String) {
         let value = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty else { status = "Bitte zuerst eine Rufnummer eingeben"; return }
         if let cellularNumber = CellularRouting.cellularOnlyNumber(value) {
             callSystemNumber(cellularNumber)
             return
@@ -60,12 +58,7 @@ final class DialerModel: ObservableObject {
         number = value
 
         if UserDefaults.standard.bool(forKey: "sipEnabled") {
-            do {
-                try sip.call(value)
-                status = "Asterisk/SIP: \(value)"
-            } catch {
-                status = "SIP-Fehler: \(error.localizedDescription)"
-            }
+            startSIPCall(value, line: 1)
             return
         }
 
@@ -77,6 +70,42 @@ final class DialerModel: ObservableObject {
                 status = "Mobilfunkanruf gestartet"
             } catch {
                 status = "Fehler: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func startSIPCall(_ value: String, line: Int) {
+        guard !isDialing, !sip.active else { status = "Ein Anruf läuft bereits"; return }
+        isDialing = true
+        dialingTask = Task {
+            defer { isDialing = false }
+            do {
+                let allowed = await withCheckedContinuation { continuation in
+                    AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                        continuation.resume(returning: granted)
+                    }
+                }
+                try Task.checkCancellation()
+                guard allowed else {
+                    status = "Mikrofonzugriff fehlt. Bitte in den iPhone-Einstellungen für CallWebhook erlauben."
+                    return
+                }
+                try sip.ensureStarted()
+                status = "Verbinde mit Asterisk …"
+                let deadline = Date().addingTimeInterval(15)
+                while !sip.registered && Date() < deadline {
+                    try await Task.sleep(for: .milliseconds(200))
+                }
+                try Task.checkCancellation()
+                guard sip.registered else { throw SIPService.SIPError.notRegistered }
+                try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+                try AVAudioSession.sharedInstance().setActive(true)
+                try sip.call(value, line: line)
+                status = "Leitung \(line): \(value)"
+            } catch is CancellationError {
+                status = "Anrufaufbau abgebrochen"
+            } catch {
+                status = "Anruf fehlgeschlagen: \(error.localizedDescription)"
             }
         }
     }
@@ -109,6 +138,7 @@ final class DialerModel: ObservableObject {
     }
 
     func hangup() {
+        dialingTask?.cancel()
         if UserDefaults.standard.bool(forKey: "sipEnabled") {
             sip.hangup()
             status = "SIP-Anruf beendet"

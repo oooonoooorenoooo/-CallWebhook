@@ -9,10 +9,16 @@ final class SIPService: ObservableObject {
     @Published private(set) var active = false
     @Published private(set) var registered = false
 
+    @Published private(set) var callStatus = ""
+    private var trackedCall: Call?
     private var core: Core?
     private var iterateTimer: Timer?
 
     private init() {}
+
+    func ensureStarted() throws {
+        if core == nil { try configureAndStart() }
+    }
 
     func configureAndStart(host: String? = nil, username: String? = nil, password: String? = nil) throws {
         let defaults = UserDefaults.standard
@@ -68,13 +74,36 @@ final class SIPService: ObservableObject {
         core = newCore
         status = "SIP wird registriert …"
 
-        iterateTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
             self?.core?.iterate()
             if let state = self?.core?.defaultAccount?.state {
                 let stateText = String(describing: state)
                 self?.status = "SIP: \(stateText)"
                 self?.registered = stateText.lowercased().contains("ok")
             }
+            self?.updateCallState()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        iterateTimer = timer
+    }
+
+    private func updateCallState() {
+        guard let call = trackedCall else { return }
+        let state = String(describing: call.state).lowercased()
+        if state.contains("error") {
+            callStatus = "Anruf fehlgeschlagen: \(call.errorInfo?.phrase ?? "SIP-Verbindung abgelehnt")"
+            active = false
+            trackedCall = nil
+        } else if state == "end" || state.contains("released") {
+            callStatus = "Anruf beendet"
+            active = false
+            trackedCall = nil
+        } else if state.contains("streamsrunning") || state == "connected" {
+            callStatus = "Gespräch verbunden"
+        } else if state.contains("ringing") {
+            callStatus = "Gegenstelle klingelt …"
+        } else {
+            callStatus = "Verbindungsaufbau: \(call.state)"
         }
     }
 
@@ -111,10 +140,18 @@ final class SIPService: ObservableObject {
         default:
             prefix = ""
         }
-        let targetNumber = prefix + number
+        guard registered else { throw SIPError.notRegistered }
+        guard !active else { throw SIPError.alreadyActive }
+        guard let dialNumber = SIPDialNumber.normalized(number) else { throw SIPError.invalidNumber }
+        let targetNumber = prefix + dialNumber
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
         core.configureAudioSession()
-        _ = core.inviteAddress(addr: target)
+        guard let call = core.inviteAddress(addr: target) else {
+            callStatus = "SIP konnte den Anruf nicht starten"
+            throw SIPError.inviteFailed
+        }
+        trackedCall = call
+        callStatus = "Leitung \(line): \(number) – Verbindung wird aufgebaut …"
         active = true
         status = "SIP Leitung \(line): \(number)"
     }
@@ -132,10 +169,16 @@ final class SIPService: ObservableObject {
     }
 
     enum SIPError: LocalizedError {
-        case notConfigured
+        case notConfigured, notRegistered, invalidNumber, inviteFailed, alreadyActive
 
         var errorDescription: String? {
-            "SIP ist noch nicht vollständig konfiguriert."
+            switch self {
+            case .notConfigured: return "SIP ist noch nicht vollständig konfiguriert."
+            case .notRegistered: return "Keine SIP-Registrierung bei Asterisk. Verbindung zum Heimnetz/VPN und SIP-Zugang prüfen."
+            case .invalidNumber: return "Die Rufnummer enthält ungültige Zeichen."
+            case .inviteFailed: return "Asterisk/SIP konnte keinen Anruf starten."
+            case .alreadyActive: return "Es läuft bereits ein SIP-Anruf."
+            }
         }
     }
 }

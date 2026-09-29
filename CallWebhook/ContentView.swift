@@ -86,6 +86,7 @@ struct ContentView: View {
     @AppStorage("sipLine3Enabled") private var sipLine3Enabled = false
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
+    @ObservedObject private var callSIP = SIPService.shared
     @State private var selectedTab = 0
     @AppStorage("phoneDefaultsReviewed") private var phoneDefaultsReviewed = false
     @State private var showNetworkCode = false
@@ -170,6 +171,26 @@ struct ContentView: View {
                 .tag(4)
         }
         .tint(.blue)
+        .safeAreaInset(edge: .bottom) {
+            if callSIP.active || dialer.isDialing || dialer.status != "Bereit" {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(dialer.status).font(.subheadline)
+                        if !callSIP.callStatus.isEmpty {
+                            Text(callSIP.callStatus).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if callSIP.active || dialer.isDialing {
+                        Button { dialer.hangup() } label: {
+                            Image(systemName: "phone.down.fill").foregroundStyle(.white).padding().background(.red, in: Circle())
+                        }.accessibilityLabel("Anruf beenden")
+                    }
+                }
+                .padding(12)
+                .background(.regularMaterial)
+            }
+        }
     }
 }
 
@@ -3093,6 +3114,7 @@ private struct VoicemailPlayerView: View {
 }
 
 private struct DialPadView: View {
+    @ObservedObject private var sip = SIPService.shared
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     @ObservedObject private var sip = SIPService.shared
@@ -3215,10 +3237,10 @@ private struct DialPadView: View {
                 .font(.system(size: 27, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 72, height: 72)
-                .background((monitor.active || SIPService.shared.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
+                .background((monitor.active || sip.active) ? Color.red : Color.gray.opacity(0.45), in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!monitor.active && !SIPService.shared.active)
+        .disabled(!monitor.active && !sip.active)
         .accessibilityLabel("Anruf beenden")
     }
 

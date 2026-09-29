@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 struct MailboxMessage: Codable, Identifiable {
     let index: String
@@ -27,118 +28,60 @@ final class MailboxModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
-    private let baseURL = "https://vjid3noccsptgcivfuw9dqz15dzvygte.ui.nabu.casa"
+    private func perform(_ path: String, method: String = "GET") async throws -> Data {
+        guard let base = HomeAssistantConnection.configuredBase else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: 0, userInfo: [NSLocalizedDescriptionKey: "Home Assistant ist noch nicht eingerichtet"])
+        }
+        let (data, code) = try await HomeAssistantConnection.request(base: base, path: path, method: method)
+        guard (200..<300).contains(code) else {
+            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Home Assistant HTTP \(code)"])
+        }
+        return data
+    }
 
-    private var token: String {
-        UserDefaults.standard.string(forKey: "haToken")?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    private func messagePath(_ message: MailboxMessage) throws -> String {
+        guard !message.tam.isEmpty, !message.index.isEmpty,
+              message.tam.allSatisfy({ $0.isASCII && $0.isNumber }),
+              message.index.allSatisfy({ $0.isASCII && $0.isNumber }) else { throw URLError(.badURL) }
+        return "\(message.tam)/\(message.index)"
     }
 
     func refresh() async {
+        guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-
-        guard !token.isEmpty else {
-            messages = []
-            errorMessage = "Home-Assistant-Token fehlt"
-            return
-        }
-
-        guard let url = URL(string: "\(baseURL)/api/callwebhook/mailbox") else {
-            errorMessage = "Ungültige Mailbox-URL"
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Home Assistant HTTP \(code)"])
-            }
+            let data = try await perform("api/callwebhook/mailbox")
             messages = try JSONDecoder().decode([MailboxMessage].self, from: data)
             errorMessage = nil
         } catch {
-            messages = []
             errorMessage = error.localizedDescription
         }
     }
 
-    func setError(_ message: String) {
-        errorMessage = message
-    }
+    func setError(_ message: String) { errorMessage = message }
 
     func archive(_ message: MailboxMessage) async throws {
-        guard !token.isEmpty else {
-            throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])
-        }
-
-        guard let url = URL(string: "\(baseURL)/api/callwebhook/mailbox/\(message.tam)/\(message.index)/archive") else {
-            throw NSError(domain: "CallWebhook.Mailbox", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ungültige Speicher-URL"])
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Speichern HTTP \(code)"])
-        }
-
+        let path = try messagePath(message)
+        _ = try await perform("api/callwebhook/mailbox/\(path)/archive", method: "POST")
         await refresh()
     }
 
     func delete(_ message: MailboxMessage) async throws {
-        guard !token.isEmpty else {
-            throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])
-        }
-
-        guard let url = URL(string: "\(baseURL)/api/callwebhook/mailbox/\(message.tam)/\(message.index)") else {
-            throw NSError(domain: "CallWebhook.Mailbox", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ungültige Lösch-URL"])
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "DELETE"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Löschen HTTP \(code)"])
-        }
-
+        let path = try messagePath(message)
+        _ = try await perform("api/callwebhook/mailbox/\(path)", method: "DELETE")
         messages.removeAll { $0.id == message.id }
         errorMessage = nil
     }
 
     func loadAudio(for message: MailboxMessage) async throws -> Data {
-        guard !token.isEmpty else {
-            throw NSError(domain: "CallWebhook.Mailbox", code: 401, userInfo: [NSLocalizedDescriptionKey: "Home-Assistant-Token fehlt"])
-        }
         guard !message.audio.isEmpty else {
             throw NSError(domain: "CallWebhook.Mailbox", code: 404, userInfo: [NSLocalizedDescriptionKey: "Aufnahme nicht verfügbar"])
         }
-        let address = message.audio.hasPrefix("http") ? message.audio : "\(baseURL)\(message.audio)"
-        guard let url = URL(string: address) else {
-            throw NSError(domain: "CallWebhook.Mailbox", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ungültige Audio-URL"])
-        }
-
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Audio HTTP \(code)"])
-        }
-        return data
+        let path = try messagePath(message)
+        // Fetch from the configured HA only; never send its bearer token to an
+        // absolute host embedded in a mailbox response from an old installation.
+        let prefix = message.isArchived ? "api/callwebhook/archive/audio" : "api/callwebhook/audio"
+        return try await perform("\(prefix)/\(path)")
     }
 }

@@ -29,6 +29,12 @@ jobs:
         run: |
           swiftc CallWebhook/FritzSIPReadiness.swift tests/FritzSIPReadinessTests.swift -o "$RUNNER_TEMP/fritz-sip-readiness-tests"
           "$RUNNER_TEMP/fritz-sip-readiness-tests"
+      - name: Test mailbox connection and SIP number handling
+        run: |
+          swiftc CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-connection-tests"
+          "$RUNNER_TEMP/mailbox-connection-tests"
+          swiftc CallWebhook/SIPDialNumber.swift tests/SIPDialNumberTests.swift -o "$RUNNER_TEMP/sip-dial-number-tests"
+          "$RUNNER_TEMP/sip-dial-number-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Install development signing

@@ -27,7 +27,7 @@ struct CallWebhookApp: App {
         guard defaults.bool(forKey: "sipEnabled") else { return }
 
         do {
-            try SIPService.shared.configureAndStart()
+            try SIPService.shared.ensureStarted()
         } catch {
             // SIPService publishes the concrete status for the UI.
         }

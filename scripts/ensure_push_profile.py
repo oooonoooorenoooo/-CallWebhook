@@ -100,7 +100,7 @@ def main(path, environment):
         if len(bundles) != 1:
             # Profiles provide an authoritative relationship even when a filtered
             # identifier lookup omits an Xcode-created identifier.
-            matches = [item for item in all_data("/v1/profiles?limit=50")
+            matches = [item for item in all_data("/v1/profiles")
                        if item["attributes"].get("uuid") == original["UUID"]]
             if len(matches) == 1:
                 related = api(f"/v1/profiles/{matches[0]['id']}/bundleId")["data"]
@@ -112,17 +112,17 @@ def main(path, environment):
     if len(bundles) != 1:
         raise RuntimeError("CallWebhook bundle ID could not be uniquely matched to this profile. Profile identifier: " + original.get("Entitlements", {}).get("application-identifier", "unknown"))
     bundle_id = bundles[0]["id"]
-    capabilities = all_data(f"/v1/bundleIds/{bundle_id}/bundleIdCapabilities?limit=50")
+    capabilities = all_data(f"/v1/bundleIds/{bundle_id}/bundleIdCapabilities")
     if not any(item["attributes"]["capabilityType"] == "PUSH_NOTIFICATIONS" for item in capabilities):
         api("/v1/bundleIdCapabilities", {"data": {
             "type": "bundleIdCapabilities", "attributes": {"capabilityType": "PUSH_NOTIFICATIONS"},
             "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}}})
-    profiles = all_data(f"/v1/bundleIds/{bundle_id}/profiles?limit=50")
+    profiles = all_data(f"/v1/bundleIds/{bundle_id}/profiles")
     source = next((item for item in profiles if item["attributes"].get("uuid") == original["UUID"]), None)
     if source is None:
         raise RuntimeError("Original signing profile not found in Apple account; update provisioning profile secret")
-    certificates = all_data(f"/v1/profiles/{source['id']}/certificates?limit=50")
-    devices = all_data(f"/v1/profiles/{source['id']}/devices?limit=50")
+    certificates = all_data(f"/v1/profiles/{source['id']}/certificates")
+    devices = all_data(f"/v1/profiles/{source['id']}/devices")
     source_certs = {item["id"] for item in certificates}
     source_devices = {item["id"] for item in devices}
     name = "CallWebhook-VoIP-" + environment
@@ -133,8 +133,8 @@ def main(path, environment):
         content = base64.b64decode(attributes["profileContent"])
         if not valid(decode_profile(content), environment):
             continue
-        certs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/certificates?limit=50")}
-        devs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/devices?limit=50")}
+        certs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/certificates")}
+        devs = {entry["id"] for entry in all_data(f"/v1/profiles/{item['id']}/devices")}
         if certs == source_certs and devs == source_devices:
             target.write_bytes(content)
             print("Reusing APNs profile with original certificates and devices.")

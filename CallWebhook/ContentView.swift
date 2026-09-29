@@ -87,15 +87,17 @@ struct ContentView: View {
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
     @State private var selectedTab = 0
-    @State private var phoneDefaultsReviewed = false
+    @AppStorage("phoneDefaultsReviewed") private var phoneDefaultsReviewed = false
     @State private var showNetworkCode = false
 
     var body: some View {
         Group {
-            if !phoneDefaultsReviewed {
-                DefaultPhoneAppsView { phoneDefaultsReviewed = true }
-            } else if setupCompleted {
+            // A completed installation always starts in the normal app, including
+            // upgrades from builds that did not persist the default-app review.
+            if setupCompleted {
                 mainTabs
+            } else if !phoneDefaultsReviewed {
+                DefaultPhoneAppsView { phoneDefaultsReviewed = true }
             } else {
                 SetupWizardView {
                     setupCompleted = true
@@ -2341,6 +2343,9 @@ private struct SetupWizardView: View {
         defaults.set(mailbox1TAM, forKey: "setupMailbox1TAM")
         defaults.set(mailbox2TAM, forKey: "setupMailbox2TAM")
         defaults.set(mailbox3TAM, forKey: "setupMailbox3TAM")
+        // Save completion with the configuration, before dismissing the wizard.
+        defaults.set(true, forKey: "phoneDefaultsReviewed")
+        defaults.set(true, forKey: "setupCompleted")
         // Passwords are intentionally not persisted in UserDefaults.
     }
 }

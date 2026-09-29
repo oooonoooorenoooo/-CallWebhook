@@ -92,6 +92,21 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         } catch { backendStatus = error.localizedDescription }
     }
 
+    func reuseExistingConfiguration() async throws {
+        guard !token.isEmpty, environment != nil else {
+            throw failure("Apple hat noch keinen VoIP-Push-Token geliefert. Bitte kurz warten und erneut versuchen.")
+        }
+        _ = try await request(path: "api/callwebhook/voip", method: "POST", body: [
+            "action": "register", "token": token, "environment": environment ?? ""
+        ])
+        let state = try await request(path: "api/callwebhook/voip")
+        guard state["configured"] as? Bool == true else {
+            throw failure("Auf diesem HA-Backend ist noch kein APNs-Schlüssel hinterlegt. Ein vorhandener gültiger Schlüssel kann importiert werden.")
+        }
+        status = "Vorhandene Push-Zugangsdaten werden weiterverwendet"
+        await refreshStatus()
+    }
+
     func saveCredentials(key: String, keyID: String, teamID: String) async throws {
         guard !token.isEmpty, environment != nil else {
             throw failure("Apple hat noch keinen VoIP-Push-Token geliefert. Signiertes Push-Profil und Internetverbindung prüfen.")

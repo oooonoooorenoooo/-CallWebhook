@@ -8,6 +8,7 @@ struct VoIPPushSettingsView: View {
     @State private var teamID = Bundle.main.object(forInfoDictionaryKey: "CallWebhookTeamID") as? String ?? ""
     @State private var keyID = ""
     @State private var privateKey = ""
+    @State private var changeKey = false
     @State private var importing = false
     @State private var working = false
     @State private var message = ""
@@ -23,26 +24,42 @@ struct VoIPPushSettingsView: View {
                     await push.updateBackend()
                 }
             }.disabled(working || repair.running || sip.active)
-            TextField("Apple Team-ID", text: $teamID)
-                .textInputAutocapitalization(.characters).autocorrectionDisabled()
-            TextField("Apple Push Key-ID", text: $keyID)
-                .textInputAutocapitalization(.characters).autocorrectionDisabled()
-            Button(privateKey.isEmpty ? "Apple-Push-Schlüssel (.p8) auswählen" : "Push-Schlüssel ausgewählt") { importing = true }
-            Text("Der Schlüssel benötigt Apple Push Notifications (APNs). Ein App-Store-Connect-Schlüssel ist dafür nicht geeignet. Er wird auf deinem Home Assistant gespeichert.")
-                .font(.caption).foregroundStyle(.secondary)
-            Button("Anruf-Push speichern und Asterisk aktivieren") {
-                Task {
-                    working = true
-                    defer { working = false }
-                    do {
-                        try await push.saveCredentials(key: privateKey, keyID: keyID.trimmingCharacters(in: .whitespacesAndNewlines), teamID: teamID.trimmingCharacters(in: .whitespacesAndNewlines))
-                        privateKey = ""
-                        message = "Push-Schlüssel gespeichert; Asterisk wird aktualisiert …"
-                        await repair.run(requireVoIP: true)
-                        message = repair.status
-                    } catch { message = error.localizedDescription }
-                }
-            }.disabled(privateKey.isEmpty || keyID.isEmpty || teamID.isEmpty || working || repair.running || sip.active)
+            if push.configured {
+                Button("Vorhandene Push-Einrichtung wieder aktivieren") {
+                    Task {
+                        working = true
+                        defer { working = false }
+                        do {
+                            try await push.reuseExistingConfiguration()
+                            await repair.run(requireVoIP: true)
+                            message = repair.status
+                        } catch { message = error.localizedDescription }
+                    }
+                }.disabled(working || repair.running || sip.active)
+                Toggle("Apple-Push-Schlüssel ändern", isOn: $changeKey)
+            }
+            if !push.configured || changeKey {
+                TextField("Apple Team-ID", text: $teamID)
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                TextField("Apple Push Key-ID", text: $keyID)
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                Button(privateKey.isEmpty ? "Apple-Push-Schlüssel (.p8) auswählen" : "Push-Schlüssel ausgewählt") { importing = true }
+                Text("Der Schlüssel benötigt Apple Push Notifications (APNs). Ein App-Store-Connect-Schlüssel ist dafür nicht geeignet. Er wird auf deinem Home Assistant gespeichert.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Anruf-Push speichern und Asterisk aktivieren") {
+                    Task {
+                        working = true
+                        defer { working = false }
+                        do {
+                            try await push.saveCredentials(key: privateKey, keyID: keyID.trimmingCharacters(in: .whitespacesAndNewlines), teamID: teamID.trimmingCharacters(in: .whitespacesAndNewlines))
+                            privateKey = ""
+                            message = "Push-Schlüssel gespeichert; Asterisk wird aktualisiert …"
+                            await repair.run(requireVoIP: true)
+                            message = repair.status
+                        } catch { message = error.localizedDescription }
+                    }
+                }.disabled(privateKey.isEmpty || keyID.isEmpty || teamID.isEmpty || working || repair.running || sip.active)
+            }
             Button("Push-Status prüfen") { Task { await push.synchronize(); await push.refreshStatus() } }
             if !message.isEmpty { Text(message).font(.caption) }
             if working { ProgressView() }

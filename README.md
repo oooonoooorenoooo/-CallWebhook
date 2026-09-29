@@ -15,7 +15,7 @@ One-time setup in **Extras → Anrufe im Hintergrund / VoIP-Push**:
 1. Install/update the HA backend with the provided Bootstrap button and wait for
    HA to finish restarting. The existing Bootstrap downloads the updated backend
    and manifest; no wizard reset is needed.
-2. Select an Apple **APNs** `.p8` key, its Key ID and Team ID. App Store Connect API
+2. If an APNs key is already saved on HA, use **Vorhandene Push-Einrichtung wieder aktivieren**. Token renewal preserves the existing key. Otherwise select an existing valid Apple **APNs** `.p8` key, its Key ID and Team ID. App Store Connect API
    keys cannot send APNs notifications. The APNs key stays on HA in
    `/config/callwebhook/voip.json` (permissions 0600), never in the app bundle/git.
 3. Save and activate. This registers the iPhone and provisions the incoming

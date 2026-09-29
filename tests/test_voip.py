@@ -59,6 +59,21 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         await view.post(self.request({'action':'unregister', 'token':'b'*64}))
         self.assertNotIn('device', self.ns['_voip'])
 
+    async def test_reload_and_registration_preserve_existing_push_credentials(self):
+        saved = dict(key='existing-private-key', key_id='A'*10, team_id='B'*10,
+                     hook_secret='c'*64, device={'token':'a'*64, 'environment':'development'})
+        self.ns['save_voip'](saved)
+        self.ns['load_voip']()
+        view = self.ns['CallWebhookVoIPView']()
+        code, _ = await view.post(self.request({'action':'register', 'token':'b'*64, 'environment':'production'}))
+        self.assertEqual(code, 200)
+        persisted = json.loads(self.ns['VOIP_FILE'].read_text())
+        for field in ('key', 'key_id', 'team_id', 'hook_secret'):
+            self.assertEqual(persisted[field], saved[field])
+        status = (await view.get(self.request()))[1]
+        self.assertTrue(status['configured'])
+        self.assertNotIn('existing-private-key', json.dumps(status))
+
     async def test_reject_invalid_registration_without_overwriting(self):
         view = self.ns['CallWebhookVoIPView']()
         for body in ([], {}, {'action':'register', 'token':'https://attacker', 'environment':'production'},

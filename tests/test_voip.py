@@ -103,6 +103,9 @@ class VoIPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await view.post(self.request(payload)))[0], 400)
         for url in ('http://push.example.com', 'https://user:pass@push.example.com', 'https://push.example.com/?query=1'):
             self.assertEqual((await view.post(self.request(dict(payload, url=url))))[0], 400)
+        await view.post(self.request(dict(action='register', token='c'*64, environment='production')))
+        self.assertNotIn('relay_credential', self.ns['_voip'])
+        self.assertFalse((await view.get(self.request()))[1]['configured'])
 
     async def test_relay_sends_only_call_metadata_not_device_token_or_apple_key(self):
         self.ns['_voip'].update(relay_url='https://push.example.com', relay_credential='d'*64,

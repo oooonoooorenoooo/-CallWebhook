@@ -1267,6 +1267,11 @@ class CallWebhookVoIPView(HomeAssistantView):
                     token, environment = payload.get("token", ""), payload.get("environment")
                     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32,512}", token) or environment not in ("development", "production"):
                         raise ValueError()
+                    if value.get("device") != {"token": token, "environment": environment}:
+                        # A failed new-device enrollment must never keep ringing
+                        # the old device through its previously scoped grant.
+                        value.pop("relay_url", None)
+                        value.pop("relay_credential", None)
                     value["device"] = {"token": token, "environment": environment}
                 elif action == "unregister":
                     if payload.get("token") == value.get("device", {}).get("token"):

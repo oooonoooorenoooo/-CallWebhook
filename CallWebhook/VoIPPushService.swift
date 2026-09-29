@@ -11,6 +11,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
     @Published private(set) var routeReady = false
     @Published private(set) var settingUp = false
     private var synchronizing = false
+    private var backendAPIVersion = 0
     private var registry: PKPushRegistry?
     private var token = ""
     private var wakeTasks: [UUID: Task<Void, Never>] = [:]
@@ -55,6 +56,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             ])
             status = "iPhone für Anruf-Push registriert"
             let state = try await request(path: "api/callwebhook/voip")
+            backendAPIVersion = state["api_version"] as? Int ?? 0
             if PushRelayRegistration.shared.baseURL != nil {
                 guard (state["api_version"] as? Int ?? 0) >= 8 else {
                     throw failure("CallWebhook Bootstrap muss die HA-Komponente für den gemeinsamen Push-Dienst aktualisieren.")
@@ -84,6 +86,10 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         guard await synchronize() else { return }
         guard configured else { return }
         if !routeReady {
+            guard backendAPIVersion >= 8 else {
+                backendStatus = "CallWebhook Bootstrap muss zuerst die HA-Komponente aktualisieren. Die vorhandene Anrufstrecke bleibt erhalten."
+                return
+            }
             let success = await IncomingRouteRepair.shared.run(requireVoIP: true)
             guard success else { backendStatus = IncomingRouteRepair.shared.status; return }
             await refreshStatus()

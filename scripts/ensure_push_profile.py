@@ -83,12 +83,15 @@ def main(path, environment):
             path = page.get("links", {}).get("next")
         return result
 
-    bundles = api("/v1/bundleIds?filter[identifier]=" + BUNDLE)["data"]
-    if not bundles:
+    bundles = [item for item in api("/v1/bundleIds?filter[identifier]=" + BUNDLE)["data"]
+               if item["attributes"]["identifier"].lower() == BUNDLE.lower()
+               and item["attributes"].get("platform") in ("IOS", "UNIVERSAL")]
+    if len(bundles) != 1:
         # Apple can normalize identifier case; never create a different app ID.
         available = all_data("/v1/bundleIds?limit=200")
-        bundles = [item for item in available if item["attributes"]["identifier"].lower() == BUNDLE.lower()]
-        if not bundles:
+        bundles = [item for item in available if item["attributes"]["identifier"].lower() == BUNDLE.lower()
+                   and item["attributes"].get("platform") in ("IOS", "UNIVERSAL")]
+        if len(bundles) != 1:
             # Profiles provide an authoritative relationship even when a filtered
             # identifier lookup omits an Xcode-created identifier.
             matches = [item for item in all_data("/v1/profiles?limit=200")
@@ -97,11 +100,11 @@ def main(path, environment):
                 related = api(f"/v1/profiles/{matches[0]['id']}/bundleId")["data"]
                 if related["attributes"]["identifier"].lower() == BUNDLE.lower():
                     bundles = [related]
-        if not bundles:
+        if len(bundles) != 1:
             print("Apple API visible bundle count:", len(available))
             print("CallWebhook identifiers visible to this key:", [item["attributes"]["identifier"] for item in available if "callwebhook" in item["attributes"]["identifier"].lower()])
     if len(bundles) != 1:
-        raise RuntimeError("CallWebhook bundle ID not found in this API key team. Profile identifier: " + original.get("Entitlements", {}).get("application-identifier", "unknown"))
+        raise RuntimeError("CallWebhook bundle ID could not be uniquely matched to this profile. Profile identifier: " + original.get("Entitlements", {}).get("application-identifier", "unknown"))
     bundle_id = bundles[0]["id"]
     capabilities = all_data(f"/v1/bundleIds/{bundle_id}/bundleIdCapabilities?limit=200")
     if not any(item["attributes"]["capabilityType"] == "PUSH_NOTIFICATIONS" for item in capabilities):

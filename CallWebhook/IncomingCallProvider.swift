@@ -25,7 +25,14 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
     func isWaiting(for id: UUID) -> Bool { callID == id && waitingForSIP }
 
     func report(caller: String, id: UUID = UUID(), completion: @escaping () -> Void = {}) {
-        guard callID != id else { completion(); return }
+        if callID == id {
+            // Every VoIP delivery must reach CallKit, even a duplicate APNs delivery.
+            // CallKit rejects the existing UUID; keep the already active call intact.
+            let duplicate = CXCallUpdate()
+            duplicate.remoteHandle = CXHandle(type: .generic, value: caller)
+            provider.reportNewIncomingCall(with: id, update: duplicate) { _ in completion() }
+            return
+        }
         let busy = callID != nil || finished[id] != nil
         if !busy { callID = id; waitingForSIP = true }
         let update = CXCallUpdate()

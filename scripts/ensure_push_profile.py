@@ -84,8 +84,12 @@ def main(path, environment):
         return result
 
     bundles = api("/v1/bundleIds?filter[identifier]=" + BUNDLE)["data"]
+    if not bundles:
+        # Apple can normalize identifier case; never create a different app ID.
+        bundles = [item for item in all_data("/v1/bundleIds?limit=200")
+                   if item["attributes"]["identifier"].lower() == BUNDLE.lower()]
     if len(bundles) != 1:
-        raise RuntimeError("Exact CallWebhook bundle ID not found")
+        raise RuntimeError("CallWebhook bundle ID not found in this API key team. Profile identifier: " + original.get("Entitlements", {}).get("application-identifier", "unknown"))
     bundle_id = bundles[0]["id"]
     capabilities = all_data(f"/v1/bundleIds/{bundle_id}/bundleIdCapabilities?limit=200")
     if not any(item["attributes"]["capabilityType"] == "PUSH_NOTIFICATIONS" for item in capabilities):

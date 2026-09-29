@@ -41,6 +41,13 @@ jobs:
           "$RUNNER_TEMP/incoming-dialplan-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Compile iOS app before signing setup
+        run: |
+          if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
+            mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
+          fi
+          xcodegen generate
+          xcodebuild -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
       - name: Install development signing
         env:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}

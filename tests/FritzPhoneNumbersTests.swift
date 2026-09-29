@@ -5,8 +5,13 @@ struct FritzPhoneNumbersTests {
     static func main() {
         precondition(!FritzPhoneNumbers.tamResponds(to: "03012345", configured: "3"))
         precondition(!FritzPhoneNumbers.tamResponds(to: "3", configured: ""))
-        precondition(FritzPhoneNumbers.tamResponds(to: "03012345", configured: "030 12345,03099999"))
-        precondition(FritzPhoneNumbers.tamResponds(to: "03012345", configured: ""))
+        precondition(!FritzPhoneNumbers.tamResponds(to: "03012345", configured: "030 12345,03099999"))
+        precondition(FritzPhoneNumbers.tamResponds(to: "03012345", configured: "030 12345"))
+        precondition(FritzPhoneNumbers.tamMatches(numbers: ["03012345", "03099999"], configured: "03099999,03012345"))
+        precondition(!FritzPhoneNumbers.tamMatches(numbers: ["03012345", "03099999"], configured: "03012345"))
+        precondition(!FritzPhoneNumbers.tamMatches(numbers: [], configured: ""))
+        precondition(!FritzPhoneNumbers.tamResponds(to: "03012345", configured: ""))
+        precondition(!FritzPhoneNumbers.tamResponds(to: "03012345", configured: "03012345,"))
         let assignment = "<List><Item><Number>03012345</Number><Type>eVoIP</Type><Index>2</Index><Name>Festnetz</Name></Item></List>"
         let assignments = FritzPhoneNumbers.incomingAssignments(from: assignment)
         precondition(assignments["03012345"] == assignment)

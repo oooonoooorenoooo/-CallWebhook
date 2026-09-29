@@ -34,6 +34,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/relay-tests"
           "$RUNNER_TEMP/relay-tests/bin/pip" install -r push_relay/requirements.txt
           "$RUNNER_TEMP/relay-tests/bin/python" -m unittest discover -s push_relay/tests -v
+      - name: Check push verification and TLS diagnostics
+        run: |
+          swiftc CallWebhook/PushSetupDiagnostics.swift tests/PushSetupDiagnosticsTests.swift -o "$RUNNER_TEMP/push-setup-tests"
+          "$RUNNER_TEMP/push-setup-tests"
       - name: Test FRITZ phone-number list parsing
         run: |
           swiftc CallWebhook/FritzPhoneNumbers.swift tests/FritzPhoneNumbersTests.swift -o "$RUNNER_TEMP/fritz-number-tests"

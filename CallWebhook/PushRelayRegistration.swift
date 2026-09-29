@@ -17,25 +17,40 @@ final class PushRelayRegistration {
     static let shared = PushRelayRegistration()
     private let session = URLSession(configuration: .ephemeral, delegate: PushRelaySessionDelegate(), delegateQueue: nil)
     private var discoveredURL: URL?
+    private var operatorHABase: URL?
+    private var operatorPublicURL: URL?
 
     func discoverOperatorService() async throws {
-        guard baseURL == nil, let ha = HomeAssistantConnection.configuredBase else { return }
+        operatorHABase = nil
+        operatorPublicURL = nil
+        guard let ha = HomeAssistantConnection.configuredBase else { return }
         let (data, code) = try await HomeAssistantConnection.request(base: ha,
             path: "api/callwebhook/push-relay/host", timeout: 35)
         guard code == 200, let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let publicURL = validatedURL(status["public_url"] as? String ?? "")
+        // An unrelated user's HA must never replace the published common service.
+        if let configured = bundledURL, let publicURL, configured != publicURL { return }
         guard status["available"] as? Bool == true else {
             if status["operator"] as? Bool == true {
                 throw failure(status["message"] as? String ?? "Betreiber-Push-Dienst noch nicht erreichbar")
             }
             return
         }
-        discoveredURL = validatedURL(status["public_url"] as? String ?? "")
+        guard let publicURL else { throw failure("Push-Dienst meldet keine gültige öffentliche HTTPS-Adresse") }
+        if bundledURL == nil { discoveredURL = publicURL }
+        // The authenticated HA response verifies BOTH local and public health.
+        // Enroll on the operator's already connected HA, avoiding a second WAN
+        // TLS connection back to the same Pi. Other users retain public HTTPS.
+        operatorHABase = ha
+        operatorPublicURL = publicURL
     }
 
-    var baseURL: URL? {
+    var baseURL: URL? { bundledURL ?? discoveredURL }
+
+    private var bundledURL: URL? {
         if let value = Bundle.main.object(forInfoDictionaryKey: "CallWebhookPushRelayURL") as? String,
            let configured = validatedURL(value) { return configured }
-        return discoveredURL
+        return nil
     }
 
     private func validatedURL(_ value: String) -> URL? {
@@ -62,7 +77,7 @@ final class PushRelayRegistration {
         let keyAccount = "pushRelayAppAttestKey-" + hash(base.absoluteString + environment)
         var keyID = defaults.string(forKey: keyAccount) ?? ""
         if keyID.isEmpty {
-            keyID = try await service.generateKey()
+            keyID = try await appleStep("Apple-Geräteschlüssel erstellen") { try await service.generateKey() }
             defaults.set(keyID, forKey: keyAccount)
         }
         var credential = try grant(for: keyID)
@@ -79,7 +94,7 @@ final class PushRelayRegistration {
         if response["attested"] as? Bool == false && defaults.bool(forKey: keyAccount + "-attested") {
             // A restored/new relay database cannot validate old assertions.
             // App Attest cannot attest the same key twice with a new challenge.
-            keyID = try await service.generateKey()
+            keyID = try await appleStep("Apple-Geräteschlüssel erstellen") { try await service.generateKey() }
             defaults.set(keyID, forKey: keyAccount)
             defaults.removeObject(forKey: keyAccount + "-attested")
             credential = try grant(for: keyID)
@@ -93,9 +108,9 @@ final class PushRelayRegistration {
         let digest = Data(SHA256.hash(data: Data(clientData.utf8)))
         let proof: Data
         if attested {
-            proof = try await service.generateAssertion(keyID, clientDataHash: digest)
+            proof = try await appleStep("Apple-Gerätenachweis erstellen") { try await service.generateAssertion(keyID, clientDataHash: digest) }
         } else {
-            proof = try await service.attestKey(keyID, clientDataHash: digest)
+            proof = try await appleStep("Apple App Attest bestätigen") { try await service.attestKey(keyID, clientDataHash: digest) }
             defaults.set(true, forKey: keyAccount + "-attested")
         }
         let result = try await request(base: base, path: "v1/register", body: [
@@ -116,17 +131,40 @@ final class PushRelayRegistration {
         return value
     }
 
+    private func appleStep<T: Sendable>(_ stage: String, operation: @MainActor () async throws -> T) async throws -> T {
+        do { return try await operation() }
+        catch { throw failure(PushSetupDiagnostics.message(error, stage: stage)) }
+    }
+
     private func request(base: URL, path: String, body: [String: Any]) async throws -> [String: Any] {
-        var request = URLRequest(url: base.appendingPathComponent(path))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw failure("Die sichere Anmeldung beim Push-Dienst ist fehlgeschlagen. Bitte erneut versuchen.")
+        let viaOperator = operatorHABase != nil && operatorPublicURL == base &&
+            operatorHABase == HomeAssistantConnection.configuredBase
+        let stage = path == "v1/challenge" ? "Push-Anmeldung vorbereiten" : "iPhone beim Push-Dienst anmelden"
+        do {
+            let data: Data
+            let status: Int
+            if viaOperator, let ha = operatorHABase {
+                // Only these two fixed endpoints; HA login is never sent to an
+                // external relay. The existing proxy strips it before forwarding.
+                guard ["v1/challenge", "v1/register"].contains(path) else { throw URLError(.unsupportedURL) }
+                (data, status) = try await HomeAssistantConnection.request(base: ha,
+                    path: "api/callwebhook/push-relay/" + path, method: "POST", body: body, timeout: 35)
+            } else {
+                var request = URLRequest(url: base.appendingPathComponent(path))
+                request.httpMethod = "POST"
+                request.timeoutInterval = 30
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let response: URLResponse
+                (data, response) = try await session.data(for: request)
+                status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            }
+            guard status == 200 else { throw failure("Push-Dienst antwortet mit HTTP \(status)") }
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        } catch {
+            throw failure(PushSetupDiagnostics.message(error,
+                stage: stage + (viaOperator ? " über verbundenen HA" : " über öffentliches HTTPS")))
         }
-        return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
 
     private func hash(_ value: String) -> String {

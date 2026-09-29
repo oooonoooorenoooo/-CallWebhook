@@ -951,10 +951,13 @@ private struct SetupWizardView: View {
                 ForEach(Array(functionTestResults.enumerated()), id: \.offset) { _, result in
                     Text(result).font(.caption)
                 }
+                ForEach(mailboxAssignmentInstructions, id: \.self) { instruction in
+                    Text(instruction).font(.caption).textSelection(.enabled)
+                }
                 Button("Anrufbeantworter in der FRITZ!Box bearbeiten") {
                     if let url = URL(string: "http://\(fritzHost)/?lp=tam") { UIApplication.shared.open(url) }
                 }
-                Text("Unter Telefonie → Anrufbeantworter die reagierenden Rufnummern prüfen. Die Auswahl hier speichert die Zuordnung für die Nachrichtenanzeige; sie ändert keine Rufnummern auf der FRITZ!Box.")
+                Text("Unter Telefonie → Anrufbeantworter → Einstellungen nur die zugehörigen Festnetznummern auswählen und speichern. ‚Alle Rufnummern‘ passt nicht zur getrennten Zuordnung. Danach den Funktionstest erneut starten.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Anschließend einen ausgehenden Anruf testen, das iPhone sperren und von einem zweiten Telefon anrufen. Für den Mailbox-Test nicht annehmen und eine Nachricht hinterlassen.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -977,7 +980,7 @@ private struct SetupWizardView: View {
             functionTestResults.append(status == 200 ? "✓ Home Assistant authentifiziert erreichbar" : "✗ Home Assistant: HTTP \(status)")
         } catch { functionTestResults.append("✗ Home Assistant: \(error.localizedDescription)") }
         functionTestResults.append(setupSIP.registered ? "✓ iPhone bei Asterisk registriert" : "✗ iPhone nicht bei Asterisk registriert")
-        await VoIPPushService.shared.refreshStatus()
+        await VoIPPushService.shared.synchronize()
         functionTestResults.append("Push: \(VoIPPushService.shared.backendStatus)")
         do {
             let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -996,15 +999,26 @@ private struct SetupWizardView: View {
                 let supported = response.contains("NewPhoneNumbers")
                 let actual = extractSOAPValue("NewPhoneNumbers", from: response)
                 let enabled = ["1", "true"].contains(extractSOAPValue("NewEnable", from: response).lowercased())
-                let matches = supported && enabled && FritzPhoneNumbers.tamResponds(to: number, configured: actual)
+                let expectedNumbers = lines.filter { $0.2 == tam }.map { $0.1 }
+                let matches = supported && enabled && FritzPhoneNumbers.tamMatches(numbers: expectedNumbers, configured: actual)
                 verified = verified && matches
-                functionTestResults.append("\(matches ? "✓" : "✗") Leitung \(line), AB \(tam + 1): Soll \(number); FRITZ!Box: \(supported ? (actual.isEmpty ? "alle Rufnummern" : actual) : "nicht lesbar")\(enabled ? "" : " (deaktiviert)")")
+                functionTestResults.append("\(matches ? "✓" : "✗") Leitung \(line), AB \(tam + 1): Soll \(number); FRITZ!Box: \(supported ? (actual.isEmpty ? "alle Rufnummern – Zuordnung fehlt" : actual) : "nicht lesbar")\(enabled ? "" : " (deaktiviert)")")
             }
             mailboxNumbersVerified = verified
         } catch { functionTestResults.append("✗ FRITZ!-Mailbox-Prüfung: \(error.localizedDescription)") }
     }
 
     private var fritzSIPProvisioned: Bool { fritzSIPVerified }
+
+    private var mailboxAssignmentInstructions: [String] {
+        let lines = [(line1Number, mailbox1TAM), (line2Number, sipLine2Enabled ? mailbox2TAM : -1),
+                     (line3Number, sipLine3Enabled ? mailbox3TAM : -1)]
+        let selected = Dictionary(grouping: lines.filter { $0.1 >= 0 }, by: { $0.1 })
+        return selected.keys.sorted().map { tam in
+            let numbers = selected[tam, default: []].map { $0.0 }.joined(separator: ", ")
+            return "Anrufbeantworter \(tam + 1) → nur \(numbers)"
+        }
+    }
 
     private var mailboxSummary: String {
         if fritzTAMs.isEmpty { return "Keine FRITZ!-Mailbox erkannt" }
@@ -1891,34 +1905,10 @@ private struct SetupWizardView: View {
                 }
             }
 
-            if fritzTAMs.count < 3,
-               let tamService = extractTR064Services(from: descriptionXML).first(where: {
-                   $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:")
-               }) {
-                let enabledIndices = Set(fritzTAMs.map(\.index))
-                for index in 0..<3 where !enabledIndices.contains(index) {
-                    do {
-                        _ = try await soapCall(
-                            session: session, base: base, serviceType: tamService.type,
-                            controlURL: tamService.controlURL, action: "SetEnable",
-                            arguments: [("NewIndex", String(index)), ("NewEnable", "1")],
-                            secondFactorToken: secondFactorToken
-                        )
-                    } catch {
-                        if isSecondFactorRequired(error) {
-                            secondFactorToken = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: descriptionXML)
-                            _ = try await soapCall(
-                                session: session, base: base, serviceType: tamService.type,
-                                controlURL: tamService.controlURL, action: "SetEnable",
-                                arguments: [("NewIndex", String(index)), ("NewEnable", "1")],
-                                secondFactorToken: secondFactorToken
-                            )
-                        } else {
-                            throw error
-                        }
-                    }
-                }
-            }
+            // SetEnable only switches a TAM on. It does not assign any number;
+            // activating unused slots here produced catch-all answering machines.
+            // Preserve existing TAMs and verify their explicit number assignments
+            // in the final function test instead of creating unconfigured ones.
 
             await checkFritzBox()
 

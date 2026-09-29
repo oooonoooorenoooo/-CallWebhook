@@ -11,6 +11,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
     @Published private(set) var routeReady = false
     @Published private(set) var settingUp = false
     private var synchronizing = false
+    private var verification = PushSetupVerification()
     private var backendAPIVersion = 0
     private var registry: PKPushRegistry?
     private var token = ""
@@ -45,6 +46,9 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             return false
         }
         synchronizing = true
+        verification.begin()
+        configured = false
+        routeReady = false
         let currentToken = token
         defer {
             synchronizing = false
@@ -72,9 +76,17 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                     throw error
                 }
             }
+            verification.succeed()
             await refreshStatus()
-            return true
-        } catch { status = error.localizedDescription; backendStatus = error.localizedDescription; return false }
+            return verification.verified
+        } catch {
+            verification.fail(error.localizedDescription)
+            configured = false
+            routeReady = false
+            status = error.localizedDescription
+            backendStatus = error.localizedDescription
+            return false
+        }
     }
 
     func completeSetup() async {
@@ -140,17 +152,21 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
     func refreshStatus() async {
         do {
             let value = try await request(path: "api/callwebhook/voip")
-            configured = value["configured"] as? Bool == true
-            routeReady = value["route_ready"] as? Bool == true
-            if configured {
-                backendStatus = routeReady ? "Anruf-Push eingerichtet. Eingehenden Anruf bei gesperrtem iPhone testen." : "Push-Zugang hinterlegt; Asterisk-Anrufstrecke noch einrichten."
-                if let last = value["message"] as? String, last != "Noch kein Anruf-Push gesendet" { backendStatus += " " + last }
-            } else {
-                backendStatus = PushRelayRegistration.shared.baseURL == nil
-                    ? "Der gemeinsame Push-Dienst wurde vom App-Anbieter noch nicht bereitgestellt. Du musst keinen Apple-Schlüssel eintragen."
-                    : "Automatische Anmeldung beim Push-Dienst noch nicht abgeschlossen."
+            let stored = value["configured"] as? Bool == true
+            let route = value["route_ready"] as? Bool == true
+            configured = stored && verification.verified
+            routeReady = route && configured
+            backendStatus = verification.message(configured: stored, routeReady: route,
+                serviceAvailable: PushRelayRegistration.shared.baseURL != nil)
+            if configured, let last = value["message"] as? String, last != "Noch kein Anruf-Push gesendet" {
+                backendStatus += " " + last
             }
-        } catch { backendStatus = error.localizedDescription }
+        } catch {
+            verification.fail(error.localizedDescription)
+            configured = false
+            routeReady = false
+            backendStatus = error.localizedDescription
+        }
     }
 
     func reuseExistingConfiguration() async throws {
@@ -222,6 +238,9 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
             let old = self.token
             self.token = ""
             self.status = "Apple erneuert den Anruf-Push-Token"
+            self.verification.fail(self.status)
+            self.configured = false
+            self.routeReady = false
             _ = try? await self.request(path: "api/callwebhook/voip", method: "POST", body: ["action": "unregister", "token": old])
         }
     }

@@ -39,11 +39,18 @@ enum FritzPhoneNumbers {
     }
 
     static func tamResponds(to number: String, configured: String) -> Bool {
-        let expected = number.filter { $0.isNumber }
-        // A line index or account count is never a public telephone number.
-        guard expected.count >= 3 else { return false }
-        if configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-        return configured.split(separator: ",").contains { $0.filter { $0.isNumber } == expected }
+        tamMatches(numbers: [number], configured: configured)
+    }
+
+    /// Exact per-mailbox assignment. Empty (all numbers), extra numbers and
+    /// account indexes never confirm the selected line mapping.
+    static func tamMatches(numbers: [String], configured: String) -> Bool {
+        let expected = numbers.map { $0.filter { $0.isNumber } }
+        guard !expected.isEmpty, expected.allSatisfy({ $0.count >= 3 }) else { return false }
+        let actual = configured.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.filter { $0.isNumber } }
+        guard actual.allSatisfy({ $0.count >= 3 }) else { return false }
+        return Set(actual) == Set(expected)
     }
 
     static func parse(_ xml: String) -> [String] {

@@ -45,3 +45,16 @@ The API key needs Certificates, Identifiers & Profiles permission; an unavailabl
 permission is reported as a signing failure rather than silently removing push.
 
 The final wizard step can provision the operator relay on the existing HA Pi: verified repository discovery, installation, one-time APNs import, automatic startup and public reachability/device enrollment checks. Existing operator credentials are reused. Other users use the published relay URL and never install the operator service.
+
+Operator iPhone enrollment uses the authenticated connection to its own HA after
+verifying the local/public relay identity and health; unrelated installations keep
+using the public HTTPS service. Enrollment/TLS failures are retained in the final
+function test instead of being replaced by a stored configuration flag. Error
+messages distinguish HA relay enrollment from Apple App Attest.
+
+TAM verification requires the exact selected phone-number set. An empty FRITZ!
+PhoneNumbers value means all numbers and fails separate-line verification. The
+wizard no longer activates unused TAM slots without assigned numbers: SetEnable
+cannot write that assignment. Use the FRITZ!Box answering-machine settings for
+number assignment and rerun the function test; the wizard displays the expected
+AB-to-number mapping.

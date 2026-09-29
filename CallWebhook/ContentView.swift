@@ -90,12 +90,18 @@ struct ContentView: View {
     @State private var selectedTab = 0
     @AppStorage("phoneDefaultsReviewed") private var phoneDefaultsReviewed = false
     @State private var showNetworkCode = false
+    @State private var revisitingSetup = false
 
     var body: some View {
         Group {
             // A completed installation always starts in the normal app, including
             // upgrades from builds that did not persist the default-app review.
-            if setupCompleted {
+            if revisitingSetup {
+                SetupWizardView(
+                    onFinished: { revisitingSetup = false },
+                    onCancel: { revisitingSetup = false }
+                )
+            } else if setupCompleted {
                 mainTabs
             } else if !phoneDefaultsReviewed {
                 DefaultPhoneAppsView { phoneDefaultsReviewed = true }
@@ -166,7 +172,7 @@ struct ContentView: View {
                 .tabItem { Label("Zifferblatt", systemImage: "circle.grid.3x3.fill") }
                 .tag(3)
 
-            ExtrasView()
+            ExtrasView(onRestartSetup: { revisitingSetup = true })
                 .tabItem { Label("Extras", systemImage: "ellipsis.circle.fill") }
                 .tag(4)
         }
@@ -194,12 +200,12 @@ private struct SetupWizardView: View {
     @State private var mailboxNumbersVerified = false
     @State private var lineAssignmentStatus = ""
     @State private var fritzNumberAssignments: [String: String] = [:]
-    @State private var fritzHost = "192.168.178.1"
-    @State private var fritzUser = ""
+    @State private var fritzHost = UserDefaults.standard.string(forKey: "setupFritzHost") ?? "192.168.178.1"
+    @State private var fritzUser = UserDefaults.standard.string(forKey: "setupFritzUser") ?? ""
     @State private var fritzPassword = ""
     @State private var fritzUserChoice: Bool? = nil
-    @State private var homeAssistantURL = "26"
-    @State private var easybellEnabled = false
+    @State private var homeAssistantURL = UserDefaults.standard.string(forKey: "setupHomeAssistantURL") ?? "26"
+    @State private var easybellEnabled = UserDefaults.standard.bool(forKey: "setupEasybellEnabled")
     @AppStorage("primaryPhoneNumber") private var primaryMobileNumber = ""
     @AppStorage("secondaryPhoneNumber") private var secondaryMobileNumber = ""
     @AppStorage("setupAreaCode") private var setupAreaCode = ""
@@ -212,12 +218,12 @@ private struct SetupWizardView: View {
     @State private var callHelperReady = false
     @State private var isCreatingCallHelper = false
     @State private var callHelperStatus = "Anrufstatus-Schalter wird im letzten HA-Schritt angelegt"
-    @State private var line1Label = "Mobil 1"
-    @State private var line2Label = "Mobil 2"
-    @State private var line3Label = "Festnetz"
-    @State private var line1Number = ""
-    @State private var line2Number = ""
-    @State private var line3Number = ""
+    @State private var line1Label = UserDefaults.standard.string(forKey: "sipLine1Label") ?? "Mobil 1"
+    @State private var line2Label = UserDefaults.standard.string(forKey: "sipLine2Label") ?? "Mobil 2"
+    @State private var line3Label = UserDefaults.standard.string(forKey: "sipLine3Label") ?? "Festnetz"
+    @State private var line1Number = UserDefaults.standard.string(forKey: "sipLine1Number") ?? ""
+    @State private var line2Number = UserDefaults.standard.string(forKey: "sipLine2Number") ?? ""
+    @State private var line3Number = UserDefaults.standard.string(forKey: "sipLine3Number") ?? ""
     @State private var line3ManualNumber = false
     @State private var fritzReachable = false
     @State private var fritzStatus = "Noch nicht geprüft"
@@ -230,9 +236,9 @@ private struct SetupWizardView: View {
     @State private var fritzTAMs: [FritzTAM] = []
     @State private var isSavingMailboxes = false
     @State private var mailboxSaveError: String?
-    @State private var mailbox1TAM = -1
-    @State private var mailbox2TAM = -1
-    @State private var mailbox3TAM = -1
+    @State private var mailbox1TAM = UserDefaults.standard.object(forKey: "setupMailbox1TAM") as? Int ?? -1
+    @State private var mailbox2TAM = UserDefaults.standard.object(forKey: "setupMailbox2TAM") as? Int ?? -1
+    @State private var mailbox3TAM = UserDefaults.standard.object(forKey: "setupMailbox3TAM") as? Int ?? -1
     @State private var fritzSIPClients: [FritzSIPClient] = []
     @State private var sipClient1Plan = "Noch nicht geprüft"
     @State private var sipClient2Plan = "Noch nicht geprüft"
@@ -355,11 +361,20 @@ private struct SetupWizardView: View {
     }
 
     private var welcome: some View {
-        ContentUnavailableView(
-            "CallWebhook einrichten",
-            systemImage: "phone.connection.fill",
-            description: Text("Der Assistent richtet FRITZ!Box, Home Assistant, Asterisk, Mailboxen und Telefonleitungen ein. Nach einer vollständigen Neuinstallation beginnt die Einrichtung immer hier.")
-        )
+        VStack(spacing: 20) {
+            if onCancel != nil {
+                Button("Abschluss und Funktionstest öffnen") { step = titles.count - 1 }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.horizontal)
+                Text("Die vorhandene Einrichtung bleibt gespeichert. Du kannst direkt den Anruf-Push erneut prüfen oder mit Weiter die Einrichtung durchgehen.")
+                    .font(.callout).foregroundStyle(.secondary).padding(.horizontal)
+            }
+            ContentUnavailableView(
+                "CallWebhook einrichten",
+                systemImage: "phone.connection.fill",
+                description: Text("Der Assistent richtet FRITZ!Box, Home Assistant, Asterisk, Mailboxen und Telefonleitungen ein. Nach einer vollständigen Neuinstallation beginnt die Einrichtung immer hier.")
+            )
+        }
     }
 
     private var fritz: some View {
@@ -3530,6 +3545,7 @@ private struct DialPadView: View {
 }
 
 private struct ExtrasView: View {
+    let onRestartSetup: () -> Void
     @EnvironmentObject var monitor: CallMonitor
     private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, sipLine2Prefix, sipLine3Prefix, haToken, externalListName, externalListURL, blacklist, whitelist }
     @FocusState private var focusedInputField: InputField?
@@ -3557,7 +3573,6 @@ private struct ExtrasView: View {
     @State private var showMobile = false
     @State private var showHomeAssistant = false
     @State private var showCallFilter = false
-    @State private var showSetupWizard = false
     @State private var newBlacklistEntry = ""
     @State private var newWhitelistEntry = ""
 
@@ -3573,8 +3588,20 @@ private struct ExtrasView: View {
         NavigationStack {
             Form {
                 Section {
-                    Button("Einrichtungsassistent erneut starten") { showSetupWizard = true }
-                        .disabled(sip.active)
+                    Button {
+                        focusedInputField = nil
+                        onRestartSetup()
+                    } label: {
+                        Label("Einrichtungsassistent erneut starten", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(sip.active)
+                    if sip.active {
+                        Text("Nach dem laufenden Gespräch kann der Assistent wieder geöffnet werden.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
 
                 DisclosureGroup("Asterisk / VoIP", isExpanded: $showSIP) {
@@ -3741,9 +3768,6 @@ private struct ExtrasView: View {
                 }
             }
             .navigationTitle("Extras")
-            .fullScreenCover(isPresented: $showSetupWizard) {
-                SetupWizardView(onFinished: { showSetupWizard = false }, onCancel: { showSetupWizard = false })
-            }
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -3753,9 +3777,6 @@ private struct ExtrasView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .onTapGesture {
-                focusedInputField = nil
-            }
         }
     }
 

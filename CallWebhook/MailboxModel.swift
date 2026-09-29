@@ -28,11 +28,11 @@ final class MailboxModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
-    private func perform(_ path: String, method: String = "GET") async throws -> Data {
+    private func perform(_ path: String, method: String = "GET", timeout: TimeInterval = 15) async throws -> Data {
         guard let base = HomeAssistantConnection.configuredBase else {
             throw NSError(domain: "CallWebhook.Mailbox", code: 0, userInfo: [NSLocalizedDescriptionKey: "Home Assistant ist noch nicht eingerichtet"])
         }
-        let (data, code) = try await HomeAssistantConnection.request(base: base, path: path, method: method)
+        let (data, code) = try await HomeAssistantConnection.request(base: base, path: path, method: method, timeout: timeout)
         guard (200..<300).contains(code) else {
             throw NSError(domain: "CallWebhook.Mailbox", code: code, userInfo: [NSLocalizedDescriptionKey: "Home Assistant HTTP \(code)"])
         }
@@ -82,6 +82,6 @@ final class MailboxModel: ObservableObject {
         // Fetch from the configured HA only; never send its bearer token to an
         // absolute host embedded in a mailbox response from an old installation.
         let prefix = message.isArchived ? "api/callwebhook/archive/audio" : "api/callwebhook/audio"
-        return try await perform("\(prefix)/\(path)")
+        return try await perform("\(prefix)/\(path)", timeout: 45)
     }
 }

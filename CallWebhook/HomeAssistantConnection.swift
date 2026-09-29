@@ -8,14 +8,14 @@ enum HomeAssistantConnection {
         return URL(string: value.contains("://") ? value : "http://192.168.178.\(value):8123")
     }
 
-    static func request(base: URL, path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> (Data, Int) {
+    static func request(base: URL, path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> (Data, Int) {
         guard var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
             throw URLError(.userAuthenticationRequired)
         }
         var request = URLRequest(url: base.appendingPathComponent(path))
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpMethod = method
-        request.timeoutInterval = 15
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
         for attempt in 0..<2 {

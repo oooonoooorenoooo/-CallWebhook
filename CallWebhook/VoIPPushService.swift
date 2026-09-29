@@ -74,7 +74,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                 try await Task.sleep(for: .seconds(1))
                 if let (data, code) = try? await HomeAssistantConnection.request(base: base, path: "api/callwebhook/setup/status"),
                    code == 200, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (value["api_version"] as? Int ?? 0) >= 6, value["ready_for_asterisk"] as? Bool == true {
+                   (value["api_version"] as? Int ?? 0) >= 7, value["ready_for_asterisk"] as? Bool == true {
                     await synchronize()
                     await refreshStatus()
                     return

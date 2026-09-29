@@ -15,7 +15,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 6
+BACKEND_API_VERSION = 7
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -233,8 +233,8 @@ def archive_message(tam, index):
     message = next((item for item in mailbox if str(item.get("tam", "")) == str(tam) and str(item.get("index", "")) == str(index)), None)
     if message is None:
         raise RuntimeError("Nachricht nicht gefunden")
-    source_audio = BASE_DIR / f"voicemail_{tam}_{index}.wav"
-    if not source_audio.exists():
+    source_audio = ensure_message_audio(tam, index)
+    if source_audio is None:
         raise RuntimeError("Aufnahme nicht vorhanden")
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     archive_audio = ARCHIVE_DIR / f"voicemail_{tam}_{index}.wav"
@@ -274,7 +274,7 @@ def merge_mailbox_and_archive(mailbox):
     combined.sort(key=sort_key, reverse=True)
     return combined
 
-def fetch_fritz_mailbox_for_tam(target_tam):
+def fetch_fritz_mailbox_for_tam(target_tam, download_index=None):
     BASE_DIR.mkdir(
         parents=True,
         exist_ok=True
@@ -341,12 +341,6 @@ def fetch_fritz_mailbox_for_tam(target_tam):
         [None]
     )[0]
 
-    if not sid:
-        raise RuntimeError(
-            "Keine SID in der "
-            "MessageList-URL gefunden"
-        )
-
     messages = message_root.findall(
         ".//Message"
     )
@@ -400,11 +394,13 @@ def fetch_fritz_mailbox_for_tam(target_tam):
             "Path"
         )
 
-        if not index:
+        if not index.isdigit():
             continue
 
         if not tam:
             tam = target_tam
+        if not str(tam).isdigit():
+            continue
 
         audio_api_path = ""
 
@@ -420,6 +416,9 @@ def fetch_fritz_mailbox_for_tam(target_tam):
         )
 
         if path:
+            # The list advertises a lazy audio endpoint. Download only the
+            # selected message, never every recording before returning a list.
+            audio_api_path = f"/api/callwebhook/audio/{tam}/{index}"
             if audio_file.exists():
                 valid_audio_files.add(
                     filename
@@ -430,7 +429,9 @@ def fetch_fritz_mailbox_for_tam(target_tam):
                     f"audio/{tam}/{index}"
                 )
 
-            else:
+            elif str(download_index) == index:
+                if not sid:
+                    raise RuntimeError("Keine SID in der MessageList-URL gefunden")
                 recording_path = path
 
                 prefix = (
@@ -537,9 +538,10 @@ def fetch_fritz_mailbox():
         combined.extend(fetch_fritz_mailbox_for_tam(target_tam))
     combined.sort(key=sort_key, reverse=True)
     valid_audio_files = {
-        Path(item.get("audio", "")).name
+        f"voicemail_{item['tam']}_{item['index']}.wav"
         for item in combined
         if item.get("audio", "").startswith("/api/callwebhook/audio/")
+        and str(item.get("tam", "")).isdigit() and str(item.get("index", "")).isdigit()
     }
     for audio_file in BASE_DIR.glob("voicemail_*.wav"):
         if audio_file.name not in valid_audio_files:
@@ -551,6 +553,22 @@ def fetch_fritz_mailbox():
     temp_json.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_json.replace(MAILBOX_FILE)
     return combined
+
+
+def ensure_message_audio(tam, index):
+    """Recover an evicted recording using a freshly issued FRITZ session URL."""
+    if not str(tam).isdigit() or not str(index).isdigit():
+        raise ValueError("Ungültige Nachrichtenkennung")
+    audio_file = BASE_DIR / f"voicemail_{tam}_{index}.wav"
+    if audio_file.exists():
+        return audio_file
+    messages = fetch_fritz_mailbox_for_tam(str(tam), str(index))
+    message = next((item for item in messages if item['index'] == str(index) and item['tam'] == str(tam)), None)
+    if message is None or not message.get('audio'):
+        return None
+    if not audio_file.exists():
+        raise RuntimeError("FRITZ!Box-Aufnahme konnte nicht geladen werden")
+    return audio_file
 
 
 async def async_refresh_mailbox(
@@ -1074,7 +1092,14 @@ class CallWebhookAudioView(
         )
 
         if not audio_file.exists():
-            raise web.HTTPNotFound()
+            hass = request.app["hass"]
+            async with _refresh_lock:
+                try:
+                    audio_file = await hass.async_add_executor_job(ensure_message_audio, tam, index)
+                except Exception:
+                    return self.json({"error": "FRITZ!Box-Aufnahme konnte nicht geladen werden"}, status_code=502)
+            if audio_file is None:
+                raise web.HTTPNotFound()
 
         return web.FileResponse(
             path=audio_file,

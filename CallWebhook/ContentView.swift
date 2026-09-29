@@ -2209,7 +2209,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 5,
+            guard version >= 7,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

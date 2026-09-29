@@ -7,13 +7,15 @@ enum HomeAssistantConnection {
     static var configuredBase: URL? = URL(string: "http://192.168.178.26:8123")!
     static var calls: [(String, String)] = []
     static var responseCode = 200
+    static var lastTimeout: TimeInterval = 0
     static let fixture = Data("""
     [{"index":"7","tam":"0","called":"12345","date":"2026-09-29","duration":"10","name":"Test","number":"0301234567","new":true,"audio":"https://old.invalid/api/callwebhook/audio/0/7","archived":false}]
     """.utf8)
-    static func request(base: URL, path: String, method: String = "GET") async throws -> (Data, Int) {
+    static func request(base: URL, path: String, method: String = "GET", timeout: TimeInterval = 15) async throws -> (Data, Int) {
         precondition(base == configuredBase)
         precondition(!path.contains("://"))
         calls.append((path, method))
+        lastTimeout = timeout
         return (path == "api/callwebhook/mailbox" ? fixture : Data([1, 2, 3]), responseCode)
     }
 }
@@ -28,6 +30,7 @@ struct MailboxConnectionTests {
         let message = model.messages[0]
         let audio = try await model.loadAudio(for: message)
         precondition(audio == Data([1, 2, 3]))
+        precondition(HomeAssistantConnection.lastTimeout == 45)
         precondition(HomeAssistantConnection.calls.last!.0 == "api/callwebhook/audio/0/7")
         try await model.archive(message)
         precondition(HomeAssistantConnection.calls.contains { $0.0 == "api/callwebhook/mailbox/0/7/archive" && $0.1 == "POST" })

@@ -27,7 +27,7 @@ service is not yet available, the assistant reports it rather than pretending
 incoming background calls are ready. Extras retains only the wizard restart entry,
 not separate push/key-import/repair menus.
 
-HA backend API 11 is required: CallWebhook Bootstrap installs it and restarts HA.
+HA backend API 12 is required: CallWebhook Bootstrap installs it and restarts HA.
 In relay mode `/config/callwebhook/voip.json` is created automatically with mode
 0600 and contains the installation credential, not the Apple key. Existing direct
 APNs credentials remain supported for private installations.

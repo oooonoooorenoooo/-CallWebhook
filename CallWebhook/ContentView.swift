@@ -818,11 +818,11 @@ private struct SetupWizardView: View {
                 guard status == 200 else { return 0 }
                 return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["api_version"] as? Int ?? 0
             }
-            if try await backendVersion() < 11 {
+            if try await backendVersion() < 12 {
                 lineAssignmentStatus = "HA-Komponente für FRITZ!-Anrufbeantworter wird aktualisiert …"
                 await setupPush.updateBackend()
             }
-            guard try await backendVersion() >= 11 else {
+            guard try await backendVersion() >= 12 else {
                 throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Die HA-Aktualisierung für das Schreiben der Anrufbeantworter ist noch nicht abgeschlossen."])
             }
             try await synchronizeFritzLineNumbers()
@@ -2278,7 +2278,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 11,
+            guard version >= 12,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 callWebhookHAStatus = "CallWebhook-Backend veraltet – Update erforderlich"
                 return

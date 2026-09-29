@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 11
+BACKEND_API_VERSION = 12
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1268,11 +1268,15 @@ def fritz_web_sid():
         auth=get_auth(), timeout=10)
     response.raise_for_status()
     root = ET.fromstring(response.content)
-    url = next((e.text for e in root.iter() if e.tag.endswith("NewX_AVM-DE_UrlSID")), "")
-    sid = parse_qs(urlparse(url or "").query).get("sid", [""])[0]
-    if not re.fullmatch(r"[0-9a-fA-F]{16}", sid) or sid == "0" * 16:
-        raise FritzTAMConfigurationError("FRITZ!-Web-Anmeldung fehlt; Benutzerrechte für Einstellungen prüfen")
-    return sid
+    value = next((e.text for e in root.iter() if e.tag.split("}")[-1] == "NewX_AVM-DE_UrlSID"), "")
+    value = (value or "").strip()
+    # FRITZ!OS returns "sid=<hex>" here, not necessarily a complete URL.
+    # Extract only the credential; never follow a host supplied in this value.
+    query = value if value.startswith("sid=") else urlparse(value).query
+    values = parse_qs(query, keep_blank_values=True).get("sid", [])
+    if len(values) != 1 or not re.fullmatch(r"[0-9a-fA-F]{16}", values[0]) or values[0] == "0" * 16:
+        raise FritzTAMConfigurationError("FRITZ!Box hat keine gültige Web-Sitzungskennung geliefert (CreateUrlSID)")
+    return values[0]
 
 
 def read_tam_info(index):

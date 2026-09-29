@@ -11,7 +11,11 @@ although the documented TR-064 TAM service has no corresponding number setter.
 
 The app sends line numbers and selected TAM indexes to HA. HA obtains a WebGUI
 session through DeviceConfig:X_AVM-DE_CreateUrlSID using the existing FRITZ!
-credentials. It reads the actual edit form, retains its successful controls,
+credentials. The `NewX_AVM-DE_UrlSID` reply may be the bare query assignment
+`sid=<16 hex digits>`; it is not necessarily a complete URL. Only the SID is
+extracted and the configured router remains the request destination. Missing,
+zero or ambiguous session IDs stop the write without claiming a permissions cause.
+It reads the actual edit form, retains its successful controls,
 selects matching phone-number values, and submits through `data.lua` with
 `page=edit_tam`. No index is substituted for a telephone number.
 

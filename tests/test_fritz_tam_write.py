@@ -10,7 +10,7 @@ SOURCE = Path(__file__).parents[1] / 'homeassistant/custom_components/callwebhoo
 
 
 def load():
-    names = {'FritzTAMConfigurationError', 'fritz_tam_form', 'tam_numbers_match', 'configure_fritz_tams'}
+    names = {'FritzTAMConfigurationError', 'fritz_web_sid', 'fritz_tam_form', 'tam_numbers_match', 'configure_fritz_tams'}
     nodes = [n for n in ast.parse(SOURCE.read_text()).body if getattr(n, 'name', '') in names]
     ns = dict(ET=ET, urlparse=urlparse, parse_qs=parse_qs, HOST='192.168.178.1')
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), ns)
@@ -41,6 +41,41 @@ TIMER = '<rule id="1" enabled="1"><item time="0800" action="1" day="31"/><item t
 
 class TAMWriteTests(unittest.TestCase):
     def setUp(self): self.ns = load()
+
+    def sid_response(self, value):
+        from xml.sax.saxutils import escape
+        xml = ('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<s:Body><u:X_AVM-DE_CreateUrlSIDResponse xmlns:u="urn:dslforum-org:service:DeviceConfig:1">'
+            '<NewX_AVM-DE_UrlSID>' + escape(value) + '</NewX_AVM-DE_UrlSID>'
+            '</u:X_AVM-DE_CreateUrlSIDResponse></s:Body></s:Envelope>')
+        response = SimpleNamespace(content=xml.encode(), raise_for_status=lambda:None)
+        post = Mock(return_value=response)
+        self.ns.update(requests=SimpleNamespace(post=post), get_auth=lambda:'digest-auth')
+        return post
+
+    def test_web_session_accepts_native_sid_assignment(self):
+        post = self.sid_response('sid=1234567890abcdef')
+        self.assertEqual(self.ns['fritz_web_sid'](), '1234567890abcdef')
+        self.assertEqual(post.call_args.args[0], 'http://192.168.178.1:49000/upnp/control/deviceconfig')
+        self.assertEqual(post.call_args.kwargs['auth'], 'digest-auth')
+
+    def test_web_session_accepts_query_or_full_url_without_following_it(self):
+        for value in ('?sid=1234567890abcdef', ' http://fritz.box/?sid=1234567890abcdef ',
+                      '/index.lua?sid=1234567890abcdef&lang=de'):
+            with self.subTest(value=value):
+                post = self.sid_response(value)
+                self.assertEqual(self.ns['fritz_web_sid'](), '1234567890abcdef')
+                self.assertEqual(post.call_count, 1)
+                self.assertIn('192.168.178.1:49000', post.call_args.args[0])
+
+    def test_web_session_rejects_missing_invalid_or_ambiguous_ids(self):
+        for value in ('', 'sid=0000000000000000', 'sid=bad', 'session=1234567890abcdef',
+                      'sid=1234567890abcdef&sid=fedcba0987654321', 'sid=1234567890abcdefjunk'):
+            with self.subTest(value=value):
+                self.sid_response(value)
+                with self.assertRaises(self.ns['FritzTAMConfigurationError']) as caught:
+                    self.ns['fritz_web_sid']()
+                self.assertNotIn('1234567890abcdef', str(caught.exception))
 
     def test_selected_number_written_with_original_options_and_calendar(self):
         fields = self.ns['fritz_tam_form'](FORM, 1, ['030 10002'], TIMER)

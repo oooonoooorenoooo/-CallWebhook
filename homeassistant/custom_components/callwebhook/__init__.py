@@ -1360,10 +1360,21 @@ def wait_fritz_confirmation(web_request, state, confirmation):
     if "starterror" in state:
         raise FritzTAMConfigurationError("FRITZ!Box-Bestätigung belegt oder gesperrt; später erneut versuchen")
     google = {}
-    if "googleauth" in state.split(";", 1)[0].split(","):
-        google = web_request("/twofactor.lua", {"tfa_googleauth_info": ""}, "POST").json().get("googleauth") or {}
     success = False
     try:
+        methods = state.split(";", 1)[0].split(",")
+        if "googleauth" in methods:
+            try:
+                value = web_request("/twofactor.lua", {"tfa_googleauth_info": ""}, "POST").json()
+                google = value.get("googleauth") or {}
+                if not isinstance(google, dict):
+                    raise ValueError("Invalid authenticator metadata")
+            except Exception:
+                # Optional authenticator metadata must not block the router's
+                # independently advertised button/telephone confirmation.
+                google = {}
+                if "button" not in methods and "dtmf" not in methods:
+                    raise FritzTAMConfigurationError("Authenticator-Bestätigung konnte nicht geladen werden; erneut versuchen") from None
         if confirmation:
             confirmation.begin(state, google)
         deadline = time.monotonic() + 120
@@ -1554,12 +1565,16 @@ def configure_fritz_tams(groups, report, confirmation=None):
             fields = fritz_tam_form(html, index, numbers, timer["cw_timer"])
             report(f"AB {index + 1}: ausgewählte Festnetznummern speichern …")
             result = web_request("/data.lua", fields, "POST").json().get("data", {})
-            if result.get("apply") == "twofactor":
+            for attempt in range(3):
+                if result.get("apply") != "twofactor":
+                    break
                 state = result.get("twofactor", "")
-                report("FRITZ!Box-Bestätigung erforderlich – Bestätigungsweg im Assistenten wählen …")
+                report("FRITZ!Box-Bestätigung für Rufnummernzuordnung erforderlich – Bestätigungsweg wählen …")
                 wait_fritz_confirmation(web_request, state, confirmation)
                 fields.update(confirmed="", twofactor="")
                 result = web_request("/data.lua", fields, "POST").json().get("data", {})
+            if result.get("apply") == "twofactor":
+                raise FritzTAMConfigurationError("FRITZ!Box fordert wiederholt eine neue Sicherheitsbestätigung an; Zuordnung noch nicht gespeichert")
             if result.get("apply") != "ok":
                 raise FritzTAMConfigurationError("FRITZ!Box hat die AB-Einstellungen nicht übernommen")
             after = read_tam_info(index)

@@ -154,6 +154,7 @@ jobs:
           path: CallWebhook-signed.ipa
 
   testflight:
+    if: ${{ !contains(github.event.head_commit.message, '[skip testflight]') }}
     needs: [development, push-relay-addon, cleanup-addon]
     runs-on: macos-26
     concurrency:

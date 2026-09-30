@@ -154,7 +154,7 @@ class TAMWriteTests(unittest.TestCase):
                     if url.endswith('query.lua'): result = {'cw_timer':TIMER}
                     elif url.endswith('data.lua'):
                         submissions.append(kw['data'].copy())
-                        result = {'data':{'apply':'twofactor','twofactor':'button'}} if len(submissions)==1 else {'data':{'apply':'ok'}}
+                        result = {'data':{'apply':'twofactor','twofactor':'button,dtmf;9876'}} if len(submissions)<=2 else {'data':{'apply':'ok'}}
                     else: result = {'done':True,'active':confirmed}
                     return SimpleNamespace(status_code=200, json=lambda:result)
                 session.request.side_effect = request
@@ -163,7 +163,7 @@ class TAMWriteTests(unittest.TestCase):
                         {'NewPhoneNumbers':'03010002','NewEnable':'1'}]), time=SimpleNamespace(monotonic=lambda:0, sleep=lambda _:None))
                 if confirmed:
                     ns['configure_fritz_tams']({1:['03010002']}, lambda message:None)
-                    self.assertEqual(len(submissions), 2)
+                    self.assertEqual(len(submissions), 3)
                     self.assertIn('twofactor', submissions[1])
                 else:
                     with self.assertRaisesRegex(ns['FritzTAMConfigurationError'], 'abgebrochen'):
@@ -224,6 +224,33 @@ class ConfirmationTests(unittest.TestCase):
         self.ns['wait_fritz_confirmation'](request, 'button,googleauth', self.factor)
         self.assertEqual(submitted, ['111111','222222'])
         self.assertEqual(len(checks), 3)
+        self.assertEqual(self.factor.snapshot(), {})
+
+    def test_optional_authenticator_failure_still_presents_phone_and_button(self):
+        for failure in (RuntimeError("connection sid=secret"), ValueError("invalid JSON")):
+            calls = []
+            def request(path, fields, method):
+                calls.append(fields)
+                if 'tfa_googleauth_info' in fields:
+                    raise failure
+                pending = self.factor.snapshot()
+                self.assertEqual(pending['methods'], ['button', 'phone'])
+                self.assertEqual(pending['phone_code'], '*19876')
+                return SimpleNamespace(json=lambda:{'done':True, 'active':True})
+            self.ns['wait_fritz_confirmation'](request, 'button,dtmf,googleauth;9876', self.factor)
+            self.assertEqual(self.factor.snapshot(), {})
+            self.assertEqual(len(calls), 2)
+
+    def test_authenticator_only_failure_cancels_without_claiming_approval(self):
+        calls = []
+        def request(path, fields, method):
+            calls.append(fields)
+            if 'tfa_googleauth_info' in fields:
+                raise ValueError('private response')
+            return SimpleNamespace(json=lambda:{})
+        with self.assertRaisesRegex(self.ns['FritzTAMConfigurationError'], 'Authenticator'):
+            self.ns['wait_fritz_confirmation'](request, 'googleauth', self.factor)
+        self.assertIn({'tfa_cancel':''}, calls)
         self.assertEqual(self.factor.snapshot(), {})
 
     def test_cancel_and_expiry_clear_pending_code_and_stop_router_request(self):

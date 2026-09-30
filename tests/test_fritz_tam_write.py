@@ -363,3 +363,17 @@ class FreshMailboxSetupTests(unittest.IsolatedAsyncioTestCase):
         await ns['run_mailbox_setup'](hass, payload, {})
         self.assertEqual(ns['_tam_setup_state']['state'], 'error')
         self.assertFalse(saved)
+
+        # A transport/parser exception must expose its stage, never its secrets
+        # or an invented user-permission diagnosis.
+        def fail(groups, report, confirmation):
+            report("AB 2: aktuelle Einstellungen lesen")
+            raise RuntimeError("sid=secret password=secret")
+        ns['configure_fritz_tams'] = fail
+        payload.update({f'mailbox_tam_{i}': i-1 for i in range(1,4)})
+        await ns['run_mailbox_setup'](hass, payload, {})
+        message = ns['_tam_setup_state']['message']
+        self.assertIn("AB 2: aktuelle Einstellungen lesen", message)
+        self.assertIn("RuntimeError", message)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("Benutzerrechte", message)

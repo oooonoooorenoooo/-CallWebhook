@@ -98,11 +98,11 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
         }
         guard await synchronize() else { return }
         guard configured else { return }
-        if backendAPIVersion < 16 {
+        if backendAPIVersion < 17 {
             routeReady = false
             backendStatus = "Eingehende FRITZ!Box-Anrufe: HA-Komponente wird aktualisiert …"
             await updateBackend()
-            guard backendAPIVersion >= 16, configured else { return }
+            guard backendAPIVersion >= 17, configured else { return }
         }
         if !routeReady {
             guard backendAPIVersion >= 8 else {
@@ -145,7 +145,7 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
                 try await Task.sleep(for: .seconds(1))
                 if let (data, code) = try? await HomeAssistantConnection.request(base: base, path: "api/callwebhook/setup/status"),
                    code == 200, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (value["api_version"] as? Int ?? 0) >= 16, value["ready_for_asterisk"] as? Bool == true {
+                   (value["api_version"] as? Int ?? 0) >= 17, value["ready_for_asterisk"] as? Bool == true {
                     await synchronize()
                     await refreshStatus()
                     return

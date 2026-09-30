@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 16
+BACKEND_API_VERSION = 17
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1532,17 +1532,19 @@ def configure_fritz_tams(groups, report, confirmation=None):
     with requests.Session() as session:
         sid = None
         for index, numbers in sorted(groups.items()):
+            report(f"AB {index + 1}: aktuellen Zustand über TR-064 lesen …")
             before = read_tam_info(index)
             if tam_numbers_match(before, numbers) and before.get("NewEnable", "").lower() in ("1", "true"):
                 report(f"AB {index + 1}: Rufnummern bereits richtig")
                 continue
             if sid is None:
+                report(f"AB {index + 1}: Web-Sitzung über CreateUrlSID anfordern …")
                 sid = fritz_web_sid()
             def web_request(path, fields, method="GET"):
                 args = {"params" if method == "GET" else "data": dict(fields, sid=sid)}
                 response = session.request(method, f"http://{HOST}" + path, timeout=15, allow_redirects=False, **args)
                 if response.status_code != 200:
-                    raise FritzTAMConfigurationError("FRITZ!-Webzugriff nicht bestätigt; Benutzerrechte für Einstellungen prüfen")
+                    raise FritzTAMConfigurationError(f"FRITZ!-Webzugriff auf {path} fehlgeschlagen (HTTP {response.status_code})")
                 return response
             report(f"AB {index + 1}: bestehende Einstellungen und Zeitplan lesen …")
             html = web_request("/fon_devices/edit_tam.lua", {"TamNr": str(index)}).text
@@ -1575,7 +1577,10 @@ _tam_setup_state = {"state": "idle", "message": "Noch nicht gestartet", "assignm
 
 
 async def run_mailbox_setup(hass, payload, groups):
+    stage = "Auftrag vorbereiten"
     def report(message):
+        nonlocal stage
+        stage = message
         hass.loop.call_soon_threadsafe(_tam_setup_state.update, {"message": message})
     try:
         payload = dict(payload)
@@ -1589,15 +1594,31 @@ async def run_mailbox_setup(hass, payload, groups):
                 groups.setdefault(index, []).append(number)
         await hass.async_add_executor_job(configure_fritz_tams, groups, report, _tam_confirmation)
         keys = ("mailbox_tam_1", "mailbox_tam_2", "mailbox_tam_3")
+        report("Bestätigte Zuordnung in Home Assistant speichern …")
         async with _refresh_lock:
             await hass.async_add_executor_job(save_setup, *(payload[key] for key in keys))
         _tam_setup_state.update(state="completed", message="FRITZ!-Anrufbeantworter gespeichert und geprüft",
             assignments={key: payload[key] for key in keys}, ok=True)
     except FritzTAMConfigurationError as error:
         _tam_setup_state.update(state="error", message=str(error), ok=False)
-    except Exception:
-        # Never expose a requests exception containing a session ID or form PIN.
-        _tam_setup_state.update(state="error", message="FRITZ!-Anrufbeantworter nicht vollständig gespeichert. Verbindung und Benutzerrechte prüfen; erneut versuchen.", ok=False)
+    except Exception as error:
+        # Exception strings/response bodies may contain SID, password or OTP.
+        # Report the operation and category only, never invent a permissions cause.
+        kind = type(error).__name__
+        detail = {
+            "JSONDecodeError": "FRITZ!Box hat keine gültige JSON-Antwort geliefert",
+            "ParseError": "FRITZ!Box hat keine gültige XML-Antwort geliefert",
+            "ConnectTimeout": "Zeitüberschreitung beim Verbindungsaufbau",
+            "ReadTimeout": "Zeitüberschreitung beim Lesen der Antwort",
+            "ConnectionError": "Verbindung zur FRITZ!Box unterbrochen",
+            "HTTPError": "HTTP-Anfrage abgelehnt",
+        }.get(kind, "Interner Verarbeitungsfehler (" + kind + ")")
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and 100 <= status <= 599:
+            detail += f" (HTTP {status})"
+        _tam_setup_state.update(state="error", message=stage + " – " + detail,
+                               failed_stage=stage, error_type=kind, ok=False)
 
 
 class CallWebhookMailboxSetupView(HomeAssistantView):

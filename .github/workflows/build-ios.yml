@@ -78,6 +78,10 @@ jobs:
         run: |
           swiftc CallWebhook/FritzSIPReadiness.swift tests/FritzSIPReadinessTests.swift -o "$RUNNER_TEMP/fritz-sip-readiness-tests"
           "$RUNNER_TEMP/fritz-sip-readiness-tests"
+      - name: Test restored FRITZ answering-machine selection
+        run: |
+          swiftc CallWebhook/FritzTAMSelection.swift tests/FritzTAMSelectionTests.swift -o "$RUNNER_TEMP/fritz-tam-tests"
+          "$RUNNER_TEMP/fritz-tam-tests"
       - name: Test mailbox connection and SIP number handling
         run: |
           swiftc CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-connection-tests"

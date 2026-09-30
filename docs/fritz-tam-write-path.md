@@ -68,3 +68,17 @@ once. Cancellation/expiry clears pending data and cancels this WebGUI operation.
 The wizard uses the same choice dialog for SIP and TAM requests. Bootstrap
 installation remains automatic; manual repository/store emergency links were
 removed from the setup UI.
+
+
+## Restored step-one provisioning
+
+History comparison: c35cec0 added direct TR-064 SetEnable provisioning during
+FRITZ setup; 38edf6b removed it when tightening catch-all number validation.
+The iOS wizard now restores that path independently of SIP provisioning and
+runs it before leaving the FRITZ step. It reads all slots, activates only the
+missing count for the selected lines, supports the existing router confirmation
+flow and reads back GetInfo. Existing answering machines and selections are
+reused. The later line step uses the already verified native edit_tam assignment
+path and verifies the exact numbers; it no longer offers the failing creation
+wizard. Activation alone is explicitly not reported as verified number assignment.
+Live verification of this restoration on the user's router remains necessary.

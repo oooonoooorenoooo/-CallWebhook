@@ -234,6 +234,8 @@ private struct SetupWizardView: View {
     @State private var fritzAuthenticated = false
     @State private var fritzVoIPNumbers: [String] = []
     @State private var fritzTAMCount = 0
+    @State private var isProvisioningTAM = false
+    @State private var tamProvisionStatus = "Anrufbeantworter noch nicht eingerichtet"
     @State private var fritzTAMs: [FritzTAM] = []
     @State private var isSavingMailboxes = false
     @State private var mailboxSaveError: String?
@@ -322,7 +324,7 @@ private struct SetupWizardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .disabled(isSavingMailboxes || setupPush.settingUp || operatorPushWorking)
+                .disabled(isSavingMailboxes || isProvisioningTAM || setupPush.settingUp || operatorPushWorking)
 
                 if let mailboxSaveError {
                     Text(mailboxSaveError).foregroundStyle(.red).padding(.horizontal)
@@ -335,7 +337,7 @@ private struct SetupWizardView: View {
                 HStack {
                     if step > 0 {
                         Button("Zurück") { mailboxSaveError = nil; step -= 1 }
-                            .disabled(isSavingMailboxes || setupPush.settingUp || operatorPushWorking)
+                            .disabled(isSavingMailboxes || isProvisioningTAM || setupPush.settingUp || operatorPushWorking)
                             .buttonStyle(.bordered)
                     }
                     Spacer()
@@ -343,6 +345,10 @@ private struct SetupWizardView: View {
                         if step == titles.count - 1 {
                             persistSetup()
                             onFinished()
+                        } else if step == 1 {
+                            Task {
+                                if await provisionMissingTAMs() { step += 1 }
+                            }
                         } else if step == 3 {
                             Task { if await saveMailboxSelection() { step += 1 } }
                         } else {
@@ -350,7 +356,7 @@ private struct SetupWizardView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canContinue || isSavingMailboxes || setupPush.settingUp || operatorPushWorking || (step == 3 && !mailboxSelectionVerified))
+                    .disabled(!canContinue || isSavingMailboxes || isProvisioningTAM || setupPush.settingUp || operatorPushWorking || (step == 3 && !mailboxSelectionVerified))
                 }
                 .padding()
             }
@@ -491,6 +497,16 @@ private struct SetupWizardView: View {
                         Text("Anrufbeantworter erkannt: \(fritzTAMCount)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Button {
+                            Task { _ = await provisionMissingTAMs() }
+                        } label: {
+                            Label(isProvisioningTAM ? "Anrufbeantworter werden eingerichtet …" : "Fehlende Anrufbeantworter einrichten",
+                                  systemImage: "recordingtape")
+                        }
+                        .disabled(isProvisioningTAM || isProvisioningSIP)
+                        Text(tamProvisionStatus).font(.caption).foregroundStyle(.secondary)
+                        Text("Beim Weitergehen werden fehlende Anrufbeantworter bereits hier eingerichtet. Die genaue Rufnummernzuordnung wird anschließend bei Telefonleitungen gespeichert und geprüft.")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text("SIP-Nebenstellen: \(fritzSIPClients.count)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -806,7 +822,9 @@ private struct SetupWizardView: View {
     @ViewBuilder
     private func fritzMailboxPicker(selection: Binding<Int>) -> some View {
         Picker("Anrufbeantworter", selection: selection) {
-            Text("Neu anlegen – für diese Leitung").tag(-2)
+            if selection.wrappedValue == -2 {
+                Text("Zuerst im FRITZ!Box-Schritt einrichten").tag(-2)
+            }
             Text("Nicht verwenden").tag(-1)
             ForEach(fritzTAMs) { tam in
                 Text("\(tam.index + 1) · \(tam.displayName)").tag(tam.index)
@@ -816,7 +834,7 @@ private struct SetupWizardView: View {
             }
         }
         if fritzTAMs.isEmpty {
-            Text("Noch kein aktiver Anrufbeantworter vorhanden. Bei Weiter wird für diese Leitung ein neuer AB mit der gewählten Festnetznummer angelegt.")
+            Text("Noch kein aktiver Anrufbeantworter vorhanden. Bitte im FRITZ!Box-Schritt die fehlenden Anrufbeantworter einrichten.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -824,7 +842,7 @@ private struct SetupWizardView: View {
     private var mailboxSelectionVerified: Bool {
         let selected = [mailbox1TAM, sipLine2Enabled ? mailbox2TAM : -1, sipLine3Enabled ? mailbox3TAM : -1]
         return selected.allSatisfy { value in
-            value == -2 || value == -1 || fritzTAMs.contains { $0.index == value }
+            value == -1 || fritzTAMs.contains { $0.index == value }
         }
     }
 
@@ -1929,6 +1947,81 @@ private struct SetupWizardView: View {
     }
 
     @MainActor
+    private func provisionMissingTAMs() async -> Bool {
+        guard fritzAuthenticated, !isProvisioningTAM else { return false }
+        isProvisioningTAM = true
+        mailboxSaveError = nil
+        defer { isProvisioningTAM = false; fritzConfirmation.finish() }
+        let required = 1 + (sipLine2Enabled ? 1 : 0) + (sipLine3Enabled ? 1 : 0)
+        let rawHost = fritzHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = rawHost.contains("://") ? rawHost : "http://\(rawHost):49000"
+        do {
+            guard let url = URL(string: base + "/tr64desc.xml") else { throw URLError(.badURL) }
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let xml = String(data: data, encoding: .utf8),
+                  let service = extractTR064Services(from: xml).first(where: {
+                      $0.type.localizedCaseInsensitiveContains("X_AVM-DE_TAM") || $0.type.localizedCaseInsensitiveContains(":TAM:")
+                  }) else { throw URLError(.cannotParseResponse) }
+            let auth = FritzAuthDelegate(username: fritzUser, password: fritzPassword)
+            let session = URLSession(configuration: .ephemeral, delegate: auth, delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            var token: String?
+            var active: [FritzTAM] = []
+            var inactive: [Int] = []
+            // Read all five slots before choosing any target. A failed read is
+            // not evidence of a free slot and must never be written blindly.
+            for index in 0..<5 {
+                let info = try await soapCall(session: session, base: base, serviceType: service.type,
+                    controlURL: service.controlURL, action: "GetInfo", arguments: [("NewIndex", String(index))])
+                let enabled = ["1", "true"].contains(extractSOAPValue("NewEnable", from: info).lowercased())
+                if enabled {
+                    active.append(FritzTAM(index: index, name: extractSOAPValue("NewName", from: info), enabled: true))
+                } else { inactive.append(index) }
+            }
+            let missing = max(0, required - active.count)
+            for index in inactive.prefix(missing) {
+                tamProvisionStatus = "Anrufbeantworter \(index + 1) wird eingerichtet …"
+                do {
+                    _ = try await soapCall(session: session, base: base, serviceType: service.type,
+                        controlURL: service.controlURL, action: "SetEnable",
+                        arguments: [("NewIndex", String(index)), ("NewEnable", "1")], secondFactorToken: token)
+                } catch {
+                    guard isSecondFactorRequired(error) else { throw error }
+                    token = try await beginFritzSecondFactor(session: session, base: base, descriptionXML: xml)
+                    _ = try await soapCall(session: session, base: base, serviceType: service.type,
+                        controlURL: service.controlURL, action: "SetEnable",
+                        arguments: [("NewIndex", String(index)), ("NewEnable", "1")], secondFactorToken: token)
+                }
+                let verified = try await soapCall(session: session, base: base, serviceType: service.type,
+                    controlURL: service.controlURL, action: "GetInfo", arguments: [("NewIndex", String(index))])
+                guard ["1", "true"].contains(extractSOAPValue("NewEnable", from: verified).lowercased()) else {
+                    throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box bestätigt Anrufbeantworter \(index + 1) nicht als aktiv"])
+                }
+                active.append(FritzTAM(index: index, name: extractSOAPValue("NewName", from: verified), enabled: true))
+                // Retain verified partial success so a retry never repeats it.
+                fritzTAMs = active.sorted { $0.index < $1.index }
+                fritzTAMCount = active.count
+            }
+            guard active.count >= required else { throw URLError(.cannotParseResponse) }
+            fritzTAMs = active.sorted { $0.index < $1.index }
+            fritzTAMCount = active.count
+            let selections = FritzTAMSelection.resolved(
+                selections: [mailbox1TAM, sipLine2Enabled ? mailbox2TAM : -1, sipLine3Enabled ? mailbox3TAM : -1],
+                available: active.map(\.index))
+            mailbox1TAM = selections[0]
+            mailbox2TAM = selections[1]
+            mailbox3TAM = selections[2]
+            mailboxNumbersVerified = false
+            tamProvisionStatus = "\(active.count) Anrufbeantworter aus der FRITZ!Box zurückbestätigt – Rufnummernzuordnung folgt"
+            return true
+        } catch {
+            tamProvisionStatus = "Anrufbeantworter-Einrichtung fehlgeschlagen: \(error.localizedDescription)"
+            mailboxSaveError = tamProvisionStatus
+            return false
+        }
+    }
+
+    @MainActor
     private func provisionMissingSIPClients() async {
         guard fritzAuthenticated,
               !fritzSIPWriteAction.isEmpty,
@@ -2032,10 +2125,8 @@ private struct SetupWizardView: View {
                 }
             }
 
-            // SetEnable only switches a TAM on. It does not assign any number;
-            // activating unused slots here produced catch-all answering machines.
-            // Preserve existing TAMs and verify their explicit number assignments
-            // in the final function test instead of creating unconfigured ones.
+            // TAM provisioning has its own step-one path, including when SIP
+            // clients already exist. Exact number assignments are saved later.
 
             await checkFritzBox()
 

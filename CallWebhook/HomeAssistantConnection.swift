@@ -9,9 +9,7 @@ enum HomeAssistantConnection {
     }
 
     static func request(base: URL, path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> (Data, Int) {
-        guard var token = SetupKeychain.get(account: "home-assistant-token"), !token.isEmpty else {
-            throw URLError(.userAuthenticationRequired)
-        }
+        var token = try await HomeAssistantAuth.shared.validAccessToken(instance: base)
         var request = URLRequest(url: base.appendingPathComponent(path))
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpMethod = method
@@ -23,7 +21,7 @@ enum HomeAssistantConnection {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
             if http.statusCode == 401 && attempt == 0 {
-                token = try await HomeAssistantAuth.shared.refresh(instance: base)
+                token = try await HomeAssistantAuth.shared.refreshAfterRejection(instance: base, rejectedToken: token)
                 continue
             }
             return (data, http.statusCode)

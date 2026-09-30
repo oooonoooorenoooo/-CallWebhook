@@ -6,6 +6,8 @@ import UIKit
 final class HomeAssistantAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
     static let shared = HomeAssistantAuth()
 
+    private let refreshGate = HATokenRefreshGate()
+
     private let clientID = "https://oooonoooorenoooo.github.io/-CallWebhook/"
     private let callbackScheme = "callwebhook"
     private let redirectURI = "callwebhook://auth"
@@ -54,15 +56,37 @@ final class HomeAssistantAuth: NSObject, ASWebAuthenticationPresentationContextP
         return try await exchange(code: code, instance: instance)
     }
 
-    func refresh(instance: URL) async throws -> String {
-        guard let refreshToken = SetupKeychain.get(account: "home-assistant-refresh-token"), !refreshToken.isEmpty else {
-            throw NSError(domain: "CallWebhook.HAAuth", code: 2, userInfo: [NSLocalizedDescriptionKey: "Kein Home-Assistant-Refresh-Token vorhanden"])
+    func validAccessToken(instance: URL) async throws -> String {
+        let token = SetupKeychain.get(account: "home-assistant-token") ?? ""
+        let renewable = !(SetupKeychain.get(account: "home-assistant-refresh-token") ?? "").isEmpty
+        if renewable && (token.isEmpty || HATokenLifetime.needsRefresh(
+            expiry: SetupKeychain.get(account: "home-assistant-token-expiry"))) {
+            return try await refresh(instance: instance)
         }
-        return try await tokenRequest(instance: instance, fields: [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": clientID
-        ], storeRefreshToken: false)
+        guard !token.isEmpty else { throw URLError(.userAuthenticationRequired) }
+        return token
+    }
+
+    func refreshAfterRejection(instance: URL, rejectedToken: String) async throws -> String {
+        // Another request may already have renewed the token while this one was in flight.
+        if let current = SetupKeychain.get(account: "home-assistant-token"),
+           !current.isEmpty, current != rejectedToken {
+            return try await validAccessToken(instance: instance)
+        }
+        return try await refresh(instance: instance)
+    }
+
+    func refresh(instance: URL) async throws -> String {
+        try await refreshGate.run {
+            guard let refreshToken = SetupKeychain.get(account: "home-assistant-refresh-token"), !refreshToken.isEmpty else {
+                throw NSError(domain: "CallWebhook.HAAuth", code: 2, userInfo: [NSLocalizedDescriptionKey: "Home Assistant bitte erneut anmelden"])
+            }
+            return try await self.tokenRequest(instance: instance, fields: [
+                "grant_type": "refresh_token",
+                "refresh_token": refreshToken,
+                "client_id": self.clientID
+            ], storeRefreshToken: false)
+        }
     }
 
     private func exchange(code: String, instance: URL) async throws -> String {
@@ -99,7 +123,9 @@ final class HomeAssistantAuth: NSObject, ASWebAuthenticationPresentationContextP
             try SetupKeychain.set(refreshToken, account: "home-assistant-refresh-token")
         }
         if let expiresIn = json["expires_in"] as? Double {
-            try? SetupKeychain.set(String(Date().timeIntervalSince1970 + expiresIn), account: "home-assistant-token-expiry")
+            try SetupKeychain.set(String(Date().timeIntervalSince1970 + expiresIn), account: "home-assistant-token-expiry")
+        } else {
+            SetupKeychain.delete(account: "home-assistant-token-expiry")
         }
         return accessToken
     }

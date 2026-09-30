@@ -17,7 +17,14 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     }
     @Published var haToken = "" {
         didSet {
-            if !haToken.isEmpty { try? SetupKeychain.set(haToken, account: "home-assistant-token") }
+            if !haToken.isEmpty, haToken != SetupKeychain.get(account: "home-assistant-token") {
+                // A manually supplied long-lived token is not part of the OAuth session.
+                do {
+                    try SetupKeychain.set(haToken, account: "home-assistant-token")
+                    SetupKeychain.delete(account: "home-assistant-refresh-token")
+                    SetupKeychain.delete(account: "home-assistant-token-expiry")
+                } catch { haState = "HA-Token konnte nicht gespeichert werden" }
+            }
             UserDefaults.standard.removeObject(forKey: "haToken")
         }
     }

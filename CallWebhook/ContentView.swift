@@ -1235,7 +1235,6 @@ private struct SetupWizardView: View {
                 asteriskConfigStatus = "Asterisk-Einrichtung wurde nicht vollständig verifiziert"
                 return
             }
-            try? SetupKeychain.set(haToken, account: "home-assistant-token")
             guard let iosPassword = SetupKeychain.get(account: "asterisk-sip-callwebhook-ios"),
                   let host = base.host else {
                 asteriskInstalled = false

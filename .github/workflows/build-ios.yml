@@ -49,6 +49,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/backend-tests"
           "$RUNNER_TEMP/backend-tests/bin/pip" install PyYAML
           "$RUNNER_TEMP/backend-tests/bin/python" -m unittest discover -s tests -v
+      - name: Test setup assignment handoff
+        run: |
+          swiftc CallWebhook/SetupAssignments.swift tests/SetupAssignmentsTests.swift -o "$RUNNER_TEMP/setup-assignment-tests"
+          "$RUNNER_TEMP/setup-assignment-tests"
       - name: Test authenticated push relay
         run: |
           python3 -m venv "$RUNNER_TEMP/relay-tests"

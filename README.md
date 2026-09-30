@@ -87,3 +87,18 @@ endpoint accepts `username` and `password`, writes atomically with mode 0600,
 and returns no credentials. The backend reads these values on demand, so no
 HA restart is needed after saving. This requires backend API 18 and an app
 build containing the credential synchronization.
+
+## Continuous setup assistant
+
+Setup remains on one scrolling page with a progress bar. It verifies FRITZ!Box
+credentials, signs in to Home Assistant, then asks for one, two or three
+CallWebhook LAN phones. Confirming the count starts device discovery and missing
+SIP/TAM provisioning, preserving the FRITZ!Box second-factor dialog.
+Each active line's number and answering machine must be explicitly confirmed.
+Changing either selection invalidates that confirmation. After confirmations
+and mobile forwarding are complete, Bootstrap installs/updates automatically;
+HA readiness is checked before credentials and number assignments are saved,
+Asterisk is provisioned, and the call helper and incoming push are configured.
+Successful discoveries use matching green status rows. Technical slot/service
+listings and separate Asterisk fallback controls are no longer shown. A failed
+automatic setup can be retried without recreating already verified devices.

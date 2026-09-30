@@ -204,7 +204,11 @@ private struct SetupWizardView: View {
     @State private var fritzHost = UserDefaults.standard.string(forKey: "setupFritzHost") ?? "192.168.178.1"
     @State private var fritzUser = UserDefaults.standard.string(forKey: "setupFritzUser") ?? ""
     @State private var fritzPassword = ""
-    @State private var fritzUserChoice: Bool? = nil
+    @State private var fritzUserChoice = true
+    @State private var isPreparingDevices = false
+    @State private var automationRunning = false
+    @State private var automationFailed = false
+    @State private var confirmedAssignments: [Int: String] = [:]
     @State private var homeAssistantURL = UserDefaults.standard.string(forKey: "setupHomeAssistantURL") ?? "26"
     @State private var easybellEnabled = UserDefaults.standard.bool(forKey: "setupEasybellEnabled")
     @AppStorage("primaryPhoneNumber") private var primaryMobileNumber = ""
@@ -300,75 +304,83 @@ private struct SetupWizardView: View {
         }
     }
 
-    private let titles = [
-        "Willkommen",
-        "FRITZ!Box",
-        "Home Assistant",
-        "Telefonleitungen",
-        "Prüfung"
-    ]
+    // One continuous form. The stage reveals sections; it never replaces the page.
+    private let titles = ["FRITZ!Box", "Home Assistant", "Telefoniegeräte",
+                          "Leitungszuordnung", "Automatische Einrichtung", "Prüfung"]
+
+    private var setupBusy: Bool {
+        isChecking || isAuthenticatingHA || isPreparingDevices || automationRunning
+            || isSavingMailboxes || isProvisioningSIP || isProvisioningTAM
+            || isBootstrappingHA || isWaitingForHARestart || isContinuingHASetup
+    }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
+            VStack(spacing: 0) {
                 ProgressView(value: Double(step + 1), total: Double(titles.count))
-                    .padding(.horizontal)
-
-                Group {
-                    switch step {
-                    case 0: welcome
-                    case 1: fritz
-                    case 2: homeAssistant
-                    case 3: lines
-                    default: verification
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .disabled(isSavingMailboxes || isProvisioningTAM || setupPush.settingUp || operatorPushWorking)
-
-                if let mailboxSaveError {
-                    Text(mailboxSaveError).foregroundStyle(.red).padding(.horizontal)
-                }
-                if isSavingMailboxes {
-                    ProgressView("Leitungen und Anrufbeantworter-Zuordnung werden gespeichert …")
-                    Text(lineAssignmentStatus).font(.caption).padding(.horizontal)
-                }
-
-                HStack {
-                    if step > 0 {
-                        Button("Zurück") { mailboxSaveError = nil; step -= 1 }
-                            .disabled(isSavingMailboxes || isProvisioningTAM || setupPush.settingUp || operatorPushWorking)
-                            .buttonStyle(.bordered)
-                    }
-                    Spacer()
-                    Button(step == titles.count - 1 ? "Einrichtung abschließen" : "Weiter") {
-                        if step == titles.count - 1 {
-                            persistSetup()
-                            onFinished()
-                        } else if step == 1 {
-                            Task {
-                                if await provisionMissingTAMs() { step += 1 }
+                    .tint(.blue).padding()
+                ScrollViewReader { proxy in
+                    Form {
+                        fritz.id(0)
+                        if step >= 1 { homeAssistantLogin.id(1) }
+                        if step >= 2 { devices.id(2) }
+                        if step >= 3 {
+                            Text("Leitungszuordnung").font(.headline).id(3)
+                            lines.disabled(step != 3 || setupBusy)
+                        }
+                        if step >= 4 {
+                            Text("Automatische Einrichtung").font(.headline).id(4)
+                            homeAssistant
+                        }
+                        if let mailboxSaveError {
+                            Section { Text(mailboxSaveError).foregroundStyle(.red) }
+                        }
+                        if isSavingMailboxes {
+                            Section {
+                                ProgressView("Rufnummernzuordnung wird übertragen …")
+                                Text(lineAssignmentStatus)
                             }
-                        } else if step == 3 {
-                            Task { if await saveMailboxSelection() { step += 1 } }
-                        } else {
-                            step += 1
+                        }
+                        if step == 5 {
+                            Text("Prüfung").font(.headline).id(5)
+                            verification
+                            Section {
+                                Button("Einrichtung abschließen") {
+                                    persistSetup()
+                                    onFinished()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!canContinue || setupBusy || functionTestRunning
+                                    || setupPush.settingUp || operatorPushWorking)
+                            }
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canContinue || isSavingMailboxes || isProvisioningTAM || setupPush.settingUp || operatorPushWorking || (step == 3 && !mailboxSelectionVerified))
+                    .onChange(of: step) { _, value in
+                        withAnimation { proxy.scrollTo(value, anchor: .top) }
+                    }
+                    .onChange(of: confirmedAssignments) { _, _ in
+                        guard step == 3 else { return }
+                        if let next = activeLines.first(where: {
+                            confirmedAssignments[$0] != assignmentFingerprint(line: $0)
+                        }) {
+                            withAnimation { proxy.scrollTo(100 + next, anchor: .top) }
+                        }
+                    }
                 }
-                .padding()
             }
             .toolbar {
                 if let onCancel {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Schließen", action: onCancel).disabled(isSavingMailboxes || isProvisioningSIP || functionTestRunning || setupPush.settingUp || operatorPushWorking)
+                        Button("Schließen", action: onCancel)
+                            .disabled(setupBusy || functionTestRunning || setupPush.settingUp || operatorPushWorking)
                     }
                 }
             }
-            .navigationTitle(titles[step])
+            .navigationTitle("CallWebhook einrichten")
             .navigationBarTitleDisplayMode(.inline)
+        }
+        .onChange(of: readyForAutomation) { _, ready in
+            if ready { Task { await startAutomaticSetup() } }
         }
         .sheet(isPresented: $fritzConfirmation.visible) {
             FritzConfirmationView(model: fritzConfirmation, submit: submitFritzConfirmationCode)
@@ -391,210 +403,142 @@ private struct SetupWizardView: View {
         fritzConfirmation.error = ""
     }
 
-    private var welcome: some View {
-        VStack(spacing: 20) {
-            if onCancel != nil {
-                Button("Abschluss und Funktionstest öffnen") { step = titles.count - 1 }
-                    .buttonStyle(.borderedProminent)
-                    .padding(.horizontal)
-                Text("Die vorhandene Einrichtung bleibt gespeichert. Du kannst direkt den Anruf-Push erneut prüfen oder mit Weiter die Einrichtung durchgehen.")
-                    .font(.callout).foregroundStyle(.secondary).padding(.horizontal)
+    private var fritz: some View {
+        Section("FRITZ!Box") {
+            Toggle("FRITZ!Box-Benutzer vorhanden", isOn: $fritzUserChoice)
+                .disabled(step > 0 || setupBusy)
+            if !fritzUserChoice {
+                Text("Unter System → FRITZ!Box-Benutzer einen Benutzer anlegen und „FRITZ!Box Einstellungen“ erlauben. Anschließend die Zugangsdaten hier eintragen.")
+                Button("FRITZ!Box öffnen") {
+                    if let url = URL(string: "http://\(fritzHost)") { UIApplication.shared.open(url) }
+                }
             }
-            ContentUnavailableView(
-                "CallWebhook einrichten",
-                systemImage: "phone.connection.fill",
-                description: Text("Der Assistent richtet FRITZ!Box, Home Assistant, Asterisk, Mailboxen und Telefonleitungen ein. Nach einer vollständigen Neuinstallation beginnt die Einrichtung immer hier.")
-            )
+            HStack(alignment: .top, spacing: 8) {
+                TextField("IP-Adresse", text: $fritzHost)
+                    .keyboardType(.decimalPad)
+                    .accessibilityLabel("FRITZ!Box IP-Adresse")
+                TextField("Benutzername", text: $fritzUser)
+                    .textContentType(.username)
+                    .accessibilityLabel("FRITZ!Box Benutzername")
+                SecureField("Passwort", text: $fritzPassword)
+                    .textContentType(.password)
+                    .accessibilityLabel("FRITZ!Box Passwort")
+            }
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .disabled(step > 0 || setupBusy)
+            if step == 0 {
+                Button("Verbinden") {
+                    Task {
+                        await checkFritzBox()
+                        if fritzAuthenticated && fritzVoIPAvailable { step = 1 }
+                    }
+                }.disabled(setupBusy || fritzHost.isEmpty || fritzUser.isEmpty || fritzPassword.isEmpty)
+                if isChecking { ProgressView("FRITZ!Box wird geprüft …") }
+            }
+            if fritzAuthenticated {
+                foundRow("FRITZ!Box verbunden")
+                if fritzVoIPAvailable { foundRow("Telefonie verfügbar") }
+                ForEach(fritzVoIPNumbers, id: \.self) { number in
+                    foundRow("Rufnummer \(number)")
+                }
+            } else if fritzStatus != "Noch nicht geprüft" {
+                Text(fritzStatus).foregroundStyle(.secondary)
+            }
         }
     }
 
-    private var fritz: some View {
-        Form {
-            Section("FRITZ!Box") {
-                Text("Ist bereits ein FRITZ!Box-Benutzer für CallWebhook vorhanden?")
-                    .font(.headline)
-                HStack {
-                    Button {
-                        fritzUserChoice = true
-                    } label: {
-                        Label("Ja", systemImage: fritzUserChoice == true ? "checkmark.circle.fill" : "circle")
-                    }
-                    .buttonStyle(.bordered)
-                    Button {
-                        fritzUserChoice = false
-                    } label: {
-                        Label("Nein", systemImage: fritzUserChoice == false ? "checkmark.circle.fill" : "circle")
-                    }
-                    .buttonStyle(.bordered)
-                }
+    private func foundRow(_ title: String) -> some View {
+        Label(title, systemImage: "checkmark.circle.fill")
+            .font(.body).foregroundStyle(.green)
+    }
 
-                if fritzUserChoice == false {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("FRITZ!Box-Benutzer anlegen", systemImage: "person.badge.plus")
-                            .font(.headline)
-                        Text("1. FRITZ!Box-Benutzeroberfläche öffnen")
-                        Text("2. System → FRITZ!Box-Benutzer")
-                        Text("3. „Benutzer hinzufügen“ wählen")
-                        Text("4. Benutzername, z. B. „callwebhook“, und ein sicheres Kennwort vergeben")
-                        Text("5. Unter Berechtigungen „FRITZ!Box Einstellungen“ aktivieren")
-                        Text("6. Zugriff aus dem Internet ist für CallWebhook nicht erforderlich")
-                        Text("7. Speichern und die Zugangsdaten anschließend hier eintragen")
+    private var homeAssistantLogin: some View {
+        Section("Home Assistant anmelden") {
+            HStack(spacing: 0) {
+                Text("192.168.178.").foregroundStyle(.secondary)
+                TextField("26", text: $homeAssistantURL)
+                    .keyboardType(.numberPad)
+                    .onChange(of: homeAssistantURL) { _, value in
+                        let digits = String(value.filter(\.isNumber).prefix(3))
+                        if digits != value { homeAssistantURL = digits }
                     }
-                    .font(.callout)
-                }
-
-                if fritzUserChoice != nil {
-                    TextField("Adresse", text: $fritzHost)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("Benutzer", text: $fritzUser)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("Kennwort", text: $fritzPassword)
-                }
-            }
-            Section("CallWebhook-LAN-Telefone") {
-                Picker("Wie viele Geräte möchtest du einrichten?", selection: Binding(
-                    get: { sipLine3Enabled ? 3 : (sipLine2Enabled ? 2 : 1) },
-                    set: { count in
-                        sipLine2Enabled = count >= 2
-                        sipLine3Enabled = count >= 3
-                        asteriskConfigReady = false
-                        asteriskInstalled = false
-                        if fritzAuthenticated { Task { await checkFritzBox() } }
-                    })) {
-                    Text("1 · SIM 1").tag(1)
-                    Text("2 · SIM 1 und SIM 2").tag(2)
-                    Text("3 · SIM 1, SIM 2 und Festnetz").tag(3)
-                }.disabled(isChecking || isProvisioningSIP)
-                Text("Die gewählte Anzahl wird im nächsten Schritt vollständig angelegt. Vorhandene CallWebhook-Geräte werden wiederverwendet.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section {
-                Button {
-                    Task { await checkFritzBox() }
-                } label: {
-                    Label(isChecking ? "Prüfe …" : (fritzReachable && fritzAuthenticated ? "FRITZ!Box geprüft" : "FRITZ!Box prüfen"), systemImage: fritzReachable && fritzAuthenticated ? "checkmark.circle.fill" : "network")
-                        .foregroundStyle(fritzReachable && fritzAuthenticated ? .green : .blue)
-                }
-                .disabled(isChecking || fritzUserChoice == nil || fritzHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fritzUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fritzPassword.isEmpty)
-                Label(fritzStatus, systemImage: fritzReachable ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(fritzReachable ? .green : .secondary)
-                if fritzReachable {
-                    Label("Telefonie / X_VoIP", systemImage: fritzVoIPAvailable ? "checkmark.circle.fill" : "xmark.circle")
-                        .foregroundStyle(fritzVoIPAvailable ? .green : .red)
-                    Label("Anrufbeantworter / TAM", systemImage: fritzTAMAvailable ? "checkmark.circle.fill" : "xmark.circle")
-                        .foregroundStyle(fritzTAMAvailable ? .green : .red)
-                    Text("\(fritzServiceCount) TR-064-Dienste erkannt")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Label("FRITZ-Anmeldung", systemImage: fritzAuthenticated ? "checkmark.circle.fill" : "xmark.circle")
-                        .foregroundStyle(fritzAuthenticated ? .green : .red)
-                    if fritzAuthenticated {
-                        Text("Internettelefonie: \(fritzVoIPNumbers.isEmpty ? "keine Rufnummer erkannt" : fritzVoIPNumbers.joined(separator: ", "))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("Anrufbeantworter erkannt: \(fritzTAMCount)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button {
-                            Task { _ = await provisionMissingTAMs() }
-                        } label: {
-                            Label(isProvisioningTAM ? "Anrufbeantworter werden eingerichtet …" : "Fehlende Anrufbeantworter einrichten",
-                                  systemImage: "recordingtape")
+            }.disabled(step > 1 || setupBusy)
+            if step == 1 {
+                Button("Mit Home Assistant verbinden") {
+                    Task {
+                        await checkHomeAssistant()
+                        if homeAssistantReachable && !haAuthenticated {
+                            await authenticateHomeAssistant()
                         }
-                        .disabled(isProvisioningTAM || isProvisioningSIP)
-                        Text(tamProvisionStatus).font(.caption).foregroundStyle(.secondary)
-                        Text("Beim Weitergehen werden fehlende Anrufbeantworter bereits hier eingerichtet. Die genaue Rufnummernzuordnung wird anschließend bei Telefonleitungen gespeichert und geprüft.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text("SIP-Nebenstellen: \(fritzSIPClients.count)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(fritzSIPClients) { client in
-                            Label(client.displayName, systemImage: "phone.connection")
-                                .font(.caption)
-                        }
-                        Divider()
-                        Text("callwhapp1: \(sipClient1Plan)")
-                            .font(.caption)
-                        if sipLine2Enabled { Text("callwhapp2: \(sipClient2Plan)").font(.caption) }
-                        if sipLine3Enabled {
-                            Text("callwhapp3: \(sipClient3Plan)")
-                                .font(.caption)
-                        }
-                        if !fritzSIPProvisioned {
-                            Label("Beim Anlegen der SIP-Nebenstellen kann die FRITZ!Box eine Sicherheitsbestätigung verlangen. Im Bestätigungsdialog kannst du zwischen den angebotenen Wegen wählen: Gerätetaste oder Code an einem verbundenen Festnetztelefon. Danach geht es automatisch weiter.", systemImage: "hand.tap")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button {
-                            Task { await provisionMissingSIPClients() }
-                        } label: {
-                            Label(
-                                isProvisioningSIP ? "Provisioniere …" : (fritzSIPProvisioned ? "SIP-Nebenstellen eingerichtet" : "SIP-Nebenstellen einrichten"),
-                                systemImage: fritzSIPProvisioned ? "checkmark.circle.fill" : "gearshape.2.fill"
-                            )
-                            .foregroundStyle(fritzSIPProvisioned ? .green : .blue)
-                        }
-                        .disabled(fritzSIPProvisioned || isProvisioningSIP || fritzSIPWriteAction.isEmpty || sipClient1Index == nil || (sipLine2Enabled && sipClient2Index == nil) || (sipLine3Enabled && sipClient3Index == nil))
-                        Text(fritzSIPVerified && !isProvisioningSIP ? fritzSIPSummary : sipProvisionStatus)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
-                }
+                }.disabled(setupBusy || homeAssistantURL.isEmpty)
             }
-            Section {
-                Label("Vorhandene CallWebhook-SIP-Nebenstellen werden wiederverwendet. Nur fehlende Nebenstellen müssen eingerichtet werden.", systemImage: "gearshape.2")
+            if haAuthenticated {
+                foundRow("Home Assistant verbunden")
+            } else {
+                Text(homeAssistantStatus).foregroundStyle(.secondary)
+            }
+            if isAuthenticatingHA || (step == 1 && isChecking) {
+                ProgressView("Anmeldung wird geprüft …")
             }
         }
+    }
+
+    private var devices: some View {
+        Section("Telefoniegeräte und Anrufbeantworter") {
+            Picker("Wie viele Geräte möchtest du einrichten?", selection: Binding(
+                get: { sipLine3Enabled ? 3 : (sipLine2Enabled ? 2 : 1) },
+                set: { count in
+                    sipLine2Enabled = count >= 2
+                    sipLine3Enabled = count >= 3
+                })) {
+                Text("1 · SIM 1").tag(1)
+                Text("2 · SIM 1 und SIM 2").tag(2)
+                Text("3 · SIM 1, SIM 2 und Festnetz").tag(3)
+            }.disabled(step != 2 || setupBusy)
+            if step == 2 {
+                Button(isPreparingDevices ? "Wird eingerichtet …" : "Fertig") {
+                    Task { await prepareDevices() }
+                }.disabled(setupBusy)
+            }
+            if isPreparingDevices {
+                ProgressView(isProvisioningTAM ? tamProvisionStatus : "Telefoniegeräte werden geprüft und eingerichtet …")
+            }
+            ForEach(fritzSIPClients.filter { client in
+                (1...(sipLine3Enabled ? 3 : (sipLine2Enabled ? 2 : 1))).contains { index in
+                    client.username == "callwhapp\(index)" || client.phoneName == "callwhapp\(index)"
+                }
+            }) { client in foundRow(client.displayName) }
+            ForEach(fritzTAMs) { tam in foundRow(tam.displayName) }
+            if step == 2 && !isPreparingDevices {
+                if !fritzAuthenticated { Text(fritzStatus).foregroundStyle(.red) }
+                else if !fritzSIPVerified || !deviceCredentialsReady {
+                    Text(sipProvisionStatus).foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func prepareDevices() async {
+        guard step == 2, haAuthenticated, !isPreparingDevices else { return }
+        isPreparingDevices = true
+        mailboxSaveError = nil
+        defer { isPreparingDevices = false }
+        await checkFritzBox()
+        guard fritzAuthenticated && fritzVoIPAvailable else { return }
+        await provisionMissingSIPClients()
+        guard fritzSIPVerified,
+              deviceCredentialsReady else { return }
+        guard await provisionMissingTAMs() else { return }
+        confirmedAssignments = [:]
+        step = 3
     }
 
     private var homeAssistant: some View {
-        Form {
-            Section("Home Assistant") {
-                HStack(spacing: 0) {
-                    Text("192.168.178.")
-                        .foregroundStyle(.secondary)
-                    TextField("26", text: $homeAssistantURL)
-                        .keyboardType(.numberPad)
-                        .onChange(of: homeAssistantURL) { _, value in
-                            let digits = String(value.filter(\.isNumber).prefix(3))
-                            if digits != value { homeAssistantURL = digits }
-                        }
-                }
-                Button {
-                    Task { await checkHomeAssistant() }
-                } label: {
-                    Label(isChecking ? "Prüfe …" : (homeAssistantReachable ? "Home Assistant geprüft" : "Home Assistant prüfen"), systemImage: homeAssistantReachable ? "checkmark.circle.fill" : "house.and.flag")
-                        .foregroundStyle(homeAssistantReachable ? .green : .blue)
-                }
-                .disabled(isChecking || isBootstrappingHA || isWaitingForHARestart || homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Label(bootstrapRestartPending ? "Home Assistant startet neu …" : homeAssistantStatus,
-                      systemImage: homeAssistantReachable && !bootstrapRestartPending ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(homeAssistantReachable && !bootstrapRestartPending ? .green : .secondary)
-                Button {
-                    Task { await authenticateHomeAssistant() }
-                } label: {
-                    Label(isAuthenticatingHA ? "Home Assistant öffnet …" : (haAuthenticated ? "Home Assistant verbunden" : "Mit Home Assistant verbinden"), systemImage: haAuthenticated ? "checkmark.shield.fill" : "person.badge.key.fill")
-                        .foregroundStyle(haAuthenticated ? .green : .blue)
-                }
-                .disabled(isAuthenticatingHA || isBootstrappingHA || isWaitingForHARestart || !homeAssistantReachable)
-                if haAuthenticated {
-                    Label("Autorisierung erfolgreich", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                }
-                if haAuthenticated && !callWebhookHAReady {
-                    Label("Der Assistent findet und installiert den Bootstrap automatisch, startet ihn und wartet auf den vollständigen Neustart von Home Assistant.", systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if bootstrapAttemptFailed {
-                        Button("Automatische Einrichtung erneut versuchen") {
-                            Task { await installBootstrapAutomatically() }
-                        }
-                        .disabled(isBootstrappingHA || isWaitingForHARestart)
-                    }
-
-                }
+        Group {
+            Section("Automatische Einrichtung") {
                 HStack(spacing: 8) {
                     ZStack {
                         ForEach(0..<bootstrapProgressTotal, id: \.self) { index in
@@ -646,63 +590,58 @@ private struct SetupWizardView: View {
                     Text(asteriskConfigStatus)
                         .foregroundStyle(asteriskInstallFailed ? .red : (asteriskInstalled ? .green : .secondary))
                 }
-                if callWebhookHAReady && (!asteriskInstalled || !callHelperReady) {
-                    Button {
-                        Task { await continueHASetup() }
-                    } label: {
-                        Label(asteriskInstallFailed ? "Asterisk-Einrichtung erneut versuchen" : "Asterisk-Einrichtung fortsetzen", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(isContinuingHASetup || isInstallingAsterisk || isCreatingCallHelper)
-                }
                 Label("Der Home-Assistant-Token wird ausschließlich sicher im iOS-Keychain gespeichert.", systemImage: "lock.shield")
                     .foregroundStyle(.secondary)
             }
             Section("Anrufstatus-Schalter") {
                 setupCheck("Home-Assistant-Helfer", detail: callHelperStatus, ready: callHelperReady)
                 if isCreatingCallHelper { ProgressView() }
-                if asteriskInstalled && !callHelperReady {
-                    Button("Anrufstatus-Schalter anlegen / prüfen") { Task { await ensureCallHelper() } }
-                        .disabled(isCreatingCallHelper)
-                }
+
             }
-            Section("Automatisch einzurichten") {
-                Label(
-                    callWebhookHAReady ? "CallWebhook-Integration bereit" : "CallWebhook-Integration ausstehend",
-                    systemImage: callWebhookHAReady ? "checkmark.circle.fill" : "circle.dashed"
-                )
-                .foregroundStyle(callWebhookHAReady ? .green : .secondary)
-
-                Label(
-                    asteriskInstalled ? "Asterisk und iPhone-SIP bereit" : (asteriskConfigReady ? "Asterisk vorbereitet" : "Asterisk ausstehend"),
-                    systemImage: asteriskInstalled ? "checkmark.circle.fill" : "circle.dashed"
-                )
-                .foregroundStyle(asteriskInstalled ? .green : .secondary)
-
-                let mailboxReady = mailbox1TAM >= 0 || mailbox2TAM >= 0
-                Label(
-                    mailboxReady ? "Mailbox/TAM-Zuordnung erkannt" : "Mailbox/TAM-Zuordnung ausstehend",
-                    systemImage: mailboxReady ? "checkmark.circle.fill" : "circle.dashed"
-                )
-                .foregroundStyle(mailboxReady ? .green : .secondary)
+            if automationFailed {
+                Section {
+                    Button("Einrichtung erneut versuchen") {
+                        Task { await startAutomaticSetup() }
+                    }.disabled(setupBusy)
+                }
             }
         }
     }
 
     private var lines: some View {
-        Form {
+        Group {
             Section("Hinterlegte FRITZ!Box-Rufnummern") {
+                Text("Leitungen zuordnen und jeweils bestätigen. Sind alle Zuordnungen und Mobilfunk-Rufumleitungen bestätigt, startet die weitere Einrichtung automatisch.")
                 TextField("Ortsvorwahl, falls Rufnummern ohne Vorwahl", text: $setupAreaCode).keyboardType(.phonePad)
                 ForEach(Array(fritzVoIPNumbers.enumerated()), id: \.element) { index, number in
-                    LabeledContent("Rufnummer \(index + 1)", value: number)
+                    foundRow("Rufnummer \(number)")
                 }
                 if fritzVoIPNumbers.isEmpty {
                     Text("Keine Rufnummern ausgelesen. Du kannst die tatsächliche Nummer manuell eintragen.")
                         .foregroundStyle(.secondary)
                 }
-                Button("Rufnummern neu auslesen") {
-                    Task { await checkFritzBox() }
+            }
+            Section("Rufnummer bei ausgehenden Anrufen") {
+                Toggle("Eigene Mobilfunknummer anzeigen", isOn: $easybellEnabled)
+                Text(easybellEnabled
+                     ? "Dafür wird ein geeigneter easybell-Telefonie-/SIP-Tarif benötigt. CLIP no screening selbst ist bei easybell kostenlos."
+                     : "Ohne diese Option wird kein easybell-Zugang für die Mobilfunknummer benötigt.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if easybellEnabled {
+                    Text("Es darf nur eine Rufnummer übertragen werden, die dir zugeteilt ist bzw. deren Zuteilungsnehmer du bist.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("easybell SIP-Benutzername", text: $easybellUsername)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("easybell SIP-Passwort", text: $easybellPassword)
+                    TextField("Contact User / Stammrufnummer", text: $easybellContactUser)
+                        .keyboardType(.phonePad)
+                    Text("Registrar: voip.easybell.de. Das SIP-Kennwort wird ausschließlich sicher im iOS-Keychain gespeichert.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(isChecking)
             }
             Section("Leitung 1") {
                 TextField("Bezeichnung", text: $line1Label)
@@ -712,9 +651,10 @@ private struct SetupWizardView: View {
                     destination: line1Number, serviceID: $line1CellularServiceID, confirmedConfiguration: $line1ForwardingConfirmed)
                 Text(easybellEnabled ? "easybell / CLIP no screening" : "FRITZ!Box")
                     .foregroundStyle(.secondary)
-            }
+                assignmentConfirmation(line: 1)
+            }.id(101)
             Section("Leitung 2") {
-                Text(sipLine2Enabled ? "Im FRITZ!Box-Schritt ausgewählt" : "Nicht ausgewählt – Anzahl im FRITZ!Box-Schritt ändern")
+                Text(sipLine2Enabled ? "SIM 2" : "Nicht ausgewählt")
                 if sipLine2Enabled {
                     TextField("Bezeichnung", text: $line2Label)
                     fritzNumberPicker("Absenderrufnummer", selection: $line2Number)
@@ -724,9 +664,10 @@ private struct SetupWizardView: View {
                     TextField("Asterisk-Präfix", text: $sipLine2Prefix)
                         .keyboardType(.numbersAndPunctuation)
                 }
-            }
+                if sipLine2Enabled { assignmentConfirmation(line: 2) }
+            }.id(102)
             Section("Leitung 3") {
-                Text(sipLine3Enabled ? "Im FRITZ!Box-Schritt ausgewählt" : "Nicht ausgewählt – Anzahl im FRITZ!Box-Schritt ändern")
+                Text(sipLine3Enabled ? "Festnetz" : "Nicht ausgewählt")
                 if sipLine3Enabled {
                     TextField("Bezeichnung", text: $line3Label)
                     if line3ManualNumber || fritzVoIPNumbers.isEmpty {
@@ -757,34 +698,67 @@ private struct SetupWizardView: View {
                         .keyboardType(.numbersAndPunctuation)
                     Text("Reine Festnetzleitung – keine Mobilfunk-Rufumleitung. Direkter FRITZ!Box-Pfad ohne CLIP no screening.")
                         .foregroundStyle(.secondary)
+                    assignmentConfirmation(line: 3)
                 }
-            }
-            Section("Rufnummer bei ausgehenden Anrufen") {
-                Toggle("Eigene Mobilfunknummer anzeigen", isOn: $easybellEnabled)
-                Text(easybellEnabled
-                     ? "Dafür wird ein geeigneter easybell-Telefonie-/SIP-Tarif benötigt. CLIP no screening selbst ist bei easybell kostenlos."
-                     : "Ohne diese Option wird kein easybell-Zugang für die Mobilfunknummer benötigt.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if easybellEnabled {
-                    Text("Es darf nur eine Rufnummer übertragen werden, die dir zugeteilt ist bzw. deren Zuteilungsnehmer du bist.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField("easybell SIP-Benutzername", text: $easybellUsername)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("easybell SIP-Passwort", text: $easybellPassword)
-                    TextField("Contact User / Stammrufnummer", text: $easybellContactUser)
-                        .keyboardType(.phonePad)
-                    Text("Registrar: voip.easybell.de. Das SIP-Kennwort wird ausschließlich sicher im iOS-Keychain gespeichert.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            }.id(103)
+
         }
         .onAppear {
             if sipLine2Prefix.isEmpty { sipLine2Prefix = "*82" }
             if sipLine3Prefix.isEmpty { sipLine3Prefix = "*83" }
+        }
+    }
+
+    private var activeLines: [Int] {
+        Array(1...(sipLine3Enabled ? 3 : (sipLine2Enabled ? 2 : 1)))
+    }
+
+    private var deviceCredentialsReady: Bool {
+        activeLines.allSatisfy { SetupKeychain.get(account: "fritz-sip-callwhapp\($0)") != nil }
+    }
+
+    private func assignmentFingerprint(line: Int) -> String {
+        let number = [line1Number, line2Number, line3Number][line - 1]
+        let tam = [mailbox1TAM, mailbox2TAM, mailbox3TAM][line - 1]
+        return SetupAssignments.fingerprint(number: number, mailbox: tam)
+    }
+
+    private func assignmentConfirmation(line: Int) -> some View {
+        Toggle("Zuordnung bestätigt", isOn: Binding(
+            get: { confirmedAssignments[line] == assignmentFingerprint(line: line) },
+            set: { confirmed in
+                confirmedAssignments[line] = confirmed ? assignmentFingerprint(line: line) : nil
+            }))
+        .disabled([line1Number, line2Number, line3Number][line - 1].isEmpty || !mailboxSelectionVerified)
+    }
+
+    private var readyForAutomation: Bool {
+        step == 3 && canContinue && mailboxSelectionVerified
+            && SetupAssignments.allConfirmed(
+                numbers: Array([line1Number, line2Number, line3Number].prefix(activeLines.count)),
+                mailboxes: Array([mailbox1TAM, mailbox2TAM, mailbox3TAM].prefix(activeLines.count)),
+                confirmations: confirmedAssignments)
+    }
+
+    @MainActor
+    private func startAutomaticSetup() async {
+        guard !automationRunning, readyForAutomation || (step == 4 && automationFailed) else { return }
+        automationRunning = true
+        automationFailed = false
+        mailboxSaveError = nil
+        persistSetup(completed: false)
+        step = 4
+        defer {
+            automationRunning = false
+            automationFailed = step != 5
+        }
+        let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let base = URL(string: "http://192.168.178.\(input):8123") else { return }
+        await prepareConnectedHomeAssistant(base: base)
+        // An installed backend may still be starting. Poll its real readiness,
+        // without treating a transient network error as a missing installation.
+        if !callWebhookHAReady && haAuthenticated && !bootstrapAttemptFailed {
+            await waitForCallWebhookAfterRestart()
         }
     }
 
@@ -957,7 +931,7 @@ private struct SetupWizardView: View {
             }
             return true
         } catch {
-            mailboxSaveError = "Leitungs-/Anrufbeantworter-Zuordnung nicht gespeichert: \(error.localizedDescription). Bitte erneut auf Weiter tippen."
+            mailboxSaveError = "Leitungs-/Anrufbeantworter-Zuordnung nicht gespeichert: \(error.localizedDescription). Bitte die Einrichtung erneut versuchen."
             return false
         }
     }
@@ -1042,7 +1016,7 @@ private struct SetupWizardView: View {
     }
 
     private var verification: some View {
-        List {
+        Group {
             setupCheck("FRITZ!Box", detail: fritzStatus, ready: fritzReachable && fritzAuthenticated && fritzVoIPAvailable)
             setupCheck("Home Assistant", detail: callWebhookHAStatus, ready: homeAssistantReachable && haAuthenticated && callWebhookHAReady)
             setupCheck("Leitung 1", detail: "\(line1Label) – \(line1Number)", ready: !line1Number.isEmpty)
@@ -1096,7 +1070,6 @@ private struct SetupWizardView: View {
             }
             setupCheck("Asterisk + iPhone-SIP", detail: asteriskConfigStatus, ready: asteriskInstalled && setupSIP.registered)
         }
-        .task { await setupPush.completeSetup() }
     }
 
     @MainActor
@@ -1595,8 +1568,6 @@ private struct SetupWizardView: View {
 
     private var canContinue: Bool {
         switch step {
-        case 1: return fritzReachable && fritzVoIPAvailable && fritzAuthenticated && fritzSIPVerified
-        case 2: return homeAssistantReachable && haAuthenticated && callWebhookHAReady && asteriskInstalled && callHelperReady
         case 3:
             let linesReady = !line1Number.isEmpty && (!sipLine2Enabled || !line2Number.isEmpty) && (!sipLine3Enabled || !line3Number.isEmpty)
             let easybellReady = !easybellEnabled || (
@@ -1605,8 +1576,8 @@ private struct SetupWizardView: View {
                     && !easybellContactUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             )
             return linesReady && easybellReady && forwardingReady
-        case 4:
-            return fritzReachable
+        case 5:
+            return mailboxNumbersVerified && fritzReachable
                 && fritzAuthenticated
                 && fritzVoIPAvailable
                 && fritzSIPVerified
@@ -2410,6 +2381,22 @@ private struct SetupWizardView: View {
     @MainActor
     private func prepareConnectedHomeAssistant(base: URL) async {
         guard !isBootstrappingHA, !isWaitingForHARestart else { return }
+        if step < 4 {
+            do {
+                let (_, status) = try await HomeAssistantConnection.request(base: base, path: "api/")
+                haAuthenticated = status == 200
+                if haAuthenticated {
+                    homeAssistantReachable = true
+                    homeAssistantStatus = "Home Assistant verbunden"
+                    UserDefaults.standard.set(homeAssistantURL, forKey: "setupHomeAssistantURL")
+                    if step == 1 { step = 2 }
+                } else { homeAssistantStatus = "Bitte mit Home Assistant anmelden" }
+            } catch {
+                haAuthenticated = false
+                homeAssistantStatus = "Bitte mit Home Assistant anmelden"
+            }
+            return
+        }
         await checkCallWebhookHAIntegration(base: base)
         // Install only after a confirmed missing/old backend, never after a
         // network/authentication error. The backend check has released its lock.
@@ -2533,7 +2520,7 @@ private struct SetupWizardView: View {
     private func continueHASetup() async {
         // Both an existing backend and a newly bootstrapped backend enter here.
         // Readiness of the backend alone never means the whole HA step is done.
-        guard step == 2, callWebhookHAReady, haAuthenticated,
+        guard step == 4, callWebhookHAReady, haAuthenticated,
               !isContinuingHASetup, !isInstallingAsterisk, !isCreatingCallHelper else { return }
         isContinuingHASetup = true
         defer { isContinuingHASetup = false }
@@ -2541,11 +2528,13 @@ private struct SetupWizardView: View {
             callWebhookHAStatus = "FRITZ!Box-Zugangsdaten werden in Home Assistant gespeichert …"
             try await synchronizeFritzCredentials()
         } catch {
-            callWebhookHAReady = false
             callWebhookHAStatus = error.localizedDescription
             return
         }
 
+        if !mailboxNumbersVerified {
+            guard await saveMailboxSelection() else { return }
+        }
         if !asteriskInstalled {
             asteriskInstallFailed = false
             if !asteriskConfigReady { prepareAsteriskConfiguration() }
@@ -2559,7 +2548,10 @@ private struct SetupWizardView: View {
         if !callHelperReady { await ensureCallHelper() }
         guard callHelperReady, setupSIP.registered else { return }
         callWebhookHAStatus = "CallWebhook, Asterisk und Anrufstatus-Schalter bereit"
-        if step == 2 { step = 3 }
+        if step == 4 {
+            step = 5
+            await setupPush.completeSetup()
+        }
     }
 
     @MainActor
@@ -2671,7 +2663,7 @@ private struct SetupWizardView: View {
 
     @MainActor
     private func installBootstrapAutomatically() async {
-        guard !isBootstrappingHA, !isWaitingForHARestart else { return }
+        guard step == 4, !isBootstrappingHA, !isWaitingForHARestart else { return }
         isBootstrappingHA = true
         bootstrapAttemptFailed = false
         defer {
@@ -2767,7 +2759,7 @@ private struct SetupWizardView: View {
         }
     }
 
-    private func persistSetup() {
+    private func persistSetup(completed: Bool = true) {
         let defaults = UserDefaults.standard
         defaults.set(fritzHost, forKey: "setupFritzHost")
         defaults.set(fritzUser, forKey: "setupFritzUser")
@@ -2783,8 +2775,10 @@ private struct SetupWizardView: View {
         defaults.set(mailbox2TAM, forKey: "setupMailbox2TAM")
         defaults.set(mailbox3TAM, forKey: "setupMailbox3TAM")
         // Save completion with the configuration, before dismissing the wizard.
-        defaults.set(true, forKey: "phoneDefaultsReviewed")
-        defaults.set(true, forKey: "setupCompleted")
+        if completed {
+            defaults.set(true, forKey: "phoneDefaultsReviewed")
+            defaults.set(true, forKey: "setupCompleted")
+        }
         // Passwords are intentionally not persisted in UserDefaults.
     }
 }

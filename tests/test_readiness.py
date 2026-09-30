@@ -68,7 +68,7 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
     async def test_mailbox_lifetime_task_cannot_block_startup(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
-            names = ('CallWebhookMailboxSetupView', 'CallWebhookSetupStatusView', 'CallWebhookAsteriskSetupView',
+            names = ('CallWebhookFritzCredentialsView', 'CallWebhookMailboxSetupView', 'CallWebhookSetupStatusView', 'CallWebhookAsteriskSetupView',
                      'CallWebhookAsteriskSetupStatusView', 'CallWebhookMailboxView',
                      'CallWebhookMailboxDeleteView', 'CallWebhookMailboxArchiveView',
                      'CallWebhookAudioView', 'CallWebhookArchiveAudioView', 'CallWebhookVoIPView',

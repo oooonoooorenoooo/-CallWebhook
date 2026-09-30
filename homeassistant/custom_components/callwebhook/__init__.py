@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 17
+BACKEND_API_VERSION = 18
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -107,20 +107,67 @@ def save_setup(mailbox_tam_1, mailbox_tam_2, mailbox_tam_3=None):
     return values
 
 
-def get_secret(name):
-    with SECRETS_FILE.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+def read_secret(path, name):
+    import yaml
+    text = Path(path).read_text(encoding="utf-8")
+    root = yaml.compose(text)
+    if isinstance(root, yaml.MappingNode):
+        matches = [value for key, value in root.value if key.value == name]
+        if len(matches) == 1 and isinstance(matches[0], yaml.ScalarNode):
+            return matches[0].value
+    raise ValueError("FRITZ!Box-Zugangsdaten in Home Assistant fehlen oder sind mehrdeutig")
 
-            if not line or line.startswith("#") or ":" not in line:
+
+def save_fritz_credentials(path, username, password):
+    import yaml
+    import tempfile
+    KEYS = ("fritz_callwebhook_user", "fritz_callwebhook_password")
+    if any(not isinstance(v, str) or not v or len(v) > 1024 or "\x00" in v for v in (username, password)):
+        raise ValueError("FRITZ!Box-Benutzer und Kennwort fehlen oder sind ungültig")
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError("secrets.yaml ist ein Symlink und wird nicht überschrieben")
+    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = before.splitlines(keepends=True)
+    spans = []
+    try:
+        root = yaml.compose(before)
+        if root is not None and (not isinstance(root, yaml.MappingNode) or root.flow_style):
+            raise ValueError("secrets.yaml muss ein YAML-Mapping in Blockform enthalten")
+        for key, value in root.value if root else []:
+            if key.value not in KEYS:
                 continue
+            if value.start_mark.index < key.start_mark.index:
+                raise ValueError("Verknüpfte Zugangsdaten müssen zuerst aufgelöst werden")
+            start, end = key.start_mark.line, value.end_mark.line
+            if end < len(lines) and lines[end][:value.end_mark.column].strip():
+                end += 1
+            spans.append((start, max(start + 1, end)))
+        remaining = "".join(line for i, line in enumerate(lines) if not any(a <= i < b for a, b in spans))
+        if remaining and not remaining.endswith("\n"):
+            remaining += "\n"
+        result = remaining + "".join(key + ": " + json.dumps(value, ensure_ascii=False) + "\n"
+                                     for key, value in zip(KEYS, (username, password)))
+        yaml.compose(result)  # Refuse removal of an anchor used by other secrets.
+    except yaml.YAMLError:
+        raise ValueError("secrets.yaml konnte nicht sicher bearbeitet werden") from None
+    descriptor, temporary = tempfile.mkstemp(prefix=".callwebhook-secrets-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(result)
+            output.flush()
+            os.fsync(output.fileno())
+        if path.is_symlink() or (path.read_text(encoding="utf-8") if path.exists() else "") != before:
+            raise ValueError("secrets.yaml wurde gleichzeitig geändert; erneut versuchen")
+        os.replace(temporary, path)  # mkstemp creates mode 0600.
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    if [read_secret(path, key) for key in KEYS] != [username, password]:
+        raise ValueError("Gespeicherte FRITZ!Box-Zugangsdaten konnten nicht bestätigt werden")
 
-            key, value = line.split(":", 1)
 
-            if key.strip() == name:
-                return value.strip().strip('"').strip("'")
-
-    raise RuntimeError(f"Secret {name} nicht gefunden")
+def get_secret(name):
+    return read_secret(SECRETS_FILE, name)
 
 
 def get_auth():
@@ -1636,6 +1683,33 @@ async def run_mailbox_setup(hass, payload, groups):
                                failed_stage=stage, error_type=kind, ok=False)
 
 
+_fritz_credentials_lock = asyncio.Lock()
+
+
+class CallWebhookFritzCredentialsView(HomeAssistantView):
+    url = "/api/callwebhook/setup/fritz-credentials"
+    name = "api:callwebhook:setup:fritz-credentials"
+    requires_auth = True
+
+    async def post(self, request):
+        from homeassistant.components.http.const import KEY_HASS_USER
+        user = request.get(KEY_HASS_USER)
+        if not user or not user.is_admin:
+            raise web.HTTPForbidden()
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or set(payload) != {"username", "password"}:
+                return self.json({"ok": False, "error": "Benutzer und Kennwort erforderlich"}, status_code=400)
+            async with _fritz_credentials_lock:
+                await request.app["hass"].async_add_executor_job(
+                    save_fritz_credentials, SECRETS_FILE, payload["username"], payload["password"])
+            return self.json({"ok": True})
+        except ValueError:
+            return self.json({"ok": False, "error": "FRITZ!Box-Zugangsdaten oder secrets.yaml konnten nicht sicher verarbeitet werden"}, status_code=400)
+        except OSError:
+            return self.json({"ok": False, "error": "FRITZ!Box-Zugangsdaten konnten nicht in secrets.yaml gespeichert werden"}, status_code=500)
+
+
 class CallWebhookMailboxSetupView(HomeAssistantView):
     url = "/api/callwebhook/setup/mailboxes"
     name = "api:callwebhook:setup:mailboxes"
@@ -2321,6 +2395,7 @@ async def async_setup(
     hass.http.register_view(CallWebhookPushRelayHostView)
     hass.http.register_view(CallWebhookPushRelayProxyView)
     hass.http.register_view(CallWebhookMailboxSetupView)
+    hass.http.register_view(CallWebhookFritzCredentialsView)
 
     hass.http.register_view(
         CallWebhookAsteriskSetupView

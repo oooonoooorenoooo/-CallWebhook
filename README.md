@@ -75,3 +75,15 @@ Der Einrichtungsassistent startet den Bootstrap nach erfolgreicher HA-Autorisier
 ## Vollständige HA-Deinstallation
 
 Im App-Store des vorhandenen Repositorys **CallWebhook vollständig entfernen** installieren und starten. Das eigenständige Werkzeug entfernt CallWebhook, Bootstrap, Asterisk und den lokalen Push-Dienst samt Konfiguration und Standard-Anrufstatus-Helfer, startet HA wieder und deinstalliert sich selbst. Details und Löschumfang: [Anleitung](callwebhook_cleanup/DOCS.md).
+
+## FRITZ!Box credentials in Home Assistant
+
+The setup assistant writes the FRITZ!Box credentials entered in its first step
+to `/config/secrets.yaml` after the HA component is ready, and refreshes them
+before mailbox assignment. Only `fritz_callwebhook_user` and
+`fritz_callwebhook_password` are replaced; other entries are preserved.
+The authenticated, admin-only `POST /api/callwebhook/setup/fritz-credentials`
+endpoint accepts `username` and `password`, writes atomically with mode 0600,
+and returns no credentials. The backend reads these values on demand, so no
+HA restart is needed after saving. This requires backend API 18 and an app
+build containing the credential synchronization.

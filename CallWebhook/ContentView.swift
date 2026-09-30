@@ -861,13 +861,14 @@ private struct SetupWizardView: View {
                 guard status == 200 else { return 0 }
                 return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["api_version"] as? Int ?? 0
             }
-            if try await backendVersion() < 17 {
+            if try await backendVersion() < 18 {
                 lineAssignmentStatus = "HA-Komponente für FRITZ!-Anrufbeantworter wird aktualisiert …"
                 await setupPush.updateBackend()
             }
-            guard try await backendVersion() >= 17 else {
+            guard try await backendVersion() >= 18 else {
                 throw NSError(domain: "CallWebhook.TAM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Die HA-Aktualisierung für das Schreiben der Anrufbeantworter ist noch nicht abgeschlossen."])
             }
+            try await synchronizeFritzCredentials()
             try await synchronizeFritzLineNumbers()
             let input = homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let base = URL(string: "http://192.168.178.\(input):8123"),
@@ -2482,7 +2483,7 @@ private struct SetupWizardView: View {
                 return
             }
             let version = json["api_version"] as? Int ?? 0
-            guard version >= 17,
+            guard version >= 18,
                   (json["asterisk_provisioning"] as? Bool) == true else {
                 haAuthenticated = true
                 bootstrapInstallationNeeded = true
@@ -2513,6 +2514,22 @@ private struct SetupWizardView: View {
     }
 
     @MainActor
+    private func synchronizeFritzCredentials() async throws {
+        guard !fritzUser.isEmpty, !fritzPassword.isEmpty,
+              let base = URL(string: "http://192.168.178.\(homeAssistantURL.trimmingCharacters(in: .whitespacesAndNewlines)):8123") else {
+            throw NSError(domain: "CallWebhook.Setup", code: 1, userInfo: [NSLocalizedDescriptionKey: "FRITZ!Box-Zugangsdaten im ersten Schritt eingeben"])
+        }
+        let (data, status) = try await HomeAssistantConnection.request(base: base,
+            path: "api/callwebhook/setup/fritz-credentials", method: "POST",
+            body: ["username": fritzUser, "password": fritzPassword])
+        let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        guard status == 200, result?["ok"] as? Bool == true else {
+            throw NSError(domain: "CallWebhook.Setup", code: status, userInfo: [NSLocalizedDescriptionKey:
+                result?["error"] as? String ?? "FRITZ!Box-Zugangsdaten konnten nicht an Home Assistant übertragen werden"])
+        }
+    }
+
+    @MainActor
     private func continueHASetup() async {
         // Both an existing backend and a newly bootstrapped backend enter here.
         // Readiness of the backend alone never means the whole HA step is done.
@@ -2520,6 +2537,14 @@ private struct SetupWizardView: View {
               !isContinuingHASetup, !isInstallingAsterisk, !isCreatingCallHelper else { return }
         isContinuingHASetup = true
         defer { isContinuingHASetup = false }
+        do {
+            callWebhookHAStatus = "FRITZ!Box-Zugangsdaten werden in Home Assistant gespeichert …"
+            try await synchronizeFritzCredentials()
+        } catch {
+            callWebhookHAReady = false
+            callWebhookHAStatus = error.localizedDescription
+            return
+        }
 
         if !asteriskInstalled {
             asteriskInstallFailed = false

@@ -22,6 +22,7 @@ final class SIPService: ObservableObject {
         guard UserDefaults.standard.bool(forKey: "sipEnabled") else { throw SIPError.notConfigured }
         if core == nil { try configureAndStart() }
         else if !active {
+            core?.callkitEnabled = true
             registered = false
             core?.refreshRegisters()
         }
@@ -58,6 +59,9 @@ final class SIPService: ObservableObject {
         registered = false
 
         let newCore = try Factory.Instance.createCore(configPath: "", factoryConfigPath: "", systemContext: nil)
+        // Incoming calls use CallKit: let iOS activate the audio session before
+        // Linphone starts capture/playback, especially when waking while locked.
+        newCore.callkitEnabled = true
         let auth = try Factory.Instance.createAuthInfo(
             username: resolvedUsername,
             userid: nil,
@@ -110,6 +114,7 @@ final class SIPService: ObservableObject {
                 return
             }
             trackedCall = call
+            core?.callkitEnabled = true
             historyID = IncomingCallProvider.shared.currentCallID
             active = true
             incoming = true
@@ -182,6 +187,9 @@ final class SIPService: ObservableObject {
         guard !active, !IncomingCallProvider.shared.hasCall else { throw SIPError.alreadyActive }
         guard let targetNumber = SIPDialNumber.target(number, prefix: prefix) else { throw SIPError.invalidNumber }
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
+        // Outgoing calls currently use DialerModel's explicitly activated session,
+        // not a CXStartCallAction. Do not wait for a CallKit callback on this path.
+        core.callkitEnabled = false
         core.configureAudioSession()
         let callID = UUID()
         LocalCallHistory.shared.begin(id: callID, number: number, incoming: false, line: line)
@@ -208,6 +216,7 @@ final class SIPService: ObservableObject {
 
     func answerIncoming() throws {
         guard incoming, let call = trackedCall else { throw SIPError.notConfigured }
+        core?.callkitEnabled = true
         core?.configureAudioSession()
         try call.accept()
         incoming = false

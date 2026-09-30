@@ -1,3 +1,4 @@
+import Intents
 import Foundation
 import PushKit
 import UIKit
@@ -305,6 +306,12 @@ final class VoIPPushService: NSObject, ObservableObject, PKPushRegistryDelegate 
 }
 
 final class CallWebhookAppDelegate: NSObject, UIApplicationDelegate {
+    private let startCallHandler = StartCallIntentHandler()
+
+    func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {
+        intent is INStartCallIntent ? startCallHandler : nil
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         VoIPPushService.shared.start()
         return true

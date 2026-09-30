@@ -104,6 +104,11 @@ jobs:
         run: |
           swiftc CallWebhook/LocalCallHistory.swift tests/LocalCallHistoryTests.swift -o "$RUNNER_TEMP/call-history-tests"
           "$RUNNER_TEMP/call-history-tests"
+      - name: Test external call validation and capability gating
+        run: |
+          swiftc CallWebhook/SIPDialNumber.swift CallWebhook/ExternalCallRequest.swift tests/ExternalCallRequestTests.swift -o "$RUNNER_TEMP/external-call-tests"
+          "$RUNNER_TEMP/external-call-tests"
+          python3 -m unittest tests/test_carplay_capabilities.py
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Install development signing
@@ -137,6 +142,10 @@ jobs:
           if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
             mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
           fi
+      - name: Enable approved CarPlay and Siri capabilities
+        run: |
+          security cms -D -i "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" > "$RUNNER_TEMP/capability-profile.plist"
+          python3 scripts/configure_carplay.py "$RUNNER_TEMP/capability-profile.plist" CallWebhook/CallWebhook.entitlements
       - name: Generate project
         run: xcodegen generate
       - name: Build development IPA
@@ -205,6 +214,10 @@ jobs:
           if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
             mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
           fi
+      - name: Enable approved CarPlay and Siri capabilities
+        run: |
+          security cms -D -i "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" > "$RUNNER_TEMP/capability-profile.plist"
+          python3 scripts/configure_carplay.py "$RUNNER_TEMP/capability-profile.plist" CallWebhook/CallWebhook.entitlements
       - name: Generate project
         run: xcodegen generate
       - name: Archive for App Store Connect

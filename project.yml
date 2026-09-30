@@ -31,6 +31,16 @@ targets:
               - tel
         UIBackgroundModes:
           - voip
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: CallWebhook CarPlay
+                UISceneClassName: CPTemplateApplicationScene
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
+        INIntentsSupported:
+          - INStartCallIntent
+        NSSiriUsageDescription: CallWebhook startet auf deinen Wunsch Telefonanrufe über Siri.
         NSUserActivityTypes:
           - INStartCallIntent
           - INStartAudioCallIntent
@@ -41,7 +51,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook.U98PKCA4W7
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: 2.0
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 2
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook

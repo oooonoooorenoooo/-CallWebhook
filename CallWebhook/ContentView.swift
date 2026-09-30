@@ -132,16 +132,10 @@ struct ContentView: View {
             showIncomingNumber(raw.removingPercentEncoding ?? raw)
         }
         .onContinueUserActivity("INStartCallIntent") { activity in
-            if let intent = activity.interaction?.intent as? INStartCallIntent,
-               let number = intent.contacts?.first?.personHandle?.value {
-                showIncomingNumber(number)
-            }
+            if ExternalCallCoordinator.shared.continueCall(activity) { selectedTab = 3 }
         }
         .onContinueUserActivity("INStartAudioCallIntent") { activity in
-            if let intent = activity.interaction?.intent as? INStartAudioCallIntent,
-               let number = intent.contacts?.first?.personHandle?.value {
-                showIncomingNumber(number)
-            }
+            if ExternalCallCoordinator.shared.continueCall(activity) { selectedTab = 3 }
         }
     }
 

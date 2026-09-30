@@ -119,4 +119,10 @@ class AddonOptionsTests(unittest.TestCase):
                 self.assertEqual(Path(settings['APNS_KEY_FILE']).read_text(), key)
                 self.assertEqual(Path(settings['APNS_KEY_FILE']).stat().st_mode & 0o777, 0o600)
                 self.assertNotIn(key, json.dumps(settings))
+                self.assertEqual(settings['ALLOW_DEVELOPMENT'], '0')
+            options = dict(apns_team_id='A'*10, apns_key_id='B'*10, apns_private_key=key)
+            self.assertEqual(module.configure(dict(options, allow_development=True), Path(directory))['ALLOW_DEVELOPMENT'], '1')
+            self.assertEqual(module.configure(dict(options, allow_development=False), Path(directory))['ALLOW_DEVELOPMENT'], '0')
+            with self.assertRaises(ValueError):
+                module.configure(dict(options, allow_development='false'), Path(directory))
             with self.assertRaises(ValueError): module.normalize_key('not a private key')

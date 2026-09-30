@@ -27,6 +27,10 @@ def normalize_key(value):
 
 def configure(options, data_dir):
     values = {}
+    development = options.get("allow_development", False)
+    if not isinstance(development, bool):
+        raise ValueError("allow_development muss ein boolescher Wert sein")
+    values["ALLOW_DEVELOPMENT"] = "1" if development else "0"
     for field in ("apns_team_id", "apns_key_id"):
         value = options.get(field, "").strip()
         if not re.fullmatch(r"[A-Z0-9]{10}", value):

@@ -43,6 +43,13 @@ Eine grüne Erreichbarkeitsprüfung bestätigt noch keine Annahme durch Apple.
 Den ersten echten eingehenden Anruf bei gesperrtem iPhone testen. SIP/Audio
 benötigen weiterhin Heimnetz oder VPN zum jeweiligen Asterisk.
 
+Für die signierte Developer-IPA in der Konfiguration
+`allow_development: true` setzen und den Dienst neu starten. TestFlight und
+App Store verwenden die Produktionsumgebung; Developer-IPAs die APNs-Sandbox.
+Der Apple-Schlüssel muss die jeweils verwendete Umgebung unterstützen.
+App Attest und die Prüfung der App-ID bleiben auch im Entwicklungsmodus aktiv.
+Nach der Installation die App öffnen und die Push-Anmeldung erneut ausführen.
+
 Der Schlüssel und die Registrierungsdaten liegen ausschließlich im privaten
 Add-on-Verzeichnis `/data`. Ein Add-on-Backup enthält diese vertraulichen Daten.
 Wenn Pi, Internetverbindung, HA oder Nabu-Casa-Fernzugriff ausfallen, ist der

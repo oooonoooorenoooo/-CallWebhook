@@ -3080,14 +3080,17 @@ private struct ContactsView: View {
                         Text(sortValue)
                         Image(systemName: "chevron.down")
                     }
-                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, minHeight: 56)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
                 .padding(.horizontal)
                 .sheet(isPresented: $showSortOptions) {
                     NavigationStack {
-                        List(ContactSort.allCases, id: \.self) { option in
+                        ScrollView {
+                        VStack(spacing: 12) {
+                        ForEach(ContactSort.allCases, id: \.self) { option in
                             Button {
                                 sortValue = option.rawValue
                                 showSortOptions = false
@@ -3097,10 +3100,14 @@ private struct ContactsView: View {
                                     Spacer()
                                     if sortValue == option.rawValue { Image(systemName: "checkmark") }
                                 }
-                                .frame(maxWidth: .infinity, minHeight: 48)
+                                .padding(.horizontal, 12)
+                                .frame(maxWidth: .infinity, minHeight: 56)
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.glass)
+                        }
+                        }
+                        .padding()
                         }
                         .navigationTitle("Kontakte sortieren")
                         .navigationBarTitleDisplayMode(.inline)
@@ -3194,6 +3201,7 @@ private struct ContactsView: View {
     private func loadContacts() {
         let store = CNContactStore()
         let keys: [CNKeyDescriptor] = [
+            CNContactVCardSerialization.descriptorForRequiredKeys(),
             CNContactViewController.descriptorForRequiredKeys(),
             CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
             CNContactOrganizationNameKey as CNKeyDescriptor,
@@ -3236,6 +3244,9 @@ private struct ContactDetailView: View {
     @ObservedObject var dialer: DialerModel
     @Binding var businessContactIDs: String
 
+    @State private var sharedContact: SharedFiles?
+    @State private var shareError: String?
+
     private var isBusiness: Bool {
         Set(businessContactIDs.split(separator: "\n").map(String.init)).contains(contact.identifier)
     }
@@ -3264,6 +3275,22 @@ private struct ContactDetailView: View {
             NativeContactView(contact: contact, dialer: dialer)
         }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    do {
+                        let data = try CNContactVCardSerialization.data(with: [contact])
+                        sharedContact = try SharedFiles.make(data: data, name: "Kontakt.vcf")
+                    } catch { shareError = error.localizedDescription }
+                } label: { Label("Kontakt teilen", systemImage: "square.and.arrow.up") }
+            }
+        }
+        .sheet(item: $sharedContact, onDismiss: { SharedFiles.cleanTemporaryFiles() }) { files in
+            FileShareSheet(urls: files.urls)
+        }
+        .alert("Kontakt konnte nicht geteilt werden", isPresented: Binding(get: { shareError != nil }, set: { if !$0 { shareError = nil } })) {
+            Button("OK") { shareError = nil }
+        } message: { Text(shareError ?? "") }
     }
 }
 
@@ -3318,6 +3345,9 @@ private struct MailboxView: View {
     @State private var playingMessage: MailboxMessage?
     @State private var isSelectingMailbox = false
     @State private var selectedMessageIDs: Set<String> = []
+
+    @State private var exportFiles: SharedFiles?
+    @State private var exporting = false
 
     var body: some View {
         NavigationStack {
@@ -3398,6 +3428,11 @@ private struct MailboxView: View {
                             }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button {
+                                Task { await exportMessages([message]) }
+                            } label: { Label("Auf iPhone", systemImage: "square.and.arrow.down") }
+                            .tint(.green)
+                            .disabled(exporting)
                             if !message.isArchived {
                                 Button {
                                     Task {
@@ -3408,7 +3443,7 @@ private struct MailboxView: View {
                                         }
                                     }
                                 } label: {
-                                    Label("Speichern", systemImage: "archivebox.fill")
+                                    Label("Auf HA", systemImage: "archivebox.fill")
                                 }
                                 .tint(.blue)
                             }
@@ -3419,13 +3454,15 @@ private struct MailboxView: View {
                     .safeAreaInset(edge: .bottom) {
                         if isSelectingMailbox {
                             HStack {
-                                Button {
-                                    Task { await archiveSelectedMessages() }
-                                } label: {
-                                    Label("Speichern", systemImage: "archivebox.fill")
-                                }
-                                .disabled(selectedMessageIDs.isEmpty)
-
+                                Menu {
+                                    Button {
+                                        Task { await archiveSelectedMessages() }
+                                    } label: { Label("Auf Home Assistant", systemImage: "archivebox.fill") }
+                                    Button {
+                                        Task { await exportMessages(mailbox.messages.filter { selectedMessageIDs.contains($0.id) }) }
+                                    } label: { Label("In Dateien sichern", systemImage: "square.and.arrow.down") }
+                                } label: { Label("Speichern", systemImage: "square.and.arrow.down") }
+                                .disabled(selectedMessageIDs.isEmpty || exporting)
                                 Spacer()
 
                                 Text("\(selectedMessageIDs.count) ausgewählt")
@@ -3471,6 +3508,13 @@ private struct MailboxView: View {
                     }
                 }
             }
+            .overlay { if exporting { ProgressView("Aufnahmen werden geladen …").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } }
+            .sheet(item: $exportFiles, onDismiss: { SharedFiles.cleanTemporaryFiles() }) { files in
+                FileExportPicker(urls: files.urls)
+            }
+            .alert("Mailbox", isPresented: Binding(get: { mailbox.errorMessage != nil && !mailbox.messages.isEmpty }, set: { if !$0 { mailbox.clearError() } })) {
+                Button("OK") { mailbox.clearError() }
+            } message: { Text(mailbox.errorMessage ?? "") }
             .task { await mailbox.refresh() }
             .sheet(item: $playingMessage) { message in
                 NavigationStack {
@@ -3480,6 +3524,24 @@ private struct MailboxView: View {
                 }
                 .presentationDetents([.medium])
             }
+        }
+    }
+
+    private func exportMessages(_ messages: [MailboxMessage]) async {
+        guard !exporting else { return }
+        exporting = true
+        defer { exporting = false }
+        do {
+            var urls: [URL] = []
+            for message in messages {
+                let data = try await mailbox.loadAudio(for: message)
+                let files = try SharedFiles.make(data: data, name: "Mailbox-\(message.tam)-\(message.index).wav")
+                urls.append(contentsOf: files.urls)
+            }
+            if !urls.isEmpty { exportFiles = SharedFiles(urls: urls) }
+        } catch {
+            SharedFiles.cleanTemporaryFiles()
+            mailbox.setError(error.localizedDescription)
         }
     }
 

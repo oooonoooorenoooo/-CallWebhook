@@ -59,6 +59,8 @@ final class MailboxModel: ObservableObject {
         }
     }
 
+    func clearError() { errorMessage = nil }
+
     func setError(_ message: String) { errorMessage = message }
 
     func archive(_ message: MailboxMessage) async throws {

@@ -212,7 +212,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CALLWEBHOOK_PUSH_RELAY_URL: ${{ vars.CALLWEBHOOK_PUSH_RELAY_URL }}
         run: |
-          xcodebuild archive -project CallWebhook.xcodeproj CALLWEBHOOK_PUSH_RELAY_URL="$CALLWEBHOOK_PUSH_RELAY_URL" -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CURRENT_PROJECT_VERSION="${{ github.run_number }}" APS_ENVIRONMENT=production
+          xcodebuild archive -project CallWebhook.xcodeproj CALLWEBHOOK_PUSH_RELAY_URL="$CALLWEBHOOK_PUSH_RELAY_URL" -scheme CallWebhook -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/CallWebhook.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" APS_ENVIRONMENT=production
       - name: Verify archived Default Dialer entitlement
         run: |
           APP_PATH="$RUNNER_TEMP/CallWebhook.xcarchive/Products/Applications/CallWebhook.app"

@@ -853,7 +853,8 @@ async def push_relay_target(hass):
 RELAY_PUBLIC_PREFIX = "/api/callwebhook/push-relay"
 RELAY_PUBLIC_ROUTES = {("GET", "healthz"), ("POST", "v1/challenge"),
     ("POST", "v1/register"), ("GET", "v1/registration"),
-    ("DELETE", "v1/registration"), ("POST", "v1/ring")}
+    ("DELETE", "v1/registration"), ("POST", "v1/ring"),
+    ("POST", "hatts/v1/register"), ("POST", "hatts/v1/speak")}
 
 
 async def forward_push_relay(request, endpoint):
@@ -861,6 +862,11 @@ async def forward_push_relay(request, endpoint):
     if (request.method, endpoint) not in RELAY_PUBLIC_ROUTES or request.query_string:
         raise web.HTTPNotFound()
     headers = {"Content-Type": "application/json"}
+    if endpoint.startswith("hatts/"):
+        setup_key = request.headers.get("X-HATTS-Setup-Key", "")
+        if not setup_key:
+            raise web.HTTPUnauthorized()
+        headers["X-HATTS-Setup-Key"] = setup_key
     if endpoint in ("v1/registration", "v1/ring"):
         authorization = request.headers.get("Authorization", "")
         if not re.fullmatch(r"Bearer [0-9a-f]{64}", authorization):

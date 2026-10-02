@@ -1,5 +1,5 @@
 name: CallWebhook Push-Dienst
-version: "1.0.3"
+version: "1.0.4"
 slug: callwebhook_push_relay
 description: Gemeinsamer Anruf-Push-Dienst – nur auf dem HA des App-Betreibers installieren
 url: https://github.com/oooonoooorenoooo/-CallWebhook

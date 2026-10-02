@@ -9,6 +9,12 @@ BASE=https://raw.githubusercontent.com/oooonoooorenoooo/-CallWebhook/main/homeas
 mkdir -p "$TARGET" /homeassistant/callwebhook
 curl -fsSL "$BASE/__init__.py" -o "$TARGET/__init__.py"
 curl -fsSL "$BASE/manifest.json" -o "$TARGET/manifest.json"
+if grep -Fq '("POST", "hatts/v1/register")' "$TARGET/__init__.py" && grep -Fq '("POST", "hatts/v1/speak")' "$TARGET/__init__.py"; then
+  echo "HATTS relay routes verified."
+else
+  echo "HATTS relay routes missing after download." >&2
+  exit 1
+fi
 if ! grep -Eq '^[[:space:]]*callwebhook:[[:space:]]*$' /homeassistant/configuration.yaml; then
   printf '\ncallwebhook:\n' >> /homeassistant/configuration.yaml
 fi

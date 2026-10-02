@@ -159,7 +159,17 @@ class Relay:
         text = body.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 500:
             raise ValueError("Invalid HATTS text")
-        accepted = await self.hatts_sender(self.hatts_token, self.hatts_environment, text.strip())
+        delay = body.get("delay", 0)
+        if not isinstance(delay, int) or delay < 0 or delay > 30:
+            raise ValueError("Invalid HATTS delay")
+        async def deliver():
+            if delay:
+                await asyncio.sleep(delay)
+            return await self.hatts_sender(self.hatts_token, self.hatts_environment, text.strip())
+        if delay:
+            asyncio.create_task(deliver())
+            return web.json_response({"accepted": True, "scheduled_in": delay})
+        accepted = await deliver()
         return web.json_response({"accepted": bool(accepted)}, status=200 if accepted else 502)
 
     async def ring(self, request):

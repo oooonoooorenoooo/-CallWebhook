@@ -20,6 +20,7 @@ from aioapns import APNs, NotificationRequest, PushType
 from .attestation import decode, verify_assertion, verify_attestation
 
 BUNDLE_ID = "de.reno.CallWebhook.U98PKCA4W7"
+HATTS_BUNDLE_ID = "de.hatts.app.U98PKCA4W7"
 
 
 def sha(value):
@@ -46,7 +47,10 @@ class Relay:
               bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires REAL NOT NULL);
         """)
         self.app_id, self.root_pem, self.sender = app_id, root_pem, sender
+        self.hatts_sender = None
         self.allow_development = allow_development
+        self.hatts_token = None
+        self.hatts_environment = None
 
     def limit(self, bucket, count, seconds):
         now = time.time()
@@ -129,6 +133,31 @@ class Relay:
             self.db.execute("DELETE FROM devices WHERE key_id=?", (row["key_id"],))
         return web.json_response({"revoked": True})
 
+    async def hatts_register(self, request):
+        if request.headers.get("X-HATTS-Setup-Key") != os.environ.get("HATTS_SETUP_KEY"):
+            raise web.HTTPUnauthorized()
+        body = await request.json()
+        token = body.get("token")
+        environment = body.get("environment")
+        if (not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32,512}", token)
+                or environment not in ("development", "production")):
+            raise ValueError("Invalid HATTS registration")
+        self.hatts_token = token
+        self.hatts_environment = environment
+        return web.json_response({"registered": True})
+
+    async def hatts_speak(self, request):
+        if request.headers.get("X-HATTS-Setup-Key") != os.environ.get("HATTS_SETUP_KEY"):
+            raise web.HTTPUnauthorized()
+        if not self.hatts_token or not self.hatts_environment:
+            raise web.HTTPConflict(text="HATTS not registered")
+        body = await request.json()
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 500:
+            raise ValueError("Invalid HATTS text")
+        accepted = await self.hatts_sender(self.hatts_token, self.hatts_environment, text.strip())
+        return web.json_response({"accepted": bool(accepted)}, status=200 if accepted else 502)
+
     async def ring(self, request):
         row = self.device(request)
         body = await request.json()
@@ -172,6 +201,8 @@ def application(relay):
     app.router.add_get("/v1/registration", relay.registration)
     app.router.add_delete("/v1/registration", relay.revoke)
     app.router.add_post("/v1/ring", relay.ring)
+    app.router.add_post("/hatts/v1/register", relay.hatts_register)
+    app.router.add_post("/hatts/v1/speak", relay.hatts_speak)
     async def health(request):
         return web.json_response({"ready": True})
     app.router.add_get("/healthz", health)
@@ -205,10 +236,25 @@ def main():
         if not result.is_successful:
             logging.warning("APNs rejected a push: %s %s", result.status, result.description)
         return result.is_successful
+    async def send_hatts(token, environment, text):
+        cache_key = "hatts-" + environment
+        if cache_key not in clients:
+            clients[cache_key] = APNs(key=key, key_id=key_id, team_id=team_id,
+                topic=HATTS_BUNDLE_ID, use_sandbox=environment == "development",
+                max_connections=2, max_connection_attempts=1)
+        result = await asyncio.wait_for(clients[cache_key].send_notification(NotificationRequest(
+            device_token=token, push_type=PushType.BACKGROUND,
+            priority=5, time_to_live=30,
+            message={"aps": {"content-available": 1}, "text": text})), timeout=4)
+        if not result.is_successful:
+            logging.warning("APNs rejected a HATTS push: %s %s", result.status, result.description)
+        return result.is_successful
+
     relay = Relay(os.environ.get("RELAY_DATABASE", "/data/relay.sqlite3"),
         os.environ.get("APP_ID_PREFIX", team_id) + "." + BUNDLE_ID,
         Path(__file__).with_name("apple-app-attest-root.pem").read_bytes(), send,
         allow_development=os.environ.get("ALLOW_DEVELOPMENT") == "1")
+    relay.hatts_sender = send_hatts
     web.run_app(application(relay), host="0.0.0.0", port=8080, access_log=None)
 
 

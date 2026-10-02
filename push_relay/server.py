@@ -134,8 +134,12 @@ class Relay:
         return web.json_response({"revoked": True})
 
     async def hatts_register(self, request):
-        if request.headers.get("X-HATTS-Setup-Key") != os.environ.get("HATTS_SETUP_KEY"):
-            raise web.HTTPUnauthorized()
+        supplied = request.headers.get("X-HATTS-Setup-Key", "")
+        configured = os.environ.get("HATTS_SETUP_KEY", "")
+        if not configured:
+            raise web.HTTPUnauthorized(text="HATTS setup key is not configured in relay")
+        if supplied != configured:
+            raise web.HTTPUnauthorized(text="HATTS setup key mismatch at relay")
         body = await request.json()
         token = body.get("token")
         environment = body.get("environment")

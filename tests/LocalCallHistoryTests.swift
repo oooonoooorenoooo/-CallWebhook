@@ -61,6 +61,25 @@ struct LocalCallHistoryTests {
         let legacy = try! JSONDecoder().decode([CallRecord].self, from: JSONSerialization.data(withJSONObject: legacyJSON))
         assert(legacy.count == 1 && legacy[0].line == nil && legacy[0].lineLabel == "Leitung unbekannt")
         assert(otherLine.lineLabel == "SIM 1")
+        let archive = CallHistoryArchive(defaults: defaults)
+        archive.save(own)
+        assert(archive.entries.count == 1 && archive.contains(duplicate))
+        assert(!archive.contains(later) && !archive.contains(otherLine))
+        var refreshed = duplicate
+        refreshed.endedAt = own.endedAt
+        refreshed.reportedDuration = own.duration
+        refreshed.line = own.line
+        archive.save(refreshed)
+        assert(archive.entries.count == 1) // same call with a new system UUID
+        assert(archive.entries[0].duration == 60)
+        let reopenedArchive = CallHistoryArchive(defaults: defaults)
+        assert(reopenedArchive.entries == archive.entries)
+        defaults.removeObject(forKey: "callwebhook.callHistory.v1")
+        assert(CallHistoryArchive(defaults: defaults).entries.count == 1)
+        reopenedArchive.remove([own])
+        assert(CallHistoryArchive(defaults: defaults).entries.isEmpty)
+        archive.save(later) // unfinished calls must not be frozen in the archive
+        assert(archive.entries.count == 1)
         print("Call history lifecycle, persistence, recovery and merge tests passed")
     }
 }

@@ -2781,6 +2781,8 @@ private struct CallsView: View {
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     @StateObject private var history = CallHistoryModel()
+    @StateObject private var archive = CallHistoryArchive()
+    @State private var actionCall: CallRecord?
     @State private var selection = 0
     @State private var searchText = ""
     @State private var isSelectingCalls = false
@@ -2801,17 +2803,18 @@ private struct CallsView: View {
             VStack(spacing: 0) {
                 Picker("Ansicht", selection: $selection) {
                     Text("Anrufe").tag(0)
+                    Text("Archiv").tag(2)
                     Text("HA-Status").tag(1)
                 }
                 .pickerStyle(.segmented)
                 .padding()
 
-                if selection == 0 {
+                if selection != 1 {
                     if let error = history.errorMessage {
                         Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                     }
                     if filteredCalls.isEmpty {
-                        ContentUnavailableView(searchText.isEmpty ? "Keine Anrufe" : "Keine Treffer", systemImage: "phone", description: Text("Deine eingehenden, ausgehenden und verpassten Anrufe erscheinen hier."))
+                        ContentUnavailableView(searchText.isEmpty ? (selection == 2 ? "Archiv ist leer" : "Keine Anrufe") : "Keine Treffer", systemImage: selection == 2 ? "folder" : "phone", description: Text(selection == 2 ? "Archivierte Anrufe werden auf diesem iPhone gespeichert." : "Nach links oder rechts wischen für Rückruf, Löschen und Archivieren."))
                     } else {
                         List(filteredCalls) { call in
                             Button {
@@ -2858,7 +2861,21 @@ private struct CallsView: View {
                                       !number.isEmpty else { return }
                                 UIPasteboard.general.string = number
                             }
-                            .disabled(!isSelectingCalls && (call.handles.first?.value ?? "").isEmpty)
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 30)
+                                    .onEnded { value in
+                                        guard !isSelectingCalls,
+                                              abs(value.translation.width) > 60,
+                                              abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
+                                        actionCall = call
+                                    }
+                            )
+                            .contextMenu {
+                                Button { actionCall = call } label: {
+                                    Label("Anrufaktionen", systemImage: "ellipsis.circle")
+                                }
+                            }
+                            .accessibilityAction(named: Text("Anrufaktionen")) { actionCall = call }
                         }
                         .listStyle(.plain)
                         .safeAreaInset(edge: .bottom) {
@@ -2899,7 +2916,7 @@ private struct CallsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "Telefonnummer")
             .toolbar {
-                if selection == 0 {
+                if selection != 1 {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button(isSelectingCalls ? "Fertig" : "Auswählen") {
                             isSelectingCalls.toggle()
@@ -2907,6 +2924,29 @@ private struct CallsView: View {
                         }
                     }
                 }
+            }
+            .sheet(item: $actionCall) { call in
+                CallHistoryActionsView(
+                    call: call, isArchived: archive.contains(call), isDialing: dialer.isDialing,
+                    onCall: { line in
+                        guard !SIPService.shared.active, !dialer.isDialing, !call.number.isEmpty else { return }
+                        actionCall = nil
+                        dialer.number = call.number
+                        dialer.call(line: line)
+                    },
+                    onDelete: {
+                        hideCalls([call])
+                        actionCall = nil
+                    },
+                    onArchive: {
+                        archive.save(call)
+                        actionCall = nil
+                    }
+                )
+            }
+            .onChange(of: selection) { _, _ in
+                selectedCallIDs.removeAll()
+                isSelectingCalls = false
             }
             .task { await history.refresh() }
             .onChange(of: scenePhase) { _, phase in
@@ -2916,7 +2956,7 @@ private struct CallsView: View {
     }
 
     private func shareSelectedCalls() {
-        let selected = history.conversations.filter { selectedCallIDs.contains($0.id) }
+        let selected = callsInSection.filter { selectedCallIDs.contains($0.id) }
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
@@ -2934,16 +2974,26 @@ private struct CallsView: View {
     }
 
     private func hideSelectedCalls() {
-        var ids = hiddenIDs
-        ids.formUnion(selectedCallIDs.map { $0.uuidString })
-        hiddenCallIDs = ids.sorted().joined(separator: "\n")
-        let records = hiddenRecords + history.conversations.filter { selectedCallIDs.contains($0.id) }
-        if let data = try? JSONEncoder().encode(records) { hiddenCallRecords = data }
+        hideCalls(callsInSection.filter { selectedCallIDs.contains($0.id) })
         selectedCallIDs.removeAll()
     }
 
+    private func hideCalls(_ calls: [CallRecord]) {
+        var ids = hiddenIDs
+        ids.formUnion(calls.map { $0.id.uuidString })
+        hiddenCallIDs = ids.sorted().joined(separator: "\n")
+        let records = LocalCallHistory.merged(local: calls, system: hiddenRecords)
+        if let data = try? JSONEncoder().encode(records) { hiddenCallRecords = data }
+        archive.remove(calls)
+        selectedCallIDs.subtract(calls.map(\.id))
+    }
+
+    private var callsInSection: [CallRecord] {
+        selection == 2 ? archive.entries : history.conversations.filter { !archive.contains($0) }
+    }
+
     private var filteredCalls: [CallRecord] {
-        history.conversations.filter {
+        callsInSection.filter {
             !hiddenIDs.contains($0.id.uuidString) &&
             !LocalCallHistory.isHidden($0, records: hiddenRecords) &&
             (searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText))

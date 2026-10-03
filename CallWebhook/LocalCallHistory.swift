@@ -28,6 +28,41 @@ struct CallRecord: Identifiable, Codable, Equatable {
     }
 }
 
+/// Separate snapshots keep saved calls available even after the rolling history
+/// or the system's call log no longer contains them.
+@MainActor
+final class CallHistoryArchive: ObservableObject {
+    @Published private(set) var entries: [CallRecord]
+    private let defaults: UserDefaults
+    private let key = "callwebhook.callArchive.v1"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        entries = defaults.data(forKey: key)
+            .flatMap { try? JSONDecoder().decode([CallRecord].self, from: $0) } ?? []
+    }
+
+    func contains(_ call: CallRecord) -> Bool {
+        LocalCallHistory.isHidden(call, records: entries)
+    }
+
+    func save(_ call: CallRecord) {
+        // Only completed calls have a final status and duration to preserve.
+        guard call.endedAt != nil else { return }
+        entries = LocalCallHistory.merged(local: [call], system: entries)
+        persist()
+    }
+
+    func remove(_ calls: [CallRecord]) {
+        entries.removeAll { LocalCallHistory.isHidden($0, records: calls) }
+        persist()
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(entries) { defaults.set(data, forKey: key) }
+    }
+}
+
 @MainActor
 final class LocalCallHistory: ObservableObject {
     static let shared = LocalCallHistory()

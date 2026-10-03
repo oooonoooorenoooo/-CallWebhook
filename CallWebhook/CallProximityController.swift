@@ -30,7 +30,7 @@ final class CallProximityController: NSObject {
             && UIDevice.current.proximityState
     }
 
-    nonisolated @objc private func audioRouteChanged(_ notification: Notification) {
+    @objc nonisolated private func audioRouteChanged(_ notification: Notification) {
         Task { @MainActor in self.refreshMonitoring() }
     }
 

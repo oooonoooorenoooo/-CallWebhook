@@ -55,6 +55,7 @@ final class SIPService: ObservableObject {
 
         iterateTimer?.invalidate()
         core?.stop()
+        CallProximityController.shared.setCallInProgress(false)
         core = nil
         registered = false
 
@@ -103,6 +104,7 @@ final class SIPService: ObservableObject {
     }
 
     private func updateCallState() {
+        defer { updateProximityMonitoring() }
         if trackedCall == nil, let call = core?.currentCall,
            String(describing: call.state).lowercased().contains("incoming") {
             let caller = call.remoteAddress?.username ?? "Unbekannt"
@@ -203,9 +205,11 @@ final class SIPService: ObservableObject {
         callStatus = "Leitung \(line): \(number) – Verbindung wird aufgebaut …"
         active = true
         status = "SIP Leitung \(line): \(number)"
+        updateProximityMonitoring()
     }
 
     func sendDTMF(_ digit: String) throws {
+        guard !CallProximityController.shared.isBlockingTouches else { return }
         guard active, let call = trackedCall else { return }
         let state = String(describing: call.state).lowercased()
         guard state == "connected" || state.contains("streamsrunning") else { return }
@@ -221,6 +225,7 @@ final class SIPService: ObservableObject {
         try call.accept()
         incoming = false
         callStatus = "Anruf wird angenommen …"
+        updateProximityMonitoring()
     }
 
     func activateCallAudio(_ enabled: Bool) {
@@ -237,7 +242,12 @@ final class SIPService: ObservableObject {
         historyID = nil
     }
 
+    private func updateProximityMonitoring() {
+        CallProximityController.shared.setCallInProgress(active && !incoming && trackedCall != nil)
+    }
+
     func hangup() {
+        defer { updateProximityMonitoring() }
         guard let core else { IncomingCallProvider.shared.ended(); return }
         do {
             try core.terminateAllCalls()

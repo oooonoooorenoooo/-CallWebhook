@@ -51,7 +51,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook.U98PKCA4W7
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: 2.0
-        CURRENT_PROJECT_VERSION: 5
+        CURRENT_PROJECT_VERSION: 6
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook

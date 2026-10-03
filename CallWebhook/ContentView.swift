@@ -2782,7 +2782,7 @@ private struct CallsView: View {
     @ObservedObject var dialer: DialerModel
     @StateObject private var history = CallHistoryModel()
     @StateObject private var archive = CallHistoryArchive()
-    @State private var actionCall: CallRecord?
+    @State private var callToDelete: CallRecord?
     @State private var selection = 0
     @State private var searchText = ""
     @State private var isSelectingCalls = false
@@ -2861,21 +2861,22 @@ private struct CallsView: View {
                                       !number.isEmpty else { return }
                                 UIPasteboard.general.string = number
                             }
-                            .simultaneousGesture(
-                                DragGesture(minimumDistance: 30)
-                                    .onEnded { value in
-                                        guard !isSelectingCalls,
-                                              abs(value.translation.width) > 60,
-                                              abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
-                                        actionCall = call
-                                    }
-                            )
-                            .contextMenu {
-                                Button { actionCall = call } label: {
-                                    Label("Anrufaktionen", systemImage: "ellipsis.circle")
+                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                if !isSelectingCalls {
+                                    CallHistorySwipeActions(
+                                        call: call, isArchived: archive.contains(call), dialer: dialer,
+                                        onDelete: { callToDelete = call }, onArchive: { archive.save(call) }
+                                    )
                                 }
                             }
-                            .accessibilityAction(named: Text("Anrufaktionen")) { actionCall = call }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                if !isSelectingCalls {
+                                    CallHistorySwipeActions(
+                                        call: call, isArchived: archive.contains(call), dialer: dialer,
+                                        onDelete: { callToDelete = call }, onArchive: { archive.save(call) }
+                                    )
+                                }
+                            }
                         }
                         .listStyle(.plain)
                         .safeAreaInset(edge: .bottom) {
@@ -2925,24 +2926,19 @@ private struct CallsView: View {
                     }
                 }
             }
-            .sheet(item: $actionCall) { call in
-                CallHistoryActionsView(
-                    call: call, isArchived: archive.contains(call), isDialing: dialer.isDialing,
-                    onCall: { line in
-                        guard !SIPService.shared.active, !dialer.isDialing, !call.number.isEmpty else { return }
-                        actionCall = nil
-                        dialer.number = call.number
-                        dialer.call(line: line)
-                    },
-                    onDelete: {
-                        hideCalls([call])
-                        actionCall = nil
-                    },
-                    onArchive: {
-                        archive.save(call)
-                        actionCall = nil
-                    }
-                )
+            .confirmationDialog(
+                "Anruf aus CallWebhook löschen?",
+                isPresented: Binding(get: { callToDelete != nil }, set: { if !$0 { callToDelete = nil } }),
+                titleVisibility: .visible,
+                presenting: callToDelete
+            ) { call in
+                Button("Anruf löschen", role: .destructive) {
+                    hideCalls([call])
+                    callToDelete = nil
+                }
+                Button("Abbrechen", role: .cancel) { callToDelete = nil }
+            } message: { _ in
+                Text("Dieser Eintrag bleibt in CallWebhook auch nach erneutem Laden ausgeblendet.")
             }
             .onChange(of: selection) { _, _ in
                 selectedCallIDs.removeAll()

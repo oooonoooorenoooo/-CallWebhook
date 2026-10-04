@@ -1504,38 +1504,17 @@ private struct SetupWizardView: View {
         \(fritz3)
         """
 
-        let prefix2 = sipLine2Prefix.isEmpty ? "*82" : sipLine2Prefix
-        let prefix3 = sipLine3Prefix.isEmpty ? "*83" : sipLine3Prefix
-        let publicLine1Endpoint = easybellEnabled ? "easybell-endpoint" : "fritz1-endpoint"
-        let publicLine2Endpoint = easybellEnabled ? "easybell-endpoint" : "fritz2-endpoint"
-        let line1CallerID = easybellEnabled ? " same => n,Set(CALLERID(name)=\\(line1Number))\\n" : ""
-        let line2CallerID = easybellEnabled ? " same => n,Set(CALLERID(name)=\\(line2Number))\\n" : ""
-        let dialplan = """
-        [from-callwebhook-ios]
-        exten => _\(prefix2)**X.,1,NoOp(CallWebhook Leitung 2 internal FRITZ call to ${EXTEN:\(prefix2.count)})
-        \(line2CallerID) same => n,Dial(PJSIP/${EXTEN:\(prefix2.count)}@\(publicLine2Endpoint),60)
-         same => n,Hangup()
-
-        exten => _\(prefix2)X.,1,NoOp(CallWebhook Leitung 2 to ${EXTEN:\(prefix2.count)})
-         same => n,Dial(PJSIP/${EXTEN:\(prefix2.count)}@fritz2-endpoint,60)
-         same => n,Hangup()
-
-        exten => _\(prefix3)**X.,1,NoOp(CallWebhook Leitung 3 internal FRITZ call to ${EXTEN:\(prefix3.count)})
-         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz3-endpoint,60)
-         same => n,Hangup()
-
-        exten => _\(prefix3)X.,1,NoOp(CallWebhook Leitung 3 to ${EXTEN:\(prefix3.count)})
-         same => n,Dial(PJSIP/${EXTEN:\(prefix3.count)}@fritz3-endpoint,60)
-         same => n,Hangup()
-
-        exten => _**X.,1,NoOp(CallWebhook internal FRITZ call to ${EXTEN})
-        \(line1CallerID) same => n,Dial(PJSIP/${EXTEN}@\(publicLine1Endpoint),60)
-         same => n,Hangup()
-
-        exten => _X.,1,NoOp(CallWebhook Leitung 1 to ${EXTEN})
-         same => n,Dial(PJSIP/${EXTEN}@fritz1-endpoint,60)
-         same => n,Hangup()
-        """
+        let mobile1 = MobileForwarding.normalizedNumber(primaryMobileNumber)
+        let mobile2 = MobileForwarding.normalizedNumber(secondaryMobileNumber)
+        guard !easybellEnabled || (mobile1 != nil && (!sipLine2Enabled || mobile2 != nil)) else {
+            asteriskConfigReady = false
+            asteriskConfigStatus = "Bitte die Mobilfunknummern der aktiven SIM-Leitungen prüfen."
+            return
+        }
+        let dialplan = OutgoingDialplan.make(
+            easybellEnabled: easybellEnabled,
+            mobile1: mobile1 ?? "", mobile2: mobile2 ?? "",
+            line2Prefix: sipLine2Prefix, line3Prefix: sipLine3Prefix)
 
         do {
             try SetupKeychain.set(pjsip, account: "asterisk-pjsip-generated")

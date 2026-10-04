@@ -44,6 +44,11 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Test outgoing Easybell and FRITZ routing
+        run: |
+          swiftc CallWebhook/OutgoingDialplan.swift tests/OutgoingDialplanTests.swift -o "$RUNNER_TEMP/outgoing-dialplan-tests"
+          "$RUNNER_TEMP/outgoing-dialplan-tests"
+
       - name: Test Home Assistant setup
         run: |
           python3 -m venv "$RUNNER_TEMP/backend-tests"

@@ -249,6 +249,9 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$APP_ENTITLEMENTS")" = "production"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CallWebhookPushEnvironment' "$APP_PATH/Info.plist")" = "production"
           echo "TESTFLIGHT_DEFAULT_DIALER_AND_CALLING_SIGNING_OK=true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.carplay-communication' "$APP_ENTITLEMENTS")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.carplay-communication' "$PROFILE_PLIST")" = "true"
+          echo "TESTFLIGHT_CARPLAY_COMMUNICATION_SIGNING_OK=true"
       - name: Export App Store IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

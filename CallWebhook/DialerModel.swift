@@ -2,6 +2,7 @@ import Foundation
 import LiveCommunicationKit
 import UIKit
 import AVFoundation
+import Combine
 
 @MainActor
 final class DialerModel: ObservableObject {
@@ -11,6 +12,23 @@ final class DialerModel: ObservableObject {
     @Published private(set) var isDialing = false
     private var dialingTask: Task<Void, Never>?
     private let sip = SIPService.shared
+    private var callStateObservation: AnyCancellable?
+    private var wasSIPActive = false
+
+    init() {
+        // Observe the service, not a particular view: remote hangup and CallKit
+        // ending a call must clear the field even while another tab is visible.
+        callStateObservation = sip.$active.removeDuplicates().sink { [weak self] active in
+            guard let self else { return }
+            if self.wasSIPActive && !active { self.number = "" }
+            self.wasSIPActive = active
+        }
+    }
+
+    func recallLastNumber() {
+        guard !sip.active, !isDialing, !lastDialedNumber.isEmpty else { return }
+        number = lastDialedNumber
+    }
 
     func append(_ digit: String) {
         // During a call, keypad input belongs to the remote voice menu. Never
@@ -44,6 +62,7 @@ final class DialerModel: ObservableObject {
             openCellularNetworkCode(value)
             return
         }
+        guard !isDialing, !sip.active else { return }
         status = "Anruf wird gestartet …"
         lastDialedNumber = value
         UserDefaults.standard.set(value, forKey: "lastDialedNumber")
@@ -61,6 +80,7 @@ final class DialerModel: ObservableObject {
             openCellularNetworkCode(value)
             return
         }
+        guard !isDialing, !sip.active else { return }
         status = "Anruf wird gestartet …"
         lastDialedNumber = value
         UserDefaults.standard.set(value, forKey: "lastDialedNumber")
@@ -112,8 +132,10 @@ final class DialerModel: ObservableObject {
                 try sip.call(value, line: line)
                 status = "Leitung \(line): \(value)"
             } catch is CancellationError {
+                if number == value { number = "" }
                 status = "Anrufaufbau abgebrochen"
             } catch {
+                if number == value { number = "" }
                 status = "Anruf fehlgeschlagen: \(error.localizedDescription)"
             }
         }
@@ -147,7 +169,9 @@ final class DialerModel: ObservableObject {
     }
 
     func hangup() {
+        let wasStarting = isDialing
         dialingTask?.cancel()
+        if wasStarting { number = "" }
         if UserDefaults.standard.bool(forKey: "sipEnabled") {
             sip.hangup()
             status = "SIP-Anruf beendet"

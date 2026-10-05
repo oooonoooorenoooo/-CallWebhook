@@ -56,6 +56,7 @@ final class SIPService: ObservableObject {
         iterateTimer?.invalidate()
         core?.stop()
         CallProximityController.shared.setCallInProgress(false)
+        CallAudioRouteController.shared.setCallInProgress(false)
         core = nil
         registered = false
 
@@ -244,6 +245,7 @@ final class SIPService: ObservableObject {
 
     private func updateProximityMonitoring() {
         CallProximityController.shared.setCallInProgress(active && !incoming && trackedCall != nil)
+        CallAudioRouteController.shared.setCallInProgress(active && !incoming && trackedCall != nil)
     }
 
     func hangup() {

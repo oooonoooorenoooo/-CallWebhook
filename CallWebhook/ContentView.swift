@@ -3651,6 +3651,7 @@ private struct DialPadView: View {
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     @ObservedObject private var sip = SIPService.shared
+    @ObservedObject private var audioRoute = CallAudioRouteController.shared
     @State private var callStatus = "Bereit"
     let primaryPhoneNumber: String
     let secondaryPhoneNumber: String
@@ -3684,6 +3685,13 @@ private struct DialPadView: View {
 
                 Spacer()
 
+                Text(dialer.number.isEmpty ? " " : dialer.number)
+                    .font(.system(size: 34, weight: .regular, design: .rounded))
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+
                 HStack(spacing: 12) {
                     Button {
                         if let value = UIPasteboard.general.string?
@@ -3700,12 +3708,32 @@ private struct DialPadView: View {
                     .accessibilityLabel("Aus Zwischenablage einfügen")
                     .disabled(sip.active || dialer.isDialing)
 
-                    Text(dialer.number.isEmpty ? " " : dialer.number)
-                        .font(.system(size: 34, weight: .regular, design: .rounded))
-                        .minimumScaleFactor(0.6)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 44)
+                    Button { dialer.recallLastNumber() } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.title3)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(sip.active || dialer.isDialing || dialer.lastDialedNumber.isEmpty)
+                    .accessibilityLabel("Wahlwiederholung")
+                    .accessibilityHint("Letzte gewählte Nummer einsetzen und anschließend die Leitung wählen")
+
+                    Spacer(minLength: 0)
+
+                    if sip.active && !sip.incoming {
+                        Button { audioRoute.toggleSpeaker() } label: {
+                            Label("Lautsprecher", systemImage: "speaker.wave.3.fill")
+                                .font(.subheadline)
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 44)
+                                .foregroundStyle(audioRoute.speakerEnabled ? Color.white : Color.primary)
+                                .background(audioRoute.speakerEnabled ? Color.blue : Color.secondary.opacity(0.18), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Lautsprecher")
+                        .accessibilityValue(audioRoute.speakerEnabled ? "Ein" : "Aus")
+                        .accessibilityHint("Zwischen Freisprechen und der normalen Audioausgabe umschalten")
+                    }
 
                     Image(systemName: "delete.left")
                         .font(.title3)
@@ -3780,6 +3808,14 @@ private struct DialPadView: View {
             }
             .padding(.horizontal)
             .navigationTitle("Zifferblatt")
+            .alert("Audioausgabe", isPresented: Binding(
+                get: { audioRoute.errorMessage != nil },
+                set: { if !$0 { audioRoute.errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { audioRoute.errorMessage = nil }
+            } message: {
+                Text(audioRoute.errorMessage ?? "")
+            }
         }
     }
 

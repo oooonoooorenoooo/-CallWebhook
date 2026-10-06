@@ -3586,6 +3586,14 @@ private struct MailboxView: View {
             .navigationTitle("Mailbox")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if isSelectingMailbox {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(allMailboxMessagesSelected ? "Alles abwählen" : "Alles auswählen") {
+                            selectedMessageIDs = allMailboxMessagesSelected ? [] : Set(mailbox.messages.map(\.id))
+                        }
+                        .disabled(mailbox.messages.isEmpty || mailbox.isLoading || exporting)
+                    }
+                }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button(isSelectingMailbox ? "Fertig" : "Auswählen") {
                         isSelectingMailbox.toggle()
@@ -3615,6 +3623,11 @@ private struct MailboxView: View {
                 Button("OK") { mailbox.clearError() }
             } message: { Text(mailbox.errorMessage ?? "") }
             .task { await mailbox.refresh() }
+            .onChange(of: mailbox.messages.map(\.id)) { _, messageIDs in
+                // Refresh and partial deletions must not leave invisible IDs
+                // selected or inflate the displayed selection count.
+                selectedMessageIDs.formIntersection(messageIDs)
+            }
             .sheet(item: $playingMessage) { message in
                 NavigationStack {
                     VoicemailPlayerView(mailbox: mailbox, message: message)
@@ -3624,6 +3637,10 @@ private struct MailboxView: View {
                 .presentationDetents([.medium])
             }
         }
+    }
+
+    private var allMailboxMessagesSelected: Bool {
+        !mailbox.messages.isEmpty && mailbox.messages.allSatisfy { selectedMessageIDs.contains($0.id) }
     }
 
     private func exportMessages(_ messages: [MailboxMessage]) async {

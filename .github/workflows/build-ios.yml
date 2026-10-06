@@ -109,6 +109,8 @@ jobs:
         run: |
           swiftc CallWebhook/LocalCallHistory.swift tests/LocalCallHistoryTests.swift -o "$RUNNER_TEMP/call-history-tests"
           "$RUNNER_TEMP/call-history-tests"
+          swiftc CallWebhook/LocalCallHistory.swift CallWebhook/MissedCallState.swift tests/MissedCallStateTests.swift -o "$RUNNER_TEMP/missed-call-tests"
+          "$RUNNER_TEMP/missed-call-tests"
       - name: Test external call validation and capability gating
         run: |
           swiftc CallWebhook/SIPDialNumber.swift CallWebhook/ExternalCallRequest.swift tests/ExternalCallRequestTests.swift -o "$RUNNER_TEMP/external-call-tests"

@@ -87,6 +87,8 @@ struct ContentView: View {
     @EnvironmentObject var monitor: CallMonitor
     @StateObject private var dialer = DialerModel()
     @ObservedObject private var callSIP = SIPService.shared
+    @ObservedObject private var callHistory = CallHistoryModel.shared
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0
     @AppStorage("phoneDefaultsReviewed") private var phoneDefaultsReviewed = false
     @State private var showNetworkCode = false
@@ -153,8 +155,9 @@ struct ContentView: View {
                 .tabItem { Label("Kontakte", systemImage: "person.crop.circle.fill") }
                 .tag(0)
 
-            CallsView(dialer: dialer)
+            CallsView(dialer: dialer, isSelected: selectedTab == 1)
                 .tabItem { Label("Anrufe", systemImage: "clock.fill") }
+                .badge(callHistory.unreadMissedCallCount)
                 .tag(1)
 
             MailboxView(dialer: dialer)
@@ -171,6 +174,18 @@ struct ContentView: View {
                 .tag(4)
         }
         .tint(.blue)
+        .task {
+            await callHistory.refresh()
+            if scenePhase == .active { await callHistory.requestBadgeAuthorizationIfNeeded() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task {
+                    await callHistory.refresh()
+                    await callHistory.requestBadgeAuthorizationIfNeeded()
+                }
+            }
+        }
         .onChange(of: dialer.isDialing) { _, dialing in
             if dialing { selectedTab = 3 }
         }
@@ -2759,7 +2774,8 @@ private struct CallsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
-    @StateObject private var history = CallHistoryModel()
+    let isSelected: Bool
+    @ObservedObject private var history = CallHistoryModel.shared
     @StateObject private var archive = CallHistoryArchive()
     @State private var callToDelete: CallRecord?
     @State private var selection = 0
@@ -2922,12 +2938,26 @@ private struct CallsView: View {
             .onChange(of: selection) { _, _ in
                 selectedCallIDs.removeAll()
                 isSelectingCalls = false
+                acknowledgeVisibleMissedCalls()
             }
-            .task { await history.refresh() }
+            .onAppear { acknowledgeVisibleMissedCalls() }
+            .onChange(of: isSelected) { _, selected in
+                if selected {
+                    acknowledgeVisibleMissedCalls()
+                    Task { await history.refresh() }
+                }
+            }
+            .onChange(of: history.conversations) { _, _ in acknowledgeVisibleMissedCalls() }
+            .onChange(of: searchText) { _, _ in acknowledgeVisibleMissedCalls() }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { Task { await history.refresh() } }
+                if phase == .active { acknowledgeVisibleMissedCalls() }
             }
         }
+    }
+
+    private func acknowledgeVisibleMissedCalls() {
+        guard isSelected, scenePhase == .active, selection == 0 else { return }
+        history.markMissedCallsSeen(filteredCalls)
     }
 
     private func shareSelectedCalls() {
@@ -2960,6 +2990,7 @@ private struct CallsView: View {
         let records = LocalCallHistory.merged(local: calls, system: hiddenRecords)
         if let data = try? JSONEncoder().encode(records) { hiddenCallRecords = data }
         archive.remove(calls)
+        history.updateMissedCallCount()
         selectedCallIDs.subtract(calls.map(\.id))
     }
 

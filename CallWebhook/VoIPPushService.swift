@@ -313,6 +313,7 @@ final class CallWebhookAppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        _ = CallHistoryModel.shared
         VoIPPushService.shared.start()
         return true
     }

@@ -2821,9 +2821,6 @@ private struct CallsView: View {
                                     } else {
                                         selectedCallIDs.insert(call.id)
                                     }
-                                } else {
-                                    guard let number = call.handles.first?.value, !number.isEmpty else { return }
-                                    dialer.call(number)
                                 }
                             } label: {
                                 HStack(spacing: 12) {
@@ -2854,12 +2851,17 @@ private struct CallsView: View {
                                                 .font(.caption2).foregroundStyle(.secondary)
                                         }
                                     }
-                                    Image(systemName: "phone.fill")
-                                        .foregroundStyle(.green)
+                                    if !isSelectingCalls {
+                                        Image(systemName: "arrow.left.and.right")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .accessibilityHidden(true)
+                                    }
                                 }
                             }
                             .buttonStyle(.plain)
                             .accessibilityValue(call.isMissedIncomingCall ? (unread ? "Ungelesen" : "Gelesen") : "")
+                            .accessibilityHint(isSelectingCalls ? "Zur Auswahl hinzufügen oder daraus entfernen" : "Zum Anrufen wischen und die gewünschte Leitung auswählen")
                             .onLongPressGesture {
                                 guard !isSelectingCalls,
                                       let number = call.handles.first?.value,
@@ -3760,151 +3762,146 @@ private struct DialPadView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 18) {
-                VStack(spacing: 3) {
-                    if !primaryPhoneNumber.isEmpty {
-                        Text("SIM 1  \(primaryPhoneNumber)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Zifferblatt")
+                            .font(.largeTitle.bold())
+                            .accessibilityAddTraits(.isHeader)
+                        ownNumbers
                     }
-                    if sipLine2Enabled && !secondaryPhoneNumber.isEmpty {
-                        Text("SIM 2  \(secondaryPhoneNumber)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    if sipLine3Enabled && !landlineNumber.isEmpty {
-                        Text("Festnetz  \(landlineNumber)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer()
+                    Text(dialer.number.isEmpty ? " " : dialer.number)
+                        .font(.system(size: 34, weight: .regular, design: .rounded))
+                        .minimumScaleFactor(0.6)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
 
-                Text(dialer.number.isEmpty ? " " : dialer.number)
-                    .font(.system(size: 34, weight: .regular, design: .rounded))
-                    .minimumScaleFactor(0.6)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-
-                HStack(spacing: 12) {
-                    Button {
-                        if let value = UIPasteboard.general.string?
-                            .trimmingCharacters(in: .whitespacesAndNewlines),
-                           !value.isEmpty {
-                            dialer.number = value
-                        }
-                    } label: {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.title3)
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Aus Zwischenablage einfügen")
-                    .disabled(sip.active || dialer.isDialing)
-
-                    Button { dialer.recallLastNumber() } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.title3)
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(sip.active || dialer.isDialing || dialer.lastDialedNumber.isEmpty)
-                    .accessibilityLabel("Wahlwiederholung")
-                    .accessibilityHint("Letzte gewählte Nummer einsetzen und anschließend die Leitung wählen")
-
-                    Spacer(minLength: 0)
-
-                    if sip.active && !sip.incoming {
-                        Button { audioRoute.toggleSpeaker() } label: {
-                            Label("Lautsprecher", systemImage: "speaker.wave.3.fill")
-                                .font(.subheadline)
-                                .padding(.horizontal, 12)
-                                .frame(minHeight: 44)
-                                .foregroundStyle(audioRoute.speakerEnabled ? Color.white : Color.primary)
-                                .background(audioRoute.speakerEnabled ? Color.blue : Color.secondary.opacity(0.18), in: Capsule())
+                    HStack(spacing: 12) {
+                        Button {
+                            if let value = UIPasteboard.general.string?
+                                .trimmingCharacters(in: .whitespacesAndNewlines),
+                               !value.isEmpty {
+                                dialer.number = value
+                            }
+                        } label: {
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.title3)
+                                .frame(width: 44, height: 44)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Lautsprecher")
-                        .accessibilityValue(audioRoute.speakerEnabled ? "Ein" : "Aus")
-                        .accessibilityHint("Zwischen Freisprechen und der normalen Audioausgabe umschalten")
-                    }
+                        .accessibilityLabel("Aus Zwischenablage einfügen")
+                        .disabled(sip.active || dialer.isDialing)
 
-                    Image(systemName: "delete.left")
-                        .font(.title3)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                        .foregroundStyle(dialer.number.isEmpty ? Color.secondary : Color.primary)
-                        .opacity(dialer.number.isEmpty ? 0.35 : 1)
-                        .onTapGesture {
-                            guard !dialer.number.isEmpty, !sip.active, !dialer.isDialing else { return }
-                            dialer.deleteLast()
+                        Button { dialer.recallLastNumber() } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.title3)
+                                .frame(width: 44, height: 44)
                         }
-                        .onLongPressGesture(minimumDuration: 0.6, maximumDistance: 30) {
-                            guard !dialer.number.isEmpty, !sip.active, !dialer.isDialing else { return }
-                            dialer.number = ""
-                        }
-                        .accessibilityLabel("Letzte Ziffer löschen; lange drücken zum Leeren")
-                }
+                        .buttonStyle(.plain)
+                        .disabled(sip.active || dialer.isDialing || dialer.lastDialedNumber.isEmpty)
+                        .accessibilityLabel("Wahlwiederholung")
+                        .accessibilityHint("Letzte gewählte Nummer einsetzen und anschließend die Leitung wählen")
 
-                ForEach(rows, id: \.self) { row in
-                    HStack(spacing: 26) {
-                        ForEach(row, id: \.self) { digit in
-                            Button {
-                                dialer.append(digit)
-                            } label: {
-                                Text(digit)
-                                    .font(.system(size: 30, weight: .medium, design: .rounded))
-                                    .frame(width: 72, height: 72)
-                                    .background(.thinMaterial, in: Circle())
+                        Spacer(minLength: 0)
+
+                        if sip.active && !sip.incoming {
+                            Button { audioRoute.toggleSpeaker() } label: {
+                                Label("Lautsprecher", systemImage: "speaker.wave.3.fill")
+                                    .font(.subheadline)
+                                    .padding(.horizontal, 12)
+                                    .frame(minHeight: 44)
+                                    .foregroundStyle(audioRoute.speakerEnabled ? Color.white : Color.primary)
+                                    .background(audioRoute.speakerEnabled ? Color.blue : Color.secondary.opacity(0.18), in: Capsule())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Lautsprecher")
+                            .accessibilityValue(audioRoute.speakerEnabled ? "Ein" : "Aus")
+                            .accessibilityHint("Zwischen Freisprechen und der normalen Audioausgabe umschalten")
+                        }
+
+                        Image(systemName: "delete.left")
+                            .font(.title3)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                            .foregroundStyle(dialer.number.isEmpty ? Color.secondary : Color.primary)
+                            .opacity(dialer.number.isEmpty ? 0.35 : 1)
+                            .onTapGesture {
+                                guard !dialer.number.isEmpty, !sip.active, !dialer.isDialing else { return }
+                                dialer.deleteLast()
+                            }
+                            .onLongPressGesture(minimumDuration: 0.6, maximumDistance: 30) {
+                                guard !dialer.number.isEmpty, !sip.active, !dialer.isDialing else { return }
+                                dialer.number = ""
+                            }
+                            .accessibilityLabel("Letzte Ziffer löschen; lange drücken zum Leeren")
+                    }
+
+                    ForEach(rows, id: \.self) { row in
+                        HStack(spacing: 26) {
+                            ForEach(row, id: \.self) { digit in
+                                Button {
+                                    dialer.append(digit)
+                                } label: {
+                                    Text(digit)
+                                        .font(.system(size: 30, weight: .medium, design: .rounded))
+                                        .frame(width: 72, height: 72)
+                                        .background(.thinMaterial, in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
-                }
 
-                HStack(spacing: 10) {
-                    if sip.incoming {
-                        Button { IncomingCallProvider.shared.answer() } label: {
-                            Image(systemName: "phone.fill")
-                                .font(.system(size: 27, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 72, height: 72)
-                                .background(.green, in: Circle())
-                        }.accessibilityLabel("Anruf annehmen")
-                        endCallButton
-                    } else if CellularRouting.cellularOnlyNumber(dialer.number) != nil {
-                        callButton(line: nil)
-                    } else if sipEnabled {
-                        sipCallButton(line: 1)
-                        if sipLine2Enabled { sipCallButton(line: 2) }
-                        if sipLine3Enabled { sipCallButton(line: 3) }
-                        endCallButton
-                    } else if !secondaryPhoneNumber.isEmpty {
-                        callButton(line: 1)
-                        endCallButton
-                        callButton(line: 2)
-                    } else {
-                        callButton(line: nil)
-                        endCallButton
+                    HStack(spacing: 10) {
+                        if sip.incoming {
+                            Button { IncomingCallProvider.shared.answer() } label: {
+                                Image(systemName: "phone.fill")
+                                    .font(.system(size: 27, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 72, height: 72)
+                                    .background(.green, in: Circle())
+                            }.accessibilityLabel("Anruf annehmen")
+                            endCallButton
+                        } else if CellularRouting.cellularOnlyNumber(dialer.number) != nil {
+                            callButton(line: nil)
+                        } else if sipEnabled {
+                            sipCallButton(line: 1)
+                            if sipLine2Enabled { sipCallButton(line: 2) }
+                            if sipLine3Enabled { sipCallButton(line: 3) }
+                            endCallButton
+                        } else if !secondaryPhoneNumber.isEmpty {
+                            callButton(line: 1)
+                            endCallButton
+                            callButton(line: 2)
+                        } else {
+                            callButton(line: nil)
+                            endCallButton
+                        }
                     }
-                }
 
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 Text(callStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, minHeight: 28)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(.bar)
                     .onAppear { callStatus = sip.active ? sip.callStatus : dialer.status }
                     .onChange(of: dialer.status) { _, value in callStatus = value }
                     .onChange(of: sip.callStatus) { _, value in callStatus = value }
-
-                Spacer()
             }
-            .padding(.horizontal)
             .navigationTitle("Zifferblatt")
+            .toolbar(.hidden, for: .navigationBar)
             .alert("Audioausgabe", isPresented: Binding(
                 get: { audioRoute.errorMessage != nil },
                 set: { if !$0 { audioRoute.errorMessage = nil } }
@@ -3914,6 +3911,27 @@ private struct DialPadView: View {
                 Text(audioRoute.errorMessage ?? "")
             }
         }
+    }
+
+    private var ownNumbers: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if !primaryPhoneNumber.isEmpty {
+                Text("SIM 1  \(primaryPhoneNumber)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if sipLine2Enabled && !secondaryPhoneNumber.isEmpty {
+                Text("SIM 2  \(secondaryPhoneNumber)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if sipLine3Enabled && !landlineNumber.isEmpty {
+                Text("Festnetz  \(landlineNumber)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var endCallButton: some View {

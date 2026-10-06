@@ -2782,6 +2782,7 @@ private struct CallsView: View {
     @State private var searchText = ""
     @State private var isSelectingCalls = false
     @State private var selectedCallIDs: Set<UUID> = []
+    @State private var readingSession = MissedCallReadingSession()
     @AppStorage("hiddenCallIDs") private var hiddenCallIDs = ""
     @AppStorage("hiddenCallRecords") private var hiddenCallRecords = Data()
 
@@ -2812,6 +2813,7 @@ private struct CallsView: View {
                         ContentUnavailableView(searchText.isEmpty ? (selection == 2 ? "Archiv ist leer" : "Keine Anrufe") : "Keine Treffer", systemImage: selection == 2 ? "folder" : "phone", description: Text(selection == 2 ? "Archivierte Anrufe werden auf diesem iPhone gespeichert." : "Nach links oder rechts wischen für Rückruf, Löschen und Archivieren."))
                     } else {
                         List(filteredCalls) { call in
+                            let unread = history.isUnreadMissedCall(call)
                             Button {
                                 if isSelectingCalls {
                                     if selectedCallIDs.contains(call.id) {
@@ -2829,11 +2831,18 @@ private struct CallsView: View {
                                         Image(systemName: selectedCallIDs.contains(call.id) ? "checkmark.circle.fill" : "circle")
                                             .foregroundStyle(selectedCallIDs.contains(call.id) ? .blue : .secondary)
                                     }
+                                    Circle()
+                                        .fill(.blue)
+                                        .frame(width: 7, height: 7)
+                                        .opacity(unread ? 1 : 0)
+                                        .accessibilityHidden(true)
                                     Image(systemName: directionIcon(call))
                                         .foregroundStyle(callStatusColor(call))
                                         .frame(width: 28)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(call.handles.first?.value ?? "Unbekannt").font(.headline)
+                                        Text(call.handles.first?.value ?? "Unbekannt")
+                                            .font(.body)
+                                            .fontWeight(unread ? .semibold : .regular)
                                         Text(call.lineLabel).font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -2850,6 +2859,7 @@ private struct CallsView: View {
                                 }
                             }
                             .buttonStyle(.plain)
+                            .accessibilityValue(call.isMissedIncomingCall ? (unread ? "Ungelesen" : "Gelesen") : "")
                             .onLongPressGesture {
                                 guard !isSelectingCalls,
                                       let number = call.handles.first?.value,
@@ -2884,6 +2894,14 @@ private struct CallsView: View {
                                     }
                                     .disabled(selectedCallIDs.isEmpty)
                                     Spacer()
+                                    Button {
+                                        markSelectedCallsRead()
+                                    } label: {
+                                        Label("Gelesen", systemImage: "envelope.open")
+                                    }
+                                    .accessibilityLabel("Ausgewählte Anrufe als gelesen markieren")
+                                    .disabled(!hasUnreadSelectedCalls)
+                                    Spacer()
                                     Button(role: .destructive) {
                                         hideSelectedCalls()
                                     } label: {
@@ -2913,6 +2931,14 @@ private struct CallsView: View {
             .searchable(text: $searchText, prompt: "Telefonnummer")
             .toolbar {
                 if selection != 1 {
+                    if isSelectingCalls {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(allFilteredCallsSelected ? "Alle abwählen" : "Alle auswählen") {
+                                selectedCallIDs = allFilteredCallsSelected ? [] : Set(filteredCalls.map(\.id))
+                            }
+                            .disabled(filteredCalls.isEmpty)
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button(isSelectingCalls ? "Fertig" : "Auswählen") {
                             isSelectingCalls.toggle()
@@ -2938,26 +2964,49 @@ private struct CallsView: View {
             .onChange(of: selection) { _, _ in
                 selectedCallIDs.removeAll()
                 isSelectingCalls = false
-                acknowledgeVisibleMissedCalls()
+                updateReadingSession()
             }
-            .onAppear { acknowledgeVisibleMissedCalls() }
+            .onAppear { updateReadingSession() }
+            .onDisappear { finishReadingSession() }
             .onChange(of: isSelected) { _, selected in
+                updateReadingSession()
                 if selected {
-                    acknowledgeVisibleMissedCalls()
                     Task { await history.refresh() }
                 }
             }
-            .onChange(of: history.conversations) { _, _ in acknowledgeVisibleMissedCalls() }
-            .onChange(of: searchText) { _, _ in acknowledgeVisibleMissedCalls() }
+            .onChange(of: history.unreadMissedCalls) { _, _ in updateReadingSession() }
+            .onChange(of: searchText) { _, _ in updateReadingSession() }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { acknowledgeVisibleMissedCalls() }
+                if phase == .background { finishReadingSession() }
+                else if phase == .active { updateReadingSession() }
             }
         }
     }
 
-    private func acknowledgeVisibleMissedCalls() {
-        guard isSelected, scenePhase == .active, selection == 0 else { return }
-        history.markMissedCallsSeen(filteredCalls)
+    private func updateReadingSession() {
+        guard isSelected, selection == 0 else {
+            finishReadingSession()
+            return
+        }
+        guard scenePhase == .active else { return }
+        readingSession.observe(filteredCalls.filter { history.isUnreadMissedCall($0) })
+    }
+
+    private func finishReadingSession() {
+        let viewed = readingSession.finish()
+        if !viewed.isEmpty { history.markMissedCallsSeen(viewed) }
+    }
+
+    private var allFilteredCallsSelected: Bool {
+        !filteredCalls.isEmpty && filteredCalls.allSatisfy { selectedCallIDs.contains($0.id) }
+    }
+
+    private var hasUnreadSelectedCalls: Bool {
+        callsInSection.contains { selectedCallIDs.contains($0.id) && history.isUnreadMissedCall($0) }
+    }
+
+    private func markSelectedCallsRead() {
+        history.markMissedCallsSeen(callsInSection.filter { selectedCallIDs.contains($0.id) })
     }
 
     private func shareSelectedCalls() {

@@ -8,6 +8,23 @@ extension CallRecord {
     }
 }
 
+/// Keep the unread markers visible for the entire visit. Acknowledge only the
+/// completed calls captured while the list was active, not later background calls.
+@MainActor
+struct MissedCallReadingSession {
+    private var viewedCalls: [CallRecord] = []
+
+    mutating func observe(_ unreadCalls: [CallRecord]) {
+        viewedCalls = LocalCallHistory.merged(
+            local: unreadCalls.filter(\.isMissedIncomingCall), system: viewedCalls)
+    }
+
+    mutating func finish() -> [CallRecord] {
+        defer { viewedCalls.removeAll() }
+        return viewedCalls
+    }
+}
+
 /// Store acknowledgements by call identity, including the number/date fallback
 /// used by the history. iOS may return a different UUID for the same SIP call.
 @MainActor

@@ -8,7 +8,8 @@ final class CallHistoryModel: ObservableObject {
     static let shared = CallHistoryModel()
     @Published private(set) var conversations: [CallRecord] = []
     @Published private(set) var errorMessage: String?
-    @Published private(set) var unreadMissedCallCount = 0
+    @Published private(set) var unreadMissedCalls: [CallRecord] = []
+    var unreadMissedCallCount: Int { unreadMissedCalls.count }
     private let manager = ConversationHistoryManager.sharedInstance
     private let missedCalls = MissedCallState()
     private let systemCacheKey = "callwebhook.systemCallHistory.v1"
@@ -61,8 +62,12 @@ final class CallHistoryModel: ObservableObject {
         updateMissedCallCount()
     }
 
+    func isUnreadMissedCall(_ call: CallRecord) -> Bool {
+        LocalCallHistory.isHidden(call, records: unreadMissedCalls)
+    }
+
     func updateMissedCallCount() {
-        unreadMissedCallCount = missedCalls.unreadCalls(in: conversations).count
+        unreadMissedCalls = missedCalls.unreadCalls(in: conversations)
         synchronizeIconBadge()
     }
 

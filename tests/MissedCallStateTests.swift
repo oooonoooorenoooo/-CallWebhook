@@ -77,6 +77,49 @@ struct MissedCallStateTests {
         assert(reopened.unreadCalls(in: recovered.entries).count == 3)
         reopened.markSeen(recovered.entries)
         assert(MissedCallState(defaults: defaults).unreadCalls(in: recovered.entries).isEmpty)
-        print("Missed-call counting, acknowledgement, deletion, duplicate and restart tests passed")
+        testReadingSessionAndBulkRead()
+        print("Missed-call counting, reading session, bulk read, deletion, duplicate and restart tests passed")
+    }
+
+    @MainActor private static func testReadingSessionAndBulkRead() {
+        let suite = "MissedCallReadingTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = LocalCallHistory(defaults: defaults)
+        let state = MissedCallState(defaults: defaults)
+        let date = Date(timeIntervalSince1970: 20_000)
+        let first = UUID(), second = UUID(), background = UUID()
+        for (index, id) in [first, second, background].enumerated() {
+            history.begin(id: id, number: "\(index)", incoming: true,
+                          at: date.addingTimeInterval(Double(index) * 60))
+            if id != background { history.end(id) }
+        }
+        let firstCall = history.entries.first { $0.id == first }!
+        let secondCall = history.entries.first { $0.id == second }!
+        var visit = MissedCallReadingSession()
+        // A search shows only the first call. Opening/refreshing the list must
+        // retain its blue marker and must not acknowledge the filtered-out call.
+        visit.observe(state.unreadCalls(in: [firstCall]))
+        visit.observe(state.unreadCalls(in: [firstCall]))
+        assert(state.unreadCalls(in: history.entries).count == 2)
+        history.end(background) // arrives after the app leaves the foreground
+        let viewed = visit.finish()
+        assert(viewed.count == 1 && viewed[0].id == first)
+        state.markSeen(viewed)
+        assert(visit.finish().isEmpty)
+        assert(state.unreadCalls(in: history.entries).count == 2)
+        let reopened = MissedCallState(defaults: defaults)
+        assert(reopened.unreadCalls(in: [firstCall]).isEmpty)
+        assert(reopened.unreadCalls(in: history.entries).count == 2)
+
+        // "Gelesen" operates on the selected rows immediately, leaving all
+        // unselected missed calls unread. "Alle auswählen" clears the rest.
+        visit.observe(reopened.unreadCalls(in: history.entries))
+        reopened.markSeen([secondCall])
+        assert(reopened.unreadCalls(in: history.entries).map(\.id) == [background])
+        reopened.markSeen(history.entries)
+        assert(reopened.unreadCalls(in: history.entries).isEmpty)
+        reopened.markSeen(visit.finish()) // leaving after the bulk action is harmless
+        assert(MissedCallState(defaults: defaults).unreadCalls(in: history.entries).isEmpty)
     }
 }

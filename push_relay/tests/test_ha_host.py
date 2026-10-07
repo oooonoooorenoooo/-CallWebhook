@@ -26,6 +26,8 @@ def backend_functions():
               _relay_host_lock=asyncio.Lock(), _relay_host_cache=(0, None),
               RELAY_PUBLIC_ROUTES={('GET','healthz'),('POST','v1/challenge'),('POST','v1/register'),
                   ('GET','v1/registration'),('DELETE','v1/registration'),('POST','v1/ring')})
+    route_node = next(n for n in ast.parse(BACKEND.read_text()).body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'RELAY_PUBLIC_ROUTES' for t in n.targets))
+    ns['RELAY_PUBLIC_ROUTES'] = ast.literal_eval(route_node.value)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BACKEND), 'exec'), ns)
     return ns
 
@@ -105,6 +107,21 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post(url, headers=headers, json={'call_id':'id'})).status, 200)
         self.assertEqual(self.forwarded[0][2]['Authorization'], headers['Authorization'])
 
+    async def test_comatalarm_routes_use_only_their_own_credentials(self):
+        prefix = '/api/callwebhook/push-relay/comatalarm/v1/'
+        self.assertEqual((await self.client.post(prefix+'register',json={})).status,401)
+        result = await self.client.post(prefix+'register',json={'device_id':'test'},headers={
+            'X-ComatAlarm-Setup-Key':'s'*64,'Authorization':'Bearer HA-SECRET','Cookie':'HA-COOKIE'})
+        self.assertEqual(result.status,200)
+        headers = self.forwarded[-1][2]
+        self.assertEqual(headers['X-ComatAlarm-Setup-Key'],'s'*64)
+        self.assertNotIn('Authorization',headers)
+        self.assertNotIn('Cookie',headers)
+        for method, path in [('POST','watch'),('POST','test'),('GET','state'),('DELETE','registration')]:
+            self.assertEqual((await self.client.request(method,prefix+path)).status,401)
+            self.assertEqual((await self.client.request(method,prefix+path,headers={'Authorization':'Bearer '+'d'*64})).status,200)
+        self.assertEqual((await self.client.post(prefix+'other',headers={'Authorization':'Bearer '+'d'*64})).status,404)
+
 
 class AddonOptionsTests(unittest.TestCase):
     def test_pem_formats_validated_and_only_private_addon_directory_used(self):
@@ -126,3 +143,4 @@ class AddonOptionsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.configure(dict(options, allow_development='false'), Path(directory))
             with self.assertRaises(ValueError): module.normalize_key('not a private key')
+

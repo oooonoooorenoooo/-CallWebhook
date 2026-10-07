@@ -35,6 +35,10 @@ def configure(options, data_dir):
     if hatts_key and len(hatts_key) < 32:
         raise ValueError("hatts_setup_key muss mindestens 32 Zeichen haben")
     values["HATTS_SETUP_KEY"] = hatts_key
+    comat_key = options.get("comatalarm_setup_key", "").strip()
+    if comat_key and (len(comat_key) < 32 or len(comat_key) > 256):
+        raise ValueError("comatalarm_setup_key muss 32 bis 256 Zeichen haben")
+    values["COMATALARM_SETUP_KEY"] = comat_key
     for field in ("apns_team_id", "apns_key_id"):
         value = options.get(field, "").strip()
         if not re.fullmatch(r"[A-Z0-9]{10}", value):
@@ -58,3 +62,4 @@ if __name__ == "__main__":
         raise SystemExit("Push-Dienst nicht gestartet: APNs-Team-ID, Key-ID und gültigen .p8-Inhalt in der Add-on-Konfiguration hinterlegen. Ein App-Store-Connect-Schlüssel genügt nicht.") from None
     os.environ.update(environment)
     os.execvp("python", ["python", "-m", "push_relay.server"])
+

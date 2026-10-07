@@ -854,7 +854,10 @@ RELAY_PUBLIC_PREFIX = "/api/callwebhook/push-relay"
 RELAY_PUBLIC_ROUTES = {("GET", "healthz"), ("POST", "v1/challenge"),
     ("POST", "v1/register"), ("GET", "v1/registration"),
     ("DELETE", "v1/registration"), ("POST", "v1/ring"),
-    ("POST", "hatts/v1/register"), ("POST", "hatts/v1/speak")}
+    ("POST", "hatts/v1/register"), ("POST", "hatts/v1/speak"),
+    ("POST", "comatalarm/v1/register"), ("POST", "comatalarm/v1/watch"),
+    ("GET", "comatalarm/v1/state"), ("DELETE", "comatalarm/v1/registration"),
+    ("POST", "comatalarm/v1/test")}
 
 
 async def forward_push_relay(request, endpoint):
@@ -867,7 +870,12 @@ async def forward_push_relay(request, endpoint):
         if not setup_key:
             raise web.HTTPUnauthorized()
         headers["X-HATTS-Setup-Key"] = setup_key
-    if endpoint in ("v1/registration", "v1/ring"):
+    if endpoint == "comatalarm/v1/register":
+        setup_key = request.headers.get("X-ComatAlarm-Setup-Key", "")
+        if not 32 <= len(setup_key) <= 256:
+            raise web.HTTPUnauthorized()
+        headers["X-ComatAlarm-Setup-Key"] = setup_key
+    if endpoint in ("v1/registration", "v1/ring") or (endpoint.startswith("comatalarm/") and endpoint != "comatalarm/v1/register"):
         authorization = request.headers.get("Authorization", "")
         if not re.fullmatch(r"Bearer [0-9a-f]{64}", authorization):
             raise web.HTTPUnauthorized()
@@ -2439,3 +2447,4 @@ async def async_setup(
     )
 
     return True
+

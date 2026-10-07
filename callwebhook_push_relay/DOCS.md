@@ -54,3 +54,52 @@ Der Schlüssel und die Registrierungsdaten liegen ausschließlich im privaten
 Add-on-Verzeichnis `/data`. Ein Add-on-Backup enthält diese vertraulichen Daten.
 Wenn Pi, Internetverbindung, HA oder Nabu-Casa-Fernzugriff ausfallen, ist der
 gemeinsame Push-Dienst für die verbundenen Nutzer nicht erreichbar.
+
+
+## ComatAlarm: vorhandenen Dienst erweitern
+
+Benötigt Push-Add-on **1.1.0**, CallWebhook-HA-Komponente **1.2.12** und
+Bootstrap **1.2.5**. Im Add-on-Store nach Updates suchen, Push Relay und Bootstrap
+aktualisieren. Bootstrap einmal starten: Es installiert die neue HA-Komponente
+und fordert einen HA-Neustart an. Vorhandene APNs-Optionen bleiben erhalten.
+
+1. Neue ComatAlarm-TestFlight-Version öffnen, Mitteilungen erlauben und unter
+   **Einstellungen → Hintergrund-Push** die eigene öffentliche HA-HTTPS-Adresse
+   eingeben. Die App ergänzt `/api/callwebhook/push-relay` automatisch.
+2. **Einrichtungsschlüssel erzeugen und kopieren** wählen. Im vorhandenen
+   **CallWebhook Push Relay → Konfiguration** als `comatalarm_setup_key`
+   speichern (32–256 Zeichen), Add-on neu starten und in ComatAlarm **Verbinden**.
+   Dies ist ein eigener Einrichtungsschlüssel, kein Apple-Private-Key und kein
+   GitHub-Secret. `apns_private_key`, `apns_key_id`, `apns_team_id` wiederverwenden.
+3. **Echten Push-Test senden**. Die Annahme durch Apple und die tatsächlich
+   sichtbare Meldung sind zwei getrennte Prüfungen. Anschließend mit gesperrtem
+   iPhone einen Flugalarm testen; Fokusmodus und Mitteilungseinstellungen prüfen.
+
+Der APNs-Schlüssel muss das Topic `de.comatalarm.app.ios.U98PKCA4W7` in der
+Produktionsumgebung unterstützen. Ein auf eine andere App begrenzter Schlüssel
+kann dafür nicht verwendet werden. CI aktiviert Push für die bestehende Bundle-ID
+und erstellt bei Bedarf ein passendes Profil mit den vorhandenen Zertifikaten.
+Es werden keine Zertifikate oder bestehenden Profile widerrufen.
+
+Die App übergibt bis zu zwei Flüge, Alarmregeln und ausschließlich Zeitfenster
+für erlaubte Kalendermeldungen (keine Kalendertitel). Flugereignisse werden im
+Hintergrund ungefähr minütlich über FR24 abgefragt, Gate und Streichungen auch
+über BER. Bei FR24-Tarif-/Zugangsfehlern werden FR24-Abfragen fünf Minuten pausiert.
+Abfragen verbrauchen FR24-Kontingent. Bei geöffneter App pausiert das Add-on nach
+der Übergabe; nach beendetem Flug endet dessen Abfrage. Ohne erneutes Öffnen der
+App endet der Auftrag nach 24 Stunden. Kalenderänderungen während geschlossener
+App werden erst beim nächsten Öffnen übernommen. Maximal zehn Geräte pro Dienst.
+
+Der FR24-Token wird per HTTPS an den eigenen Dienst übertragen und dort im
+privaten Add-on-Verzeichnis gespeichert; niemals öffentlich in GitHub.
+Gerätezugänge, Flugzustand und bereits gesendete Ereignisse bleiben bei einem
+Add-on-Neustart erhalten. Abgelaufene Aufträge löschen den FR24-Token aus dem
+aktiven Datensatz. **Verbindung trennen** löscht Gerätezugang und Flugauftrag.
+Der Apple-Schlüssel bleibt ausschließlich im Betreiber-Add-on. Der neue
+ComatAlarm-Zugang wird getrennt von CallWebhook-App-Attest/VoIP und HATTS geprüft.
+
+Hintergrundmeldungen: Abflug, Landung, Gateänderung, bestätigtes Gate-Arrival,
+Streichung und Umleitung, soweit die jeweiligen Quellen Ereignisse liefern.
+Eine Passagier-Gate-Angabe wird niemals als bestätigter BER-Standplatz ausgegeben.
+Die lokale GPS-Standplatzprüfung läuft weiter in der App. Kein Standortverlauf
+oder entschlüsseltes BER-Standplatzpaket wird dafür an das Add-on übertragen.

@@ -1,7 +1,7 @@
 name: CallWebhook Push-Dienst
-version: "1.0.4"
+version: "1.1.0"
 slug: callwebhook_push_relay
-description: Gemeinsamer Anruf-Push-Dienst – nur auf dem HA des App-Betreibers installieren
+description: Gemeinsamer Push-Dienst für CallWebhook, HATTS und ComatAlarm
 url: https://github.com/oooonoooorenoooo/-CallWebhook
 startup: application
 boot: auto
@@ -15,9 +15,12 @@ options:
   apns_private_key: ""
   allow_development: false
   hatts_setup_key: ""
+  comatalarm_setup_key: ""
 schema:
   apns_team_id: str
   apns_key_id: str
   apns_private_key: password
   allow_development: bool
   hatts_setup_key: password
+  comatalarm_setup_key: password
+

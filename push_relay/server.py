@@ -18,6 +18,7 @@ from aiohttp import web
 from aioapns import APNs, NotificationRequest, PushType
 
 from .attestation import decode, verify_assertion, verify_attestation
+from .comatalarm import ComatAlarm, BUNDLE_ID as COMATALARM_BUNDLE_ID
 
 BUNDLE_ID = "de.reno.CallWebhook.U98PKCA4W7"
 HATTS_BUNDLE_ID = "de.hatts.app.U98PKCA4W7"
@@ -48,6 +49,7 @@ class Relay:
         """)
         self.app_id, self.root_pem, self.sender = app_id, root_pem, sender
         self.hatts_sender = None
+        self.comatalarm = ComatAlarm(self)
         self.allow_development = allow_development
         self.hatts_token = None
         self.hatts_environment = None
@@ -217,6 +219,7 @@ def application(relay):
     app.router.add_post("/v1/ring", relay.ring)
     app.router.add_post("/hatts/v1/register", relay.hatts_register)
     app.router.add_post("/hatts/v1/speak", relay.hatts_speak)
+    relay.comatalarm.routes(app)
     async def health(request):
         return web.json_response({"ready": True})
     app.router.add_get("/healthz", health)
@@ -264,13 +267,31 @@ def main():
             logging.warning("APNs rejected a HATTS push: %s %s", result.status, result.description)
         return result.is_successful
 
+    async def send_comatalarm(token, environment, payload):
+        cache_key = "comatalarm-" + environment
+        if cache_key not in clients:
+            clients[cache_key] = APNs(key=key, key_id=key_id, team_id=team_id,
+                topic=COMATALARM_BUNDLE_ID, use_sandbox=environment == "development",
+                max_connections=2, max_connection_attempts=1)
+        result = await asyncio.wait_for(clients[cache_key].send_notification(NotificationRequest(
+            device_token=token, push_type=PushType.ALERT, priority=10, time_to_live=300,
+            collapse_key=payload["event_id"],
+            message={"aps": {"alert": {"title": payload["title"], "body": payload["body"]},
+                            "sound": "default", "thread-id": "comatalarm-flights"},
+                     "flight_id": payload.get("flight_id"), "event_id": payload["event_id"]})), timeout=4)
+        if not result.is_successful:
+            logging.warning("APNs rejected a ComatAlarm alert: %s", result.status)
+        return result.is_successful
+
     relay = Relay(os.environ.get("RELAY_DATABASE", "/data/relay.sqlite3"),
         os.environ.get("APP_ID_PREFIX", team_id) + "." + BUNDLE_ID,
         Path(__file__).with_name("apple-app-attest-root.pem").read_bytes(), send,
         allow_development=os.environ.get("ALLOW_DEVELOPMENT") == "1")
     relay.hatts_sender = send_hatts
+    relay.comatalarm.sender = send_comatalarm
     web.run_app(application(relay), host="0.0.0.0", port=8080, access_log=None)
 
 
 if __name__ == "__main__":
     main()
+

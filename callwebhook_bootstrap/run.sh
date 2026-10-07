@@ -18,6 +18,10 @@ fi
 if ! grep -Eq '^[[:space:]]*callwebhook:[[:space:]]*$' /homeassistant/configuration.yaml; then
   printf '\ncallwebhook:\n' >> /homeassistant/configuration.yaml
 fi
+if ! grep -Fq '("POST", "comatalarm/v1/register")' "$TARGET/__init__.py"; then
+  echo "ComatAlarm relay routes missing after download." >&2
+  exit 1
+fi
 echo "CallWebhook backend files installed successfully."
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
   echo "Requesting Home Assistant restart..."
@@ -29,3 +33,4 @@ if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
 else
   echo "Home Assistant must now be restarted manually to load CallWebhook."
 fi
+

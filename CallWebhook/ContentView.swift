@@ -2771,7 +2771,6 @@ private struct SetupWizardView: View {
 }
 
 private struct CallsView: View {
-    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject var monitor: CallMonitor
     @ObservedObject var dialer: DialerModel
     let isSelected: Bool
@@ -2782,7 +2781,6 @@ private struct CallsView: View {
     @State private var searchText = ""
     @State private var isSelectingCalls = false
     @State private var selectedCallIDs: Set<UUID> = []
-    @State private var readingSession = MissedCallReadingSession()
     @AppStorage("hiddenCallIDs") private var hiddenCallIDs = ""
     @AppStorage("hiddenCallRecords") private var hiddenCallRecords = Data()
 
@@ -2821,6 +2819,10 @@ private struct CallsView: View {
                                     } else {
                                         selectedCallIDs.insert(call.id)
                                     }
+                                } else {
+                                    // A tap acknowledges this entry only. Calling still
+                                    // requires a swipe action and an explicit line.
+                                    history.markMissedCallsSeen([call])
                                 }
                             } label: {
                                 HStack(spacing: 12) {
@@ -2861,7 +2863,7 @@ private struct CallsView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityValue(call.isMissedIncomingCall ? (unread ? "Ungelesen" : "Gelesen") : "")
-                            .accessibilityHint(isSelectingCalls ? "Zur Auswahl hinzufügen oder daraus entfernen" : "Zum Anrufen wischen und die gewünschte Leitung auswählen")
+                            .accessibilityHint(isSelectingCalls ? "Zur Auswahl hinzufügen oder daraus entfernen" : "Antippen markiert diesen Anruf als gelesen. Zum Anrufen wischen und die gewünschte Leitung auswählen")
                             .onLongPressGesture {
                                 guard !isSelectingCalls,
                                       let number = call.handles.first?.value,
@@ -2966,37 +2968,13 @@ private struct CallsView: View {
             .onChange(of: selection) { _, _ in
                 selectedCallIDs.removeAll()
                 isSelectingCalls = false
-                updateReadingSession()
             }
-            .onAppear { updateReadingSession() }
-            .onDisappear { finishReadingSession() }
             .onChange(of: isSelected) { _, selected in
-                updateReadingSession()
                 if selected {
                     Task { await history.refresh() }
                 }
             }
-            .onChange(of: history.unreadMissedCalls) { _, _ in updateReadingSession() }
-            .onChange(of: searchText) { _, _ in updateReadingSession() }
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .background { finishReadingSession() }
-                else if phase == .active { updateReadingSession() }
-            }
         }
-    }
-
-    private func updateReadingSession() {
-        guard isSelected, selection == 0 else {
-            finishReadingSession()
-            return
-        }
-        guard scenePhase == .active else { return }
-        readingSession.observe(filteredCalls.filter { history.isUnreadMissedCall($0) })
-    }
-
-    private func finishReadingSession() {
-        let viewed = readingSession.finish()
-        if !viewed.isEmpty { history.markMissedCallsSeen(viewed) }
     }
 
     private var allFilteredCallsSelected: Bool {

@@ -7,6 +7,32 @@ on:
     branches: [ main ]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      publish_app: ${{ steps.scope.outputs.publish_app }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect app changes separately from add-on updates
+        id: scope
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, re, subprocess
+          from pathlib import Path
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          before = event.get('before', '')
+          publish = True
+          if os.environ['GITHUB_EVENT_NAME'] == 'push' and re.fullmatch(r'[0-9a-f]{40}', before) and before != '0' * 40:
+              paths = subprocess.check_output(['git', 'diff', '--name-only', before, os.environ['GITHUB_SHA']], text=True).splitlines()
+              def backend_only(path):
+                  return path.startswith(('push_relay/', 'homeassistant/', 'callwebhook_')) or path == '.github/workflows/build-ios.yml' or path.lower().endswith('.md')
+              publish = any(not backend_only(path) for path in paths)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('publish_app=' + str(publish).lower() + '\n')
+          print('App upload required:', publish)
+          PYCODE
   cleanup-addon:
     runs-on: ubuntu-latest
     steps:
@@ -178,8 +204,8 @@ jobs:
           path: CallWebhook-signed.ipa
 
   testflight:
-    if: ${{ !contains(github.event.head_commit.message, '[skip testflight]') }}
-    needs: [development, push-relay-addon, cleanup-addon]
+    if: ${{ needs.changes.outputs.publish_app == 'true' && !contains(github.event.head_commit.message, '[skip testflight]') }}
+    needs: [changes, development, push-relay-addon, cleanup-addon]
     runs-on: macos-26
     concurrency:
       group: callwebhook-testflight-main
@@ -298,3 +324,4 @@ jobs:
         with:
           name: CallWebhook-TestFlight
           path: CallWebhook-TestFlight.ipa
+

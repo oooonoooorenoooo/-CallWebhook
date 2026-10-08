@@ -203,6 +203,8 @@ class Relay:
 @web.middleware
 async def errors(request, handler):
     try:
+        if request.path != "/comatalarm/v1/watch":
+            request._client_max_size = 32768
         return await handler(request)
     except web.HTTPException:
         raise
@@ -211,7 +213,7 @@ async def errors(request, handler):
 
 
 def application(relay):
-    app = web.Application(client_max_size=32768, middlewares=[errors])
+    app = web.Application(client_max_size=131072, middlewares=[errors])
     app.router.add_post("/v1/challenge", relay.challenge)
     app.router.add_post("/v1/register", relay.register)
     app.router.add_get("/v1/registration", relay.registration)

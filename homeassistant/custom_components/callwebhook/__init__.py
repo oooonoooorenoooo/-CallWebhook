@@ -857,7 +857,7 @@ RELAY_PUBLIC_ROUTES = {("GET", "healthz"), ("POST", "v1/challenge"),
     ("POST", "hatts/v1/register"), ("POST", "hatts/v1/speak"),
     ("POST", "comatalarm/v1/register"), ("POST", "comatalarm/v1/watch"),
     ("GET", "comatalarm/v1/state"), ("DELETE", "comatalarm/v1/registration"),
-    ("POST", "comatalarm/v1/test")}
+    ("POST", "comatalarm/v1/test"), ("GET", "comatalarm/v1/testflight/groups"), ("POST", "comatalarm/v1/testflight/testers")}
 
 
 async def forward_push_relay(request, endpoint):
@@ -870,7 +870,7 @@ async def forward_push_relay(request, endpoint):
         if not setup_key:
             raise web.HTTPUnauthorized()
         headers["X-HATTS-Setup-Key"] = setup_key
-    if endpoint == "comatalarm/v1/register":
+    if endpoint == "comatalarm/v1/register" or endpoint.startswith("comatalarm/v1/testflight/"):
         setup_key = request.headers.get("X-ComatAlarm-Setup-Key", "")
         if not 32 <= len(setup_key) <= 256:
             raise web.HTTPUnauthorized()
@@ -880,18 +880,19 @@ async def forward_push_relay(request, endpoint):
         if not re.fullmatch(r"Bearer [0-9a-f]{64}", authorization):
             raise web.HTTPUnauthorized()
         headers["Authorization"] = authorization
-    if request.content_length is not None and request.content_length > 32768:
-        raise web.HTTPRequestEntityTooLarge(max_size=32768, actual_size=request.content_length)
+    body_limit = 131072 if endpoint == "comatalarm/v1/watch" else 32768
+    if request.content_length is not None and request.content_length > body_limit:
+        raise web.HTTPRequestEntityTooLarge(max_size=body_limit, actual_size=request.content_length)
     body = bytearray()
     async for chunk in request.content.iter_chunked(4096):
         body.extend(chunk)
-        if len(body) > 32768:
-            raise web.HTTPRequestEntityTooLarge(max_size=32768, actual_size=len(body))
+        if len(body) > body_limit:
+            raise web.HTTPRequestEntityTooLarge(max_size=body_limit, actual_size=len(body))
     target = await push_relay_target(request.app["hass"])
     if not target:
         return web.json_response({"ready": False, "error": "Push-Dienst-Add-on nicht gestartet"}, status=503)
     try:
-        async with ClientSession(timeout=ClientTimeout(total=8)) as session:
+        async with ClientSession(timeout=ClientTimeout(total=65 if endpoint.startswith("comatalarm/v1/testflight/") else 8)) as session:
             async with session.request(request.method, target + "/" + endpoint,
                     data=bytes(body) or None, headers=headers, allow_redirects=False) as response:
                 result = await response.read()

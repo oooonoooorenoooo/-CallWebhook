@@ -141,8 +141,8 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_summary_arrival_events_and_ber_gate_mapping(self):
         now=time.time()
-        responses=[{'data':[{'fr24_id':'abc','flight':'TK1729','dest_iata':'BER','datetime_takeoff':now-300,'datetime_landed':now-100}]},
-            {'data':[{'fr24_id':'abc','events':[{'type':'gate_arrival','timestamp':now-60}]}]},
+        responses=[{'data':[{'fr24_id':'abc','flight':'TK1729','dest_iata':'BER','reg':'D-AIDL','datetime_takeoff':now-300,'datetime_landed':now-100}]},
+            {'data':[{'fr24_id':'abc','events':[{'type':'gate_arrival','timestamp':now-60,'details':{'gate_ident':'IGNORED','gate_lat':52.36507,'gate_lon':13.5053}}]}]},
             {'data':{'items':[{'flight_number':'TK 1729','gate':'A03'}]}}]
         class Response:
             status=200
@@ -155,7 +155,43 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             cls.return_value.__aenter__.return_value=session
             provider=FlightProvider()
             result=await provider.lookup(dict(number='TK1729',reference=now-300,destination='BER'),'secret',now)
+        self.assertEqual(result['registration'],'D-AIDL')
+        self.assertEqual(result['aibt_position']['latitude'],52.36507)
         self.assertEqual(result['aibt'],now-60)
         self.assertEqual(result['gate'],'A03')
         self.assertNotIn('stand',result)
         self.assertEqual(result['atd'],now-300)
+
+class RichParkingTests(ComatAlarmTests):
+    async def test_master_only_testflight(self):
+        self.comat.testflight.groups = AsyncMock(return_value=[{'id':'external','name':'Test'}])
+        url = '/comatalarm/v1/testflight/groups'
+        self.assertEqual((await self.client.get(url,headers=self.headers)).status,401)
+        headers = dict(self.headers, **{'X-ComatAlarm-Setup-Key':'s'*64})
+        response = await self.client.get(url,headers=headers)
+        self.assertEqual(response.status,200)
+        self.assertEqual((await response.json())['groups'][0]['id'],'external')
+        self.comat.testflight.add = AsyncMock()
+        response = await self.client.post('/comatalarm/v1/testflight/testers',headers=self.headers,json={'email':'test@example.com','group_id':'external'})
+        self.assertEqual(response.status,401)
+        self.comat.testflight.add.assert_not_called()
+
+    async def test_aibt_coordinate_matches_ber_and_rich_alert(self):
+        self.flight.update(number='LH172',registration='D-AIDL',ata=self.now-50)
+        positions = [{'name':'B05','latitude':52.36507,'longitude':13.5053}, {'name':'B06','latitude':52.367,'longitude':13.506}]
+        response = await self.watch(stand_positions=positions)
+        self.assertEqual(response.status,200)
+        self.comat.provider.lookup.return_value = {'aibt':self.now,'gate':'C1','aibt_position':{'latitude':52.36507,'longitude':13.5053,'timestamp':self.now}}
+        await self.comat.tick(self.now+1)
+        bodies = [c.args[2]['body'] for c in self.comat.sender.call_args_list]
+        self.assertIn('LH172 · D-AIDL · Stand B05',bodies)
+        self.assertFalse(any('Stand C1' in x for x in bodies))
+        state = await (await self.client.get('/comatalarm/v1/state',headers=self.headers)).json()
+        self.assertEqual(state['flights'][0]['stand'],'B05')
+        self.assertEqual(state['flights'][0]['aibt_position']['latitude'],52.36507)
+        self.assertNotIn('stand_index',state)
+        stored = self.comat.db.execute('SELECT stand_index FROM comat_devices').fetchone()[0]
+        self.assertNotIn('B05',stored)
+        self.comat.provider.lookup.reset_mock()
+        await self.comat.tick(self.now+65)
+        self.comat.provider.lookup.assert_not_called()

@@ -3,6 +3,9 @@
 Separate credentials, tables and APNs topic; never uses CallWebhook VoIP grants.
 """
 import asyncio
+import base64
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from .testflight import TestFlight, AppleError, failure
 import hashlib
 import hmac
 import json
@@ -19,7 +22,7 @@ from aiohttp import ClientSession, ClientTimeout, ClientError, web
 
 BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
-FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "cancelled", "diverted")
+FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted")
 
 
 def stamp(value):
@@ -40,7 +43,7 @@ def transitions(old, new):
     for field, flag, title, body in (
         ("atd", "alarmTakeoff", "Abgehoben", f"{number} ist abgehoben."),
         ("ata", "alarmLanded", "Gelandet", f"{number} ist gelandet."),
-        ("aibt", "alarmParking", "Am Stand angekommen", f"{number} hat seine Abstellposition erreicht."),
+        ("aibt", "alarmParking", "Am Stand angekommen", f"{number} · {new.get('registration') or 'Kennzeichen unbekannt'} · Stand {new.get('stand') or 'nicht ermittelt'}"),
         ("cancelled", "alarmCancelled", "Flug gestrichen", f"{number} wurde gestrichen."),
         ("diverted", "alarmDiverted", "Flug umgeleitet", f"{number} wurde umgeleitet."),
     ):
@@ -98,12 +101,12 @@ class FlightProvider:
                     if matches:
                         row = min(matches, key=lambda r: abs((stamp(r.get("datetime_takeoff")) or flight["reference"]) - flight["reference"]))
                         identifier = row.get("fr24_id")
-                        result.update(fr24ID=identifier, atd=stamp(row.get("datetime_takeoff")), ata=stamp(row.get("datetime_landed")))
+                        result.update(registration=row.get("reg") or row.get("registration") or flight.get("registration"), fr24ID=identifier, atd=stamp(row.get("datetime_takeoff")), ata=stamp(row.get("datetime_landed")))
                         actual, planned = row.get("dest_iata_actual"), row.get("dest_iata")
                         if actual and planned and actual != planned:
                             result["diverted"] = True
                     if identifier and (result.get("ata") or flight.get("ata")):
-                        rows = await fr24("historic/flight-events/full", {"flight_ids": identifier, "event_types": "landed,gate_arrival"})
+                        rows = await fr24("historic/flight-events/light", {"flight_ids": identifier, "event_types": "gate_arrival"})
                         for row in rows:
                             if not isinstance(row, dict) or row.get("fr24_id") != identifier:
                                 continue
@@ -113,6 +116,10 @@ class FlightProvider:
                                 when = next((stamp(event.get(k)) for k in ("timestamp", "time", "event_time", "datetime") if stamp(event.get(k))), None)
                                 if event.get("type") == "gate_arrival" and when and when <= now + 60 and when >= (result.get("ata") or flight.get("ata") or when):
                                     result["aibt"] = when
+                                    details = event.get("details") or {}
+                                    lat, lon = details.get("gate_lat"), details.get("gate_lon")
+                                    if valid_coordinate(lat, lon):
+                                        result["aibt_position"] = {"latitude":lat,"longitude":lon,"timestamp":when}
             except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
                 provider_error = "FR24: Token, Tarif oder Verbindung prüfen"
             # BER remains the gate source; a passenger gate is never a GPS stand.
@@ -146,6 +153,7 @@ class ComatAlarm:
     def __init__(self, relay, sender=None, provider=None):
         self.relay, self.db, self.sender = relay, relay.db, sender
         self.provider = provider or FlightProvider()
+        self.testflight = TestFlight()
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
                 id TEXT PRIMARY KEY, credential TEXT NOT NULL, token TEXT NOT NULL,
@@ -157,6 +165,41 @@ class ComatAlarm:
                 created REAL NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(device,event));
         """)
+
+        if "stand_index" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
+            self.db.execute("ALTER TABLE comat_devices ADD COLUMN stand_index TEXT NOT NULL DEFAULT ''")
+
+    def master(self, request):
+        self.device(request)
+        configured = os.environ.get("COMATALARM_SETUP_KEY", "")
+        supplied = request.headers.get("X-ComatAlarm-Setup-Key", "")
+        if len(configured) < 32 or not hmac.compare_digest(configured, supplied):
+            raise web.HTTPUnauthorized()
+        self.relay.limit("comat-testflight", 6, 60)
+
+    async def test_groups(self, request):
+        self.master(request)
+        try:
+            return web.json_response({"groups":await self.testflight.groups()})
+        except AppleError as error:
+            return failure(str(error), 503)
+        except (ClientError, asyncio.TimeoutError):
+            return failure("App Store Connect ist momentan nicht erreichbar.")
+
+    async def add_tester(self, request):
+        self.master(request)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Ungültige Eingabe.")
+            await self.testflight.add(body.get("email"), body.get("group_id"))
+            return web.json_response({"added":True})
+        except ValueError as error:
+            return failure(str(error), 400)
+        except AppleError as error:
+            return failure(str(error), 503)
+        except (ClientError, asyncio.TimeoutError):
+            return failure("App Store Connect ist momentan nicht erreichbar.")
 
     def device(self, request):
         value = request.headers.get("Authorization", "")
@@ -211,14 +254,14 @@ class ComatAlarm:
             for field in ("atd", "ata", "aibt"):
                 if field in row and (stamp(row[field]) is None or not reference - 86400 <= row[field] <= now + 60):
                     raise ValueError("Invalid event time")
-            for field in ("fr24ID", "origin", "destination", "gate"):
+            for field in ("fr24ID", "origin", "destination", "gate", "registration"):
                 if field in row and (not isinstance(row[field], str) or len(row[field]) > 64):
                     raise ValueError("Invalid flight field")
             for field in ("cancelled", "diverted"):
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")
             old = prior.get(row["id"], {})
-            for key in ("atd", "ata", "aibt", "fr24ID", "cancelled", "diverted"):
+            for key in ("atd", "ata", "aibt", "fr24ID", "registration", "stand", "aibt_position", "cancelled", "diverted"):
                 if old.get(key):
                     row[key] = old[key]
             if any(entry["id"] == row["id"] for entry in clean):
@@ -238,7 +281,17 @@ class ComatAlarm:
         api_token = body.get("fr24_token", device["api_token"])
         if not isinstance(api_token, str) or len(api_token) > 8192 or '\n' in api_token or '\r' in api_token:
             raise ValueError("Invalid API token")
+        index = body.get("stand_positions")
+        encrypted_index = device["stand_index"]
+        if index:
+            if not isinstance(index, list) or len(index) > 1000:
+                raise ValueError("Invalid stand index")
+            for position in index:
+                if not isinstance(position, dict) or not isinstance(position.get("name"), str) or not re.fullmatch(r"[A-Z0-9-]{1,16}", position["name"]) or not valid_coordinate(position.get("latitude"), position.get("longitude")):
+                    raise ValueError("Invalid stand position")
+            encrypted_index = protect_index(index)
         with self.db:
+            self.db.execute("UPDATE comat_devices SET stand_index=? WHERE id=?", (encrypted_index, device["id"]))
             self.db.execute("UPDATE comat_devices SET watch=?,preferences=?,api_token=?,foreground_until=?,expires=? WHERE id=?", (json.dumps(clean),json.dumps(prefs),api_token,now+90 if body["foreground"] else 0,now+86400,device["id"]))
         return web.json_response({"watching": len(clean), "background_ready": bool(api_token), "expires": now+86400})
 
@@ -279,6 +332,10 @@ class ComatAlarm:
                     try:
                         changes = dict(await self.provider.lookup(flight, device["api_token"], now))
                         error = changes.pop("_error", error)
+                        if changes.get("aibt_position"):
+                            stand = match_stand(changes["aibt_position"], unprotect_index(device["stand_index"]))
+                            if stand:
+                                changes["stand"] = stand
                         updated = dict(flight, **changes)
                         for event, flag, title, body in transitions(flight, updated):
                             if self.enabled(prefs, now) and prefs.get(flag, True):
@@ -319,7 +376,7 @@ class ComatAlarm:
             self.db.execute("UPDATE comat_devices SET api_token='',watch='[]' WHERE expires<=?",(now,))
 
     def routes(self, app):
-        for method, path, handler in (("POST","register",self.register),("POST","watch",self.watch),("GET","state",self.state),("DELETE","registration",self.revoke),("POST","test",self.test)):
+        for method, path, handler in (("POST","register",self.register),("POST","watch",self.watch),("GET","state",self.state),("DELETE","registration",self.revoke),("POST","test",self.test),("GET","testflight/groups",self.test_groups),("POST","testflight/testers",self.add_tester)):
             app.router.add_route(method,"/comatalarm/v1/"+path,handler)
         async def worker():
             while True:
@@ -339,3 +396,40 @@ class ComatAlarm:
             except asyncio.CancelledError:
                 pass
         app.cleanup_ctx.append(context)
+
+
+def valid_coordinate(lat, lon):
+    return all(isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in (lat,lon)) and 52.3 < lat < 52.45 and 13.4 < lon < 13.65
+
+
+def protect_index(index):
+    key = hashlib.sha256(os.environ["COMATALARM_SETUP_KEY"].encode()).digest()
+    nonce = os.urandom(12)
+    return base64.b64encode(nonce + AESGCM(key).encrypt(nonce, json.dumps(index).encode(), b'comatalarm-stands-v1')).decode()
+
+
+def unprotect_index(value):
+    if not value:
+        return []
+    try:
+        raw = base64.b64decode(value)
+        key = hashlib.sha256(os.environ["COMATALARM_SETUP_KEY"].encode()).digest()
+        return json.loads(AESGCM(key).decrypt(raw[:12], raw[12:], b'comatalarm-stands-v1'))
+    except Exception:
+        return []
+
+
+def match_stand(point, positions):
+    if not valid_coordinate(point.get('latitude'),point.get('longitude')):
+        return None
+    distances = {}
+    for p in positions:
+        a,b = math.radians(point['latitude']),math.radians(p['latitude'])
+        dlon = math.radians(p['longitude']-point['longitude'])
+        h = math.sin((b-a)/2)**2 + math.cos(a)*math.cos(b)*math.sin(dlon/2)**2
+        distance = 6371000 * 2 * math.asin(min(1,math.sqrt(h)))
+        distances[p['name']] = min(distances.get(p['name'],float('inf')),distance)
+    ranked = sorted(distances,key=distances.get)
+    if ranked and distances[ranked[0]] <= 160 and (len(ranked)==1 or distances[ranked[1]]-distances[ranked[0]] >= 12):
+        return ranked[0]
+    return None

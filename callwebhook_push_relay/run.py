@@ -51,6 +51,19 @@ def configure(options, data_dir):
         file.write(key)
     os.chmod(path, 0o600)
     values.update(APNS_KEY_FILE=str(path), RELAY_DATABASE=str(data_dir / "relay.sqlite3"))
+    asc = [options.get(k, "").strip() for k in ("asc_issuer_id", "asc_key_id", "asc_private_key")]
+    if any(asc):
+        from uuid import UUID
+        issuer = str(UUID(asc[0]))
+        if not re.fullmatch(r"[A-Z0-9]{10}", asc[1]):
+            raise ValueError("asc_key_id: zehnstellige App-Store-Connect-Key-ID eintragen")
+        asc_key = normalize_key(asc[2])
+        asc_path = data_dir / "appstoreconnect.p8"
+        fd = os.open(asc_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as file:
+            file.write(asc_key)
+        os.chmod(asc_path, 0o600)
+        values.update(ASC_ISSUER_ID=issuer, ASC_KEY_ID=asc[1], ASC_KEY_FILE=str(asc_path))
     return values
 
 
@@ -59,7 +72,7 @@ if __name__ == "__main__":
     try:
         environment = configure(json.loads(Path("/data/options.json").read_text()), Path("/data"))
     except (ValueError, TypeError, AttributeError):
-        raise SystemExit("Push-Dienst nicht gestartet: APNs-Team-ID, Key-ID und gültigen .p8-Inhalt in der Add-on-Konfiguration hinterlegen. Ein App-Store-Connect-Schlüssel genügt nicht.") from None
+        raise SystemExit("Push-Dienst nicht gestartet: APNs-Konfiguration prüfen; optionale App-Store-Connect-Felder entweder vollständig und gültig ausfüllen oder leer lassen. APNs und App Store Connect verwenden unterschiedliche Schlüssel.") from None
     os.environ.update(environment)
     os.execvp("python", ["python", "-m", "push_relay.server"])
 

@@ -2772,6 +2772,8 @@ private struct SetupWizardView: View {
 
 private struct CallsView: View {
     @EnvironmentObject var monitor: CallMonitor
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var contactNames = CallContactNames()
     @ObservedObject var dialer: DialerModel
     let isSelected: Bool
     @ObservedObject private var history = CallHistoryModel.shared
@@ -2839,9 +2841,13 @@ private struct CallsView: View {
                                         .foregroundStyle(callStatusColor(call))
                                         .frame(width: 28)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(call.handles.first?.value ?? "Unbekannt")
+                                        Text(contactNames.name(for: call.handles.first?.value ?? "") ?? call.handles.first?.value ?? "Unbekannt")
                                             .font(.body)
                                             .fontWeight(unread ? .semibold : .regular)
+                                        if contactNames.name(for: call.handles.first?.value ?? "") != nil {
+                                            Text(call.handles.first?.value ?? "")
+                                                .font(.subheadline).foregroundStyle(.secondary)
+                                        }
                                         Text(call.lineLabel).font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -2921,7 +2927,7 @@ private struct CallsView: View {
                                 .background(.bar)
                             }
                         }
-                        .refreshable { await history.refresh() }
+                        .refreshable { await history.refresh(); await contactNames.refresh() }
                     }
                 } else {
                     List(monitor.log, id: \.self) { entry in
@@ -2932,7 +2938,7 @@ private struct CallsView: View {
             }
             .navigationTitle("Anrufe")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Telefonnummer")
+            .searchable(text: $searchText, prompt: "Name oder Telefonnummer")
             .toolbar {
                 if selection != 1 {
                     if isSelectingCalls {
@@ -2969,9 +2975,16 @@ private struct CallsView: View {
                 selectedCallIDs.removeAll()
                 isSelectingCalls = false
             }
+            .task { if isSelected { await contactNames.refresh() } }
+            .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
+                Task { await contactNames.refresh() }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active && isSelected { Task { await contactNames.refresh() } }
+            }
             .onChange(of: isSelected) { _, selected in
                 if selected {
-                    Task { await history.refresh() }
+                    Task { await history.refresh(); await contactNames.refresh() }
                 }
             }
         }
@@ -3031,7 +3044,8 @@ private struct CallsView: View {
         callsInSection.filter {
             !hiddenIDs.contains($0.id.uuidString) &&
             !LocalCallHistory.isHidden($0, records: hiddenRecords) &&
-            (searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText))
+            (searchText.isEmpty || ($0.handles.first?.value ?? "").localizedCaseInsensitiveContains(searchText) ||
+             (contactNames.name(for: $0.handles.first?.value ?? "") ?? "").localizedCaseInsensitiveContains(searchText))
         }
     }
 

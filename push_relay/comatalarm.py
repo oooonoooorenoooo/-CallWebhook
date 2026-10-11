@@ -153,7 +153,7 @@ class ComatAlarm:
     def __init__(self, relay, sender=None, provider=None):
         self.relay, self.db, self.sender = relay, relay.db, sender
         self.provider = provider or FlightProvider()
-        self.testflight = TestFlight()
+        self.testflight = TestFlight(self.db)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
                 id TEXT PRIMARY KEY, credential TEXT NOT NULL, token TEXT NOT NULL,
@@ -180,7 +180,7 @@ class ComatAlarm:
     async def test_groups(self, request):
         self.master(request)
         try:
-            return web.json_response({"groups":await self.testflight.groups()})
+            return web.json_response({"tester_mode":"internal", "groups":await self.testflight.groups(), "requests":self.testflight.statuses()})
         except AppleError as error:
             return failure(str(error), 503)
         except (ClientError, asyncio.TimeoutError):
@@ -192,8 +192,10 @@ class ComatAlarm:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("Ungültige Eingabe.")
-            await self.testflight.add(body.get("email"), body.get("group_id"))
-            return web.json_response({"added":True})
+            if body.get("mode") != "internal":
+                raise ValueError("Bitte ComatAlarm aktualisieren: Einladungen erfolgen jetzt als interne Tester mit App-Store-Connect-Zugang.")
+            result = await self.testflight.add(body.get("email"), body.get("group_id"), body.get("first_name"), body.get("last_name"))
+            return web.json_response(result)
         except ValueError as error:
             return failure(str(error), 400)
         except AppleError as error:
@@ -387,14 +389,21 @@ class ComatAlarm:
                 except Exception:
                     pass  # Retry; never log tokens or private flight snapshots.
                 await asyncio.sleep(15)
+        async def tester_worker():
+            while True:
+                try:
+                    await self.testflight.reconcile()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass  # Do not log recipient addresses or credentials.
+                await asyncio.sleep(60)
         async def context(app):
-            task = asyncio.create_task(worker())
+            tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker())]
             yield
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         app.cleanup_ctx.append(context)
 
 

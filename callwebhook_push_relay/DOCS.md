@@ -103,3 +103,34 @@ Streichung und Umleitung, soweit die jeweiligen Quellen Ereignisse liefern.
 Eine Passagier-Gate-Angabe wird niemals als bestätigter BER-Standplatz ausgegeben.
 Die lokale GPS-Standplatzprüfung läuft weiter in der App. Kein Standortverlauf
 oder entschlüsseltes BER-Standplatzpaket wird dafür an das Add-on übertragen.
+
+## Interne ComatAlarm-Tester ab Version 1.2.1
+
+Im Master-iPhone unter **Einstellungen → Interne TestFlight-Tester** eine
+vorhandene interne Gruppe auswählen, Vorname, Nachname und E-Mail eintragen
+und **Intern einladen und aktuellen Build zuweisen** wählen. Die Namen braucht
+Apple für neue App-Store-Connect-Benutzer.
+
+Neue Benutzer erhalten ausschließlich `MARKETING`, Zugriff nur auf ComatAlarm
+und keinen Zugriff auf Zertifikate oder Provisioning-Profile. Marketing erlaubt
+auch die Bearbeitung von App-Store-Metadaten; Apple bietet keinen internen
+TestFlight-Zugang ohne App-Store-Connect-Rolle. Bestehende Rollen und App-Rechte
+werden nicht verändert. Die Firebase-Freigabe erfolgt wie bisher separat.
+
+Die Person nimmt zuerst die Apple-Benutzer-Einladung an. Der Dienst prüft offene
+Zuweisungen etwa alle fünf Minuten, ordnet den neuesten verarbeiteten und nicht
+abgelaufenen Build der gewählten internen Gruppe zu und fügt den Tester hinzu.
+Danach nimmt die Person die TestFlight-Einladung an. Bereits bestehende
+Gruppenzuordnungen werden wiederverwendet. Einladungsstatus und Fehler erscheinen
+beim Aktualisieren der Testgruppen. Offene Aufträge bleiben bei Neustarts
+bestehen und enden nach sieben Tagen; automatische Prüfungen verschicken keine
+weiteren Benutzer-Einladungen.
+
+Der Betreiber benötigt `asc_issuer_id`, `asc_key_id` und `asc_private_key` eines
+App-Store-Connect-Schlüssels mit Benutzerverwaltungs- und TestFlight-Rechten im
+Add-on. Der APNs-Schlüssel ist dafür kein Ersatz. Die Apple-Schlüssel bleiben
+im Add-on. Ein regulärer Gerätezugang reicht nicht zur Tester-Verwaltung:
+zusätzlich muss der Master-Einrichtungsschlüssel vorliegen.
+
+Alte App-Versionen dürfen über diesen Endpunkt keine neuen internen Benutzer
+anlegen. Neue App und Add-on müssen deshalb gemeinsam aktualisiert werden.

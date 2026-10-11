@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,67 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         body.update(kw)
         return await self.client.post('/comatalarm/v1/watch', headers=self.headers, json=body)
 
+    async def add_peer(self, flight, **fields):
+        response = await self.client.post('/comatalarm/v1/register', headers={'X-ComatAlarm-Setup-Key':'s'*64},
+            json={'device_id':str(uuid4()), 'token':uuid4().hex*2, 'environment':'production'})
+        self.assertEqual(response.status, 200)
+        headers = {'Authorization':'Bearer '+(await response.json())['credential']}
+        body = dict(flights=[flight], preferences={}, foreground=False, fr24_token='private-api-token')
+        body.update(fields)
+        response = await self.client.post('/comatalarm/v1/watch', headers=headers, json=body)
+        self.assertEqual(response.status, 200)
+        return headers
+
+    async def test_five_devices_share_one_request_and_each_receive_event(self):
+        await self.watch()
+        for offset in range(1, 5):
+            await self.add_peer(dict(self.flight, id=f'phone-{offset}', reference=self.flight['reference']+offset))
+        self.comat.provider.lookup.return_value = {'atd':self.now-10, 'fr24ID':'real-leg'}
+        await asyncio.gather(self.comat.tick(self.now+1), self.comat.tick(self.now+1))
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+        self.assertEqual(self.comat.sender.await_count, 5)
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count, 2)
+        self.assertEqual(self.comat.sender.await_count, 5)
+
+    async def test_staggered_device_uses_shared_result(self):
+        await self.watch()
+        await self.comat.tick(self.now+1)
+        await self.add_peer(dict(self.flight, id='late-phone', reference=self.flight['reference']+3))
+        await self.comat.tick(self.now+30)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+
+    async def test_shared_lookup_keeps_dates_provider_ids_and_tokens_separate(self):
+        await self.watch(flights=[dict(self.flight, fr24ID='leg-a')])
+        await self.add_peer(dict(self.flight, id='leg-b', fr24ID='leg-b'))
+        await self.add_peer(dict(self.flight, id='tomorrow', reference=self.now+86400))
+        await self.add_peer(dict(self.flight, id='other-account', fr24ID='leg-a'), fr24_token='different-token')
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 4)
+
+    async def test_foreground_leader_supplies_background_without_provider(self):
+        await self.watch(foreground=True, api_foreground=True, flights=[dict(self.flight, atd=self.now-10)])
+        await self.add_peer(dict(self.flight, id='background-copy'))
+        await self.comat.tick(self.now+1)
+        self.comat.provider.lookup.assert_not_awaited()
+        self.assertEqual(self.comat.sender.await_count, 1)
+        await self.comat.tick(self.now+100)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+
+    async def test_foreground_follower_does_not_block_background_provider(self):
+        await self.watch(foreground=True, api_foreground=False)
+        await self.add_peer(dict(self.flight, id='background-copy'))
+        await self.comat.tick(self.now+1)
+        self.comat.provider.lookup.assert_awaited_once()
+
+    async def test_failed_provider_request_is_also_shared(self):
+        await self.watch()
+        await self.add_peer(dict(self.flight, id='another-copy'))
+        self.comat.provider.lookup.side_effect = RuntimeError('unavailable')
+        await self.comat.tick(self.now+1)
+        self.comat.provider.lookup.assert_awaited_once()
+        self.assertEqual(self.relay.db.execute("select count(*) from comat_devices where error<>''").fetchone()[0], 2)
+
     async def test_authentication_environment_and_credential_isolation(self):
         for key in ('', 'x'*64): self.assertEqual((await self.register(key)).status,401)
         with patch.dict(os.environ, COMATALARM_SETUP_KEY=''):
@@ -52,7 +114,7 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/comatalarm/v1/state')).status,401)
 
     async def test_watch_validation_and_no_secret_in_state(self):
-        for fields in (dict(flights=[self.flight]*3), dict(flights=[self.flight]*2), dict(preferences={'enabled':'true'}), dict(foreground=1), dict(flights=[dict(self.flight, reference=0)]),dict(fr24_token='x\ny')):
+        for fields in (dict(flights=[self.flight]*3), dict(flights=[self.flight]*2), dict(preferences={'enabled':'true'}), dict(foreground=1), dict(api_foreground=1), dict(flights=[dict(self.flight, reference=0)]),dict(fr24_token='x\ny')):
             self.assertEqual((await self.watch(**fields)).status,400, fields)
         self.assertEqual((await self.watch()).status,200)
         text = await (await self.client.get('/comatalarm/v1/state',headers=self.headers)).text()
@@ -94,6 +156,7 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_remove_or_foreground_during_poll_cannot_deliver_stale_event(self):
         for change in (dict(flights=[]),dict(foreground=True),dict(preferences={'enabled':False})):
+            self.comat.shared_results.clear()
             await self.watch()
             async def lookup(*args):
                 await self.watch(**change)
@@ -202,3 +265,4 @@ class RichParkingTests(ComatAlarmTests):
         self.comat.provider.lookup.reset_mock()
         await self.comat.tick(self.now+65)
         self.comat.provider.lookup.assert_not_called()
+

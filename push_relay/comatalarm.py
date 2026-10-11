@@ -25,6 +25,20 @@ FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCance
 FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted")
 
 
+
+def same_occurrence(a, b):
+    def identifier(f):
+        value = f.get("fr24ID", "").upper()
+        return value if value and not value.startswith(("TEMP_", "NS_")) else None
+    left, right = identifier(a), identifier(b)
+    if left and right:
+        return left == right
+    day = lambda f: datetime.fromtimestamp(f["reference"], ZoneInfo("Europe/Berlin")).date()
+    if a["number"] != b["number"] or day(a) != day(b):
+        return False
+    return all(not a.get(k) or not b.get(k) or a[k] == b[k] for k in ("origin", "destination"))
+
+
 def stamp(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value) if math.isfinite(value) and value > 1_000_000_000 else None
@@ -153,6 +167,8 @@ class ComatAlarm:
     def __init__(self, relay, sender=None, provider=None):
         self.relay, self.db, self.sender = relay, relay.db, sender
         self.provider = provider or FlightProvider()
+        self.poll_lock = asyncio.Lock()
+        self.shared_results = []
         self.testflight = TestFlight(self.db)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
@@ -165,6 +181,9 @@ class ComatAlarm:
                 created REAL NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(device,event));
         """)
+
+        if "api_foreground_until" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
+            self.db.execute("ALTER TABLE comat_devices ADD COLUMN api_foreground_until REAL NOT NULL DEFAULT 0")
 
         if "stand_index" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
             self.db.execute("ALTER TABLE comat_devices ADD COLUMN stand_index TEXT NOT NULL DEFAULT ''")
@@ -280,6 +299,9 @@ class ComatAlarm:
                 if not isinstance(window, list) or len(window) != 2 or not all(isinstance(v, (int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in window) or not now-86400 <= window[0] < window[1] <= now+2*86400:
                     raise ValueError("Invalid calendar window")
             prefs["active_windows"] = windows
+        api_foreground = body.get("api_foreground", body["foreground"])
+        if not isinstance(api_foreground, bool):
+            raise ValueError("Invalid API foreground flag")
         api_token = body.get("fr24_token", device["api_token"])
         if not isinstance(api_token, str) or len(api_token) > 8192 or '\n' in api_token or '\r' in api_token:
             raise ValueError("Invalid API token")
@@ -293,7 +315,7 @@ class ComatAlarm:
                     raise ValueError("Invalid stand position")
             encrypted_index = protect_index(index)
         with self.db:
-            self.db.execute("UPDATE comat_devices SET stand_index=? WHERE id=?", (encrypted_index, device["id"]))
+            self.db.execute("UPDATE comat_devices SET stand_index=?,api_foreground_until=? WHERE id=?", (encrypted_index, now+90 if body["foreground"] and api_foreground else 0, device["id"]))
             self.db.execute("UPDATE comat_devices SET watch=?,preferences=?,api_token=?,foreground_until=?,expires=? WHERE id=?", (json.dumps(clean),json.dumps(prefs),api_token,now+90 if body["foreground"] else 0,now+86400,device["id"]))
         return web.json_response({"watching": len(clean), "background_ready": bool(api_token), "expires": now+86400})
 
@@ -321,8 +343,32 @@ class ComatAlarm:
     def enabled(prefs, now):
         return prefs.get("enabled", True) and ("active_windows" not in prefs or any(start <= now < end for start, end in prefs["active_windows"]))
 
+    async def shared_lookup(self, flight, token, now):
+        # Foreground leadership is separate from a phone merely showing the app.
+        # Its synced event snapshot supplies background recipients without another
+        # provider request for the same flight.
+        for peer in self.db.execute("SELECT watch FROM comat_devices WHERE expires>? AND api_foreground_until>?", (now, now)).fetchall():
+            for snapshot in json.loads(peer["watch"]):
+                if same_occurrence(flight, snapshot):
+                    return {k: snapshot[k] for k in ("atd", "ata", "aibt", "fr24ID", "registration", "gate", "cancelled", "diverted") if snapshot.get(k)}
+        identity = hashlib.sha256(token.encode()).hexdigest()
+        self.shared_results = [entry for entry in self.shared_results if now-entry[2] < 60]
+        for owner, snapshot, _, result in self.shared_results:
+            if owner == identity and same_occurrence(snapshot, flight):
+                return dict(result)
+        try:
+            result = dict(await self.provider.lookup(flight, token, now))
+        except Exception:
+            result = {"_error": "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"}
+        # Store provider IDs discovered by this request to separate real legs.
+        self.shared_results.append((identity, dict(flight, **{k: result[k] for k in ("fr24ID", "origin", "destination") if result.get(k)}), now, result))
+        return dict(result)
+
     async def tick(self, now=None):
-        now = time.time() if now is None else now
+        async with self.poll_lock:
+            await self._tick(time.time() if now is None else now)
+
+    async def _tick(self, now):
         for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND foreground_until<=?", (now,now)).fetchall():
             prefs = json.loads(device["preferences"])
             flights = json.loads(device["watch"])
@@ -332,7 +378,7 @@ class ComatAlarm:
                     if flight.get("aibt") or flight.get("cancelled") or flight.get("diverted"):
                         continue
                     try:
-                        changes = dict(await self.provider.lookup(flight, device["api_token"], now))
+                        changes = await self.shared_lookup(flight, device["api_token"], now)
                         error = changes.pop("_error", error)
                         if changes.get("aibt_position"):
                             stand = match_stand(changes["aibt_position"], unprotect_index(device["stand_index"]))
@@ -442,3 +488,4 @@ def match_stand(point, positions):
     if ranked and distances[ranked[0]] <= 160 and (len(ranked)==1 or distances[ranked[1]]-distances[ranked[0]] >= 12):
         return ranked[0]
     return None
+

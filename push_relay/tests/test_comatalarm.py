@@ -164,17 +164,24 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
 class RichParkingTests(ComatAlarmTests):
     async def test_master_only_testflight(self):
-        self.comat.testflight.groups = AsyncMock(return_value=[{'id':'external','name':'Test'}])
+        self.comat.testflight.groups = AsyncMock(return_value=[{'id':'internal','name':'Test'}])
         url = '/comatalarm/v1/testflight/groups'
         self.assertEqual((await self.client.get(url,headers=self.headers)).status,401)
         headers = dict(self.headers, **{'X-ComatAlarm-Setup-Key':'s'*64})
         response = await self.client.get(url,headers=headers)
         self.assertEqual(response.status,200)
-        self.assertEqual((await response.json())['groups'][0]['id'],'external')
+        self.assertEqual((await response.json())['groups'][0]['id'],'internal')
         self.comat.testflight.add = AsyncMock()
         response = await self.client.post('/comatalarm/v1/testflight/testers',headers=self.headers,json={'email':'test@example.com','group_id':'external'})
         self.assertEqual(response.status,401)
         self.comat.testflight.add.assert_not_called()
+        response = await self.client.post('/comatalarm/v1/testflight/testers',headers=headers,json={'email':'test@example.com','group_id':'internal'})
+        self.assertEqual(response.status,400)  # Old app must not silently grant App Store Connect access.
+        self.comat.testflight.add.assert_not_called()
+        self.comat.testflight.add.return_value = {'state':'pending','message':'Einladung ausstehend'}
+        response = await self.client.post('/comatalarm/v1/testflight/testers',headers=headers,json={'mode':'internal','email':'test@example.com','group_id':'internal','first_name':'Test','last_name':'Person'})
+        self.assertEqual(response.status,200)
+        self.assertEqual((await response.json())['state'],'pending')
 
     async def test_aibt_coordinate_matches_ber_and_rich_alert(self):
         self.flight.update(number='LH172',registration='D-AIDL',ata=self.now-50)

@@ -134,3 +134,9 @@ zusätzlich muss der Master-Einrichtungsschlüssel vorliegen.
 
 Alte App-Versionen dürfen über diesen Endpunkt keine neuen internen Benutzer
 anlegen. Neue App und Add-on müssen deshalb gemeinsam aktualisiert werden.
+
+## Version 1.2.2 – gemeinsame Flugabfragen
+
+Mehrere COMATAlarm-Geräte mit demselben FR24-Token teilen sich die Abfrage eines Fluges für 60 Sekunden, auch bei unterschiedlichen lokalen Eintrags-IDs oder Erstellungszeiten. Benachrichtigungen und Alarm-Einstellungen bleiben pro Gerät getrennt. Ein aktiver API-Leader liefert seine synchronisierten Ereignisse an Hintergrundgeräte; ein geöffnetes Folgegerät blockiert die Hintergrundabfrage nicht.
+
+Für die vollständige Korrektur auch COMATAlarm auf allen Tester-Geräten aktualisieren: Die App führt doppelte Flugeinträge und Verlaufseinträge zusammen und erhält deren alte IDs für spätere Synchronisierung und Löschung.

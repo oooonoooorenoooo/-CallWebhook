@@ -22,7 +22,7 @@ from aiohttp import ClientSession, ClientTimeout, ClientError, web
 
 BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
-FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted")
+FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets")
 
 
 
@@ -51,13 +51,25 @@ def stamp(value):
     return None
 
 
+def package_instructions(packets):
+    result = []
+    for index, value in enumerate(str(packets or "").split("/")[:2]):
+        value = value.strip()
+        if not re.fullmatch(r"[0-9]{1,18}", value):
+            continue
+        count = int(value)
+        if count > 0:
+            result.append(f"{count} {'Paket' if count == 1 else 'Pakete'} {'abzuholen' if index == 0 else 'abzugeben'}")
+    return " · ".join(result)
+
+
 def transitions(old, new):
     number = new["number"]
     events = []
     for field, flag, title, body in (
         ("atd", "alarmTakeoff", "Abgehoben", f"{number} ist abgehoben."),
         ("ata", "alarmLanded", "Gelandet", f"{number} ist gelandet."),
-        ("aibt", "alarmParking", "Am Stand angekommen", f"{number} · {new.get('registration') or 'Kennzeichen unbekannt'} · Stand {new.get('stand') or 'nicht ermittelt'}"),
+        ("aibt", "alarmParking", "Am Stand angekommen", f"{number} · {new.get('registration') or 'Kennzeichen unbekannt'} · Stand {new.get('stand') or 'nicht ermittelt'}" + (" · " + package_instructions(new.get("packets")) if package_instructions(new.get("packets")) else "")),
         ("cancelled", "alarmCancelled", "Flug gestrichen", f"{number} wurde gestrichen."),
         ("diverted", "alarmDiverted", "Flug umgeleitet", f"{number} wurde umgeleitet."),
     ):
@@ -310,7 +322,7 @@ class ComatAlarm:
             for field in ("atd", "ata", "aibt"):
                 if field in row and (stamp(row[field]) is None or not reference - 86400 <= row[field] <= now + 60):
                     raise ValueError("Invalid event time")
-            for field in ("fr24ID", "origin", "destination", "gate", "registration"):
+            for field in ("fr24ID", "origin", "destination", "gate", "registration", "packets"):
                 if field in row and (not isinstance(row[field], str) or len(row[field]) > 64):
                     raise ValueError("Invalid flight field")
             for field in ("cancelled", "diverted"):

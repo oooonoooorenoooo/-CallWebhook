@@ -1,5 +1,5 @@
 name: CallWebhook Push-Dienst
-version: "1.2.3"
+version: "1.2.4"
 slug: callwebhook_push_relay
 description: Gemeinsamer Push-Dienst für CallWebhook, HATTS und ComatAlarm
 url: https://github.com/oooonoooorenoooo/-CallWebhook

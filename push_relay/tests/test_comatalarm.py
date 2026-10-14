@@ -266,3 +266,43 @@ class RichParkingTests(ComatAlarmTests):
         await self.comat.tick(self.now+65)
         self.comat.provider.lookup.assert_not_called()
 
+
+class ArrivalStopTests(ComatAlarmTests):
+    async def test_overdue_arrival_is_not_polled_or_announced_as_parked(self):
+        self.flight.update(ata=self.now-9900, fr24ID='overdue')
+        await self.watch()
+        await self.comat.tick(self.now+1)
+        self.comat.provider.lookup.assert_not_awaited()
+        self.comat.sender.assert_not_awaited()
+
+class ArrivalProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_overdue_provider_has_no_network_even_if_called_directly(self):
+        now = time.time()
+        with patch('push_relay.comatalarm.ClientSession') as session:
+            self.assertEqual(await FlightProvider().lookup(dict(number='LH286', reference=now-12000, ata=now-9900), 'secret', now), {})
+            session.assert_not_called()
+
+    async def test_known_arrival_prioritizes_event_and_applies_retry_after(self):
+        now = time.time()
+        calls = []
+        class Response:
+            status = 429
+            headers = {'Retry-After': '900'}
+            async def __aenter__(self): return self
+            async def __aexit__(self,*args): pass
+        def get(url, **kw):
+            calls.append(url)
+            return Response()
+        session = AsyncMock(); session.get = get
+        provider = FlightProvider()
+        flight = dict(number='LH286',reference=now-3600,ata=now-60,fr24ID='real')
+        with patch('push_relay.comatalarm.ClientSession') as cls:
+            cls.return_value.__aenter__.return_value = session
+            await provider.lookup(flight, 'secret', now)
+            self.assertTrue(calls[0].endswith('historic/flight-events/light'))
+            self.assertFalse(any('flight-summary' in url for url in calls))
+            count = len(calls)
+            await provider.lookup(flight, 'secret', now+301)
+            self.assertEqual(len(calls), count)
+            await provider.lookup(flight, 'secret', now+901)
+            self.assertGreater(len(calls), count)

@@ -68,12 +68,35 @@ def transitions(old, new):
     return events
 
 
+def retry_delay(response, now):
+    from email.utils import parsedate_to_datetime
+    delay = 86400 if response.status == 402 else 300
+    value = getattr(response, "headers", {}).get("Retry-After", "")
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds):
+            return max(delay, seconds)
+    except (ValueError, TypeError):
+        try:
+            return max(delay, parsedate_to_datetime(value).timestamp() - now)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return delay
+
+
+def arrival_tracking_expired(flight, now):
+    return bool(flight.get("ata") and not flight.get("aibt") and now - flight["ata"] >= 25 * 60)
+
+
 class FlightProvider:
     def __init__(self):
         self.cooldown = {}
         self.cache = {}
+        self.requests = {}
 
     async def lookup(self, flight, token, now):
+        if arrival_tracking_expired(flight, now):
+            return {}
         cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"))
         cached = self.cache.get(cache_key)
         if cached and now - cached[0] < 60:
@@ -85,10 +108,15 @@ class FlightProvider:
                 identity = cache_key[0]
                 if self.cooldown.get(identity, 0) > now:
                     raise RuntimeError("FR24: Abfrage pausiert (Tarif, Token oder Limit prüfen)")
+                recent = [t for t in self.requests.get(identity, []) if now-t < 60]
+                self.requests[identity] = recent
+                if len(recent) >= 8:
+                    raise RuntimeError("FR24: Minutenschutz aktiv")
+                recent.append(now)
                 async with session.get("https://fr24api.flightradar24.com/api/" + path, params=params,
                         headers={"Authorization": "Bearer " + token, "Accept": "application/json", "Accept-Version": "v1"}, allow_redirects=False) as response:
                     if response.status in (401, 402, 403, 429):
-                        self.cooldown[identity] = now + 300
+                        self.cooldown[identity] = now + retry_delay(response, now)
                     if response.status != 200:
                         raise RuntimeError(f"FR24: HTTP {response.status}")
                     body = await response.json()
@@ -97,28 +125,31 @@ class FlightProvider:
                     return body["data"]
 
             identifier = flight.get("fr24ID")
+            if identifier and identifier.startswith(("TEMP_", "NS_")):
+                identifier = None
             provider_error = ""
             try:
                 if token:
-                    if identifier:
-                        params = {"flight_ids": identifier}
-                    else:
-                        start = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-                        if start >= now:
-                            raise RuntimeError("Flugtag liegt in der Zukunft")
-                        params = {"flights": flight["number"], "flight_datetime_from": datetime.fromtimestamp(start, timezone.utc).isoformat(), "flight_datetime_to": datetime.fromtimestamp(min((datetime.fromtimestamp(start, ZoneInfo("Europe/Berlin")) + timedelta(days=1)).timestamp(), now), timezone.utc).isoformat()}
-                    rows = await fr24("flight-summary/full", params)
-                    matches = [r for r in rows if isinstance(r, dict) and
-                        (not identifier or r.get("fr24_id") == identifier) and
-                        (identifier or r.get("flight") == flight["number"]) and
-                        (not flight.get("destination") or r.get("dest_iata") == flight["destination"])]
-                    if matches:
-                        row = min(matches, key=lambda r: abs((stamp(r.get("datetime_takeoff")) or flight["reference"]) - flight["reference"]))
-                        identifier = row.get("fr24_id")
-                        result.update(registration=row.get("reg") or row.get("registration") or flight.get("registration"), fr24ID=identifier, atd=stamp(row.get("datetime_takeoff")), ata=stamp(row.get("datetime_landed")))
-                        actual, planned = row.get("dest_iata_actual"), row.get("dest_iata")
-                        if actual and planned and actual != planned:
-                            result["diverted"] = True
+                    if not (identifier and flight.get("ata")):
+                        if identifier:
+                            params = {"flight_ids": identifier}
+                        else:
+                            start = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+                            if start >= now:
+                                raise RuntimeError("Flugtag liegt in der Zukunft")
+                            params = {"flights": flight["number"], "flight_datetime_from": datetime.fromtimestamp(start, timezone.utc).isoformat(), "flight_datetime_to": datetime.fromtimestamp(min((datetime.fromtimestamp(start, ZoneInfo("Europe/Berlin")) + timedelta(days=1)).timestamp(), now), timezone.utc).isoformat()}
+                        rows = await fr24("flight-summary/full", params)
+                        matches = [r for r in rows if isinstance(r, dict) and
+                            (not identifier or r.get("fr24_id") == identifier) and
+                            (identifier or r.get("flight") == flight["number"]) and
+                            (not flight.get("destination") or r.get("dest_iata") == flight["destination"])]
+                        if matches:
+                            row = min(matches, key=lambda r: abs((stamp(r.get("datetime_takeoff")) or flight["reference"]) - flight["reference"]))
+                            identifier = row.get("fr24_id")
+                            result.update(registration=row.get("reg") or row.get("registration") or flight.get("registration"), fr24ID=identifier, atd=stamp(row.get("datetime_takeoff")), ata=stamp(row.get("datetime_landed")))
+                            actual, planned = row.get("dest_iata_actual"), row.get("dest_iata")
+                            if actual and planned and actual != planned:
+                                result["diverted"] = True
                     if identifier and (result.get("ata") or flight.get("ata")):
                         rows = await fr24("historic/flight-events/light", {"flight_ids": identifier, "event_types": "gate_arrival"})
                         for row in rows:
@@ -140,7 +171,11 @@ class FlightProvider:
             date = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).date()
             params = {"arrivalDeparture": "D" if flight.get("origin") == "BER" else "A", "dateFrom": date.isoformat() + "T00:00:00", "dateUntil": (date + timedelta(days=1)).isoformat(), "search": flight["number"], "lang": "de", "page": "1", "terminal": ""}
             try:
+                if self.cooldown.get("ber", 0) > now:
+                    raise RuntimeError("BER: Abfrage pausiert")
                 async with session.get("https://ber.berlin-airport.de/api.flights.json", params=params, allow_redirects=False) as response:
+                    if response.status in (401, 402, 403, 429):
+                        self.cooldown["ber"] = now + retry_delay(response, now)
                     if response.status == 200:
                         body = await response.json()
                         for row in body.get("data", {}).get("items", []):
@@ -154,7 +189,7 @@ class FlightProvider:
                             if any(x in status for x in ("cancel", "annull", "gestrichen")):
                                 result["cancelled"] = True
                             break
-            except (ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
+            except (RuntimeError, ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
                 pass
         result = {k: v for k, v in result.items() if v is not None}
         if provider_error:
@@ -375,7 +410,7 @@ class ComatAlarm:
             if now-device["last_poll"] >= 60:
                 error, pending = "", []
                 for flight in flights:
-                    if flight.get("aibt") or flight.get("cancelled") or flight.get("diverted"):
+                    if arrival_tracking_expired(flight, now) or flight.get("aibt") or flight.get("cancelled") or flight.get("diverted"):
                         continue
                     try:
                         changes = await self.shared_lookup(flight, device["api_token"], now)

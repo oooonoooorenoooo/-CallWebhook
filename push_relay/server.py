@@ -279,8 +279,10 @@ def main():
             device_token=token, push_type=PushType.ALERT, priority=10, time_to_live=300,
             collapse_key=payload["event_id"],
             message={"aps": {"alert": {"title": payload["title"], "body": payload["body"]},
-                            "sound": "default", "thread-id": "comatalarm-flights"},
-                     "flight_id": payload.get("flight_id"), "event_id": payload["event_id"]})), timeout=4)
+                            "sound": "default", "thread-id": "comatalarm-flights",
+                            "mutable-content": 1, "content-available": 1},
+                     "flight_id": payload.get("flight_id"), "event_id": payload["event_id"],
+                     "flight_state": payload.get("flight_state")})), timeout=4)
         if not result.is_successful:
             logging.warning("APNs rejected a ComatAlarm alert: %s", result.status)
         return result.is_successful

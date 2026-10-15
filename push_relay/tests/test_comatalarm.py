@@ -12,6 +12,17 @@ from push_relay.server import Relay, application
 from push_relay.comatalarm import FlightProvider
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
+    async def test_push_contains_confirmed_widget_milestones(self):
+        await self.watch()
+        for index, field in enumerate(("atd", "ata", "aibt")):
+            self.comat.provider.lookup.return_value = {field:self.now+index*61}
+            await self.comat.tick(self.now+index*61+1)
+            payload = self.comat.sender.call_args.args[2]
+            self.assertEqual(payload["flight_state"]["id"], self.flight["id"])
+            self.assertEqual(payload["flight_state"][field], self.now+index*61)
+            self.assertNotIn("api_token", payload["flight_state"])
+            self.assertNotIn("aibt_position", payload["flight_state"])
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, COMATALARM_SETUP_KEY='s'*64)

@@ -435,7 +435,7 @@ class ComatAlarm:
                         for event, flag, title, body in transitions(flight, updated):
                             if self.enabled(prefs, now) and prefs.get(flag, True):
                                 event_id = hashlib.sha256((flight["id"] + ':' + event).encode()).hexdigest()
-                                payload = json.dumps({"title":title,"body":body,"flight_id":flight["id"],"event_id":event_id,"flag":flag})
+                                payload = json.dumps({"title":title,"body":body,"flight_id":flight["id"],"event_id":event_id,"flag":flag,"flight_state":{k:updated[k] for k in ("id","atd","ata","aibt","stand") if updated.get(k)}})
                                 pending.append((device["id"],event_id,payload,now))
                         flight.update(changes)
                     except Exception:

@@ -22,7 +22,7 @@ from aiohttp import ClientSession, ClientTimeout, ClientError, web
 
 BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
-FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets")
+FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand")
 
 
 
@@ -215,6 +215,7 @@ class ComatAlarm:
         self.relay, self.db, self.sender = relay, relay.db, sender
         self.provider = provider or FlightProvider()
         self.poll_lock = asyncio.Lock()
+        self.delivery_lock = asyncio.Lock()
         self.shared_results = []
         self.testflight = TestFlight(self.db)
         self.db.executescript("""
@@ -227,6 +228,9 @@ class ComatAlarm:
                 device TEXT NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL,
                 created REAL NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(device,event));
+            CREATE TABLE IF NOT EXISTS comat_delivered (
+                token TEXT NOT NULL, environment TEXT NOT NULL, event TEXT NOT NULL,
+                sent_at REAL NOT NULL, PRIMARY KEY(token,environment,event));
         """)
 
         if "api_foreground_until" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
@@ -295,6 +299,12 @@ class ComatAlarm:
         if self.db.execute("SELECT count(*) FROM comat_devices").fetchone()[0] >= 10 and not self.db.execute("SELECT 1 FROM comat_devices WHERE id=?", (identifier,)).fetchone():
             raise web.HTTPConflict(text="Device limit reached")
         with self.db:
+            # A phone can be provisioned once manually and again by the master.
+            # Replace obsolete grants for this exact APNs destination, not peers.
+            duplicates = self.db.execute("SELECT id FROM comat_devices WHERE token=? AND environment=? AND id<>?", (token, environment, identifier)).fetchall()
+            for duplicate in duplicates:
+                self.db.execute("DELETE FROM comat_outbox WHERE device=?", (duplicate["id"],))
+                self.db.execute("DELETE FROM comat_devices WHERE id=?", (duplicate["id"],))
             self.db.execute("""INSERT INTO comat_devices(id,credential,token,environment,watch,preferences,api_token,foreground_until,expires)
                 VALUES(?,?,?,?, '[]','{}','',0,?) ON CONFLICT(id) DO UPDATE SET credential=excluded.credential,token=excluded.token,environment=excluded.environment,expires=excluded.expires""",
                 (identifier, hashlib.sha256(credential.encode()).hexdigest(), token, environment, time.time() + 86400))
@@ -307,7 +317,10 @@ class ComatAlarm:
         if not isinstance(body, dict):
             raise ValueError("Invalid watch")
         flights, preferences = body.get("flights"), body.get("preferences")
-        if not isinstance(flights, list) or len(flights) > 2 or not isinstance(preferences, dict):
+        relay_alerts = body.get("relay_alerts", False)
+        if not isinstance(relay_alerts, bool):
+            raise ValueError("Invalid alert ownership")
+        if not isinstance(flights, list) or len(flights) > (14 if relay_alerts else 2) or not isinstance(preferences, dict):
             raise ValueError("Invalid watch")
         now = time.time()
         prior = {f["id"]: f for f in json.loads(device["watch"])}
@@ -322,22 +335,25 @@ class ComatAlarm:
             for field in ("atd", "ata", "aibt"):
                 if field in row and (stamp(row[field]) is None or not reference - 86400 <= row[field] <= now + 60):
                     raise ValueError("Invalid event time")
-            for field in ("fr24ID", "origin", "destination", "gate", "registration", "packets"):
+            for field in ("fr24ID", "origin", "destination", "gate", "registration", "packets", "stand"):
                 if field in row and (not isinstance(row[field], str) or len(row[field]) > 64):
                     raise ValueError("Invalid flight field")
             for field in ("cancelled", "diverted"):
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")
-            old = prior.get(row["id"], {})
+            old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), {})
             for key in ("atd", "ata", "aibt", "fr24ID", "registration", "stand", "aibt_position", "cancelled", "diverted"):
                 if old.get(key):
                     row[key] = old[key]
             if any(entry["id"] == row["id"] for entry in clean):
                 raise ValueError("Duplicate flight")
             clean.append(row)
+        if sum(not (f.get("aibt") or f.get("cancelled") or f.get("diverted")) for f in clean) > 2:
+            raise ValueError("At most two active flights")
         prefs = {key: preferences.get(key, True) for key in FLAGS + ("enabled",)}
         if not all(isinstance(v, bool) for v in prefs.values()) or not isinstance(body.get("foreground"), bool):
             raise ValueError("Invalid preferences")
+        prefs["relay_alerts"] = relay_alerts
         windows = preferences.get("active_windows")
         if windows is not None:
             if not isinstance(windows, list) or len(windows) > 100:
@@ -364,11 +380,18 @@ class ComatAlarm:
         with self.db:
             self.db.execute("UPDATE comat_devices SET stand_index=?,api_foreground_until=? WHERE id=?", (encrypted_index, now+90 if body["foreground"] and api_foreground else 0, device["id"]))
             self.db.execute("UPDATE comat_devices SET watch=?,preferences=?,api_token=?,foreground_until=?,expires=? WHERE id=?", (json.dumps(clean),json.dumps(prefs),api_token,now+90 if body["foreground"] else 0,now+86400,device["id"]))
-        return web.json_response({"watching": len(clean), "background_ready": bool(api_token), "expires": now+86400})
+            if relay_alerts:
+                for row in clean:
+                    old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), None)
+                    # Newly subscribed historical events are a baseline, not alerts.
+                    if old is not None:
+                        self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", self.events(device["id"], old, row, prefs, now))
+        await self.deliver(device["id"], now)
+        return web.json_response({"watching": len(clean), "background_ready": bool(api_token), "expires": now+86400, "relay_alerts": relay_alerts})
 
     async def state(self, request):
         row = self.device(request)
-        return web.json_response({"flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
+        return web.json_response({"relay_alerts_supported": True, "flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -432,11 +455,7 @@ class ComatAlarm:
                             if stand:
                                 changes["stand"] = stand
                         updated = dict(flight, **changes)
-                        for event, flag, title, body in transitions(flight, updated):
-                            if self.enabled(prefs, now) and prefs.get(flag, True):
-                                event_id = hashlib.sha256((flight["id"] + ':' + event).encode()).hexdigest()
-                                payload = json.dumps({"title":title,"body":body,"flight_id":flight["id"],"event_id":event_id,"flag":flag,"flight_state":{k:updated[k] for k in ("id","atd","ata","aibt","stand") if updated.get(k)}})
-                                pending.append((device["id"],event_id,payload,now))
+                        pending.extend(self.events(device["id"], flight, updated, prefs, now))
                         flight.update(changes)
                     except Exception:
                         error = "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"
@@ -446,29 +465,50 @@ class ComatAlarm:
                     changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND foreground_until<=? AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
                     if changed:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
-            for item in self.db.execute("SELECT * FROM comat_outbox WHERE device=? AND sent=0 AND created>?",(device["id"],now-900)).fetchall():
-                current = self.db.execute("SELECT * FROM comat_devices WHERE id=?", (device["id"],)).fetchone()
+        for device in self.db.execute("SELECT id FROM comat_devices WHERE expires>?", (now,)).fetchall():
+            await self.deliver(device["id"], now)
+        with self.db:
+            self.db.execute("DELETE FROM comat_outbox WHERE created<?",(now-2*86400,))
+            self.db.execute("DELETE FROM comat_delivered WHERE sent_at<?", (now-2*86400,))
+            self.db.execute("UPDATE comat_devices SET api_token='',watch='[]' WHERE expires<=?",(now,))
+
+    def events(self, device_id, old, updated, prefs, now):
+        pending = []
+        for event, flag, title, body in transitions(old, updated):
+            if self.enabled(prefs, now) and prefs.get(flag, True):
+                # Independent of a phone's local record ID or corrected FR24 ID.
+                day = datetime.fromtimestamp(updated["reference"], ZoneInfo("Europe/Berlin")).date().isoformat()
+                identity = updated["number"] + ":" + day + ":" + event
+                event_id = hashlib.sha256(identity.encode()).hexdigest()
+                payload = json.dumps({"title":title,"body":body,"flight_id":updated["id"],"event_id":event_id,"flag":flag,
+                    "flight_state":{k:updated[k] for k in ("id","atd","ata","aibt","stand") if updated.get(k)}})
+                pending.append((device_id, event_id, payload, now))
+        return pending
+
+    async def deliver(self, device_id, now):
+        async with self.delivery_lock:
+            for item in self.db.execute("SELECT * FROM comat_outbox WHERE device=? AND sent=0 AND created>?",(device_id,now-900)).fetchall():
+                current = self.db.execute("SELECT * FROM comat_devices WHERE id=?", (device_id,)).fetchone()
                 if not current:
                     break
                 payload = json.loads(item["payload"])
                 prefs = json.loads(current["preferences"])
                 present = any(f["id"] == payload["flight_id"] for f in json.loads(current["watch"]))
-                if not present or not self.enabled(prefs, now) or not prefs.get(payload["flag"], True) or current["foreground_until"] > now:
+                if not present or not self.enabled(prefs, now) or not prefs.get(payload["flag"], True) or (current["foreground_until"] > now and not prefs.get("relay_alerts", False)):
                     with self.db:
-                        self.db.execute("DELETE FROM comat_outbox WHERE device=? AND event=?", (device["id"],item["event"]))
+                        self.db.execute("DELETE FROM comat_outbox WHERE device=? AND event=?", (device_id,item["event"]))
                     continue
+                delivered = self.db.execute("SELECT 1 FROM comat_delivered WHERE token=? AND environment=? AND event=?", (current["token"], current["environment"], item["event"])).fetchone()
                 try:
-                    accepted = bool(self.sender and await self.sender(current["token"],current["environment"],payload))
+                    accepted = bool(delivered) or bool(self.sender and await self.sender(current["token"],current["environment"],payload))
                 except Exception:
                     accepted = False
                 with self.db:
                     if accepted:
-                        self.db.execute("UPDATE comat_outbox SET sent=1 WHERE device=? AND event=?",(device["id"],item["event"]))
+                        self.db.execute("INSERT OR IGNORE INTO comat_delivered VALUES(?,?,?,?)", (current["token"], current["environment"], item["event"], now))
+                        self.db.execute("UPDATE comat_outbox SET sent=1 WHERE device=? AND event=?",(device_id,item["event"]))
                     else:
-                        self.db.execute("UPDATE comat_devices SET error=? WHERE id=?",("Apple hat die Push-Meldung nicht angenommen; APNs-Konfiguration prüfen",device["id"]))
-        with self.db:
-            self.db.execute("DELETE FROM comat_outbox WHERE created<?",(now-2*86400,))
-            self.db.execute("UPDATE comat_devices SET api_token='',watch='[]' WHERE expires<=?",(now,))
+                        self.db.execute("UPDATE comat_devices SET error=? WHERE id=?",("Apple hat die Push-Meldung nicht angenommen; APNs-Konfiguration prüfen",device_id))
 
     def routes(self, app):
         for method, path, handler in (("POST","register",self.register),("POST","watch",self.watch),("GET","state",self.state),("DELETE","registration",self.revoke),("POST","test",self.test),("GET","testflight/groups",self.test_groups),("POST","testflight/testers",self.add_tester)):
@@ -535,4 +575,3 @@ def match_stand(point, positions):
     if ranked and distances[ranked[0]] <= 160 and (len(ranked)==1 or distances[ranked[1]]-distances[ranked[0]] >= 12):
         return ranked[0]
     return None
-

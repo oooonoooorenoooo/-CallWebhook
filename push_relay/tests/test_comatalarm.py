@@ -12,6 +12,65 @@ from push_relay.server import Relay, application
 from push_relay.comatalarm import FlightProvider
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
+    async def test_relay_owns_foreground_transitions_exactly_once(self):
+        response = await self.watch(foreground=True, relay_alerts=True)
+        self.assertTrue((await response.json())["relay_alerts"])
+        updated = dict(self.flight, atd=self.now-10)
+        await self.watch(foreground=True, relay_alerts=True, flights=[updated])
+        self.assertEqual(self.comat.sender.await_count, 1)
+        await self.watch(foreground=True, relay_alerts=True, flights=[updated])
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.sender.await_count, 1)
+        self.comat.provider.lookup.assert_not_awaited()
+        updated.update(ata=self.now-5, aibt=self.now-1, stand="B05")
+        await self.watch(foreground=True, relay_alerts=True, flights=[updated])
+        self.assertEqual(self.comat.sender.await_count, 3)
+        self.assertEqual(self.comat.sender.call_args.args[2]["flight_state"]["stand"], "B05")
+
+    async def test_no_historical_alerts_on_first_foreground_subscription(self):
+        await self.watch(foreground=True, relay_alerts=True, flights=[dict(self.flight, atd=self.now-100, ata=self.now-10)])
+        self.comat.sender.assert_not_awaited()
+
+    async def test_same_phone_different_local_ids_gets_one_alert(self):
+        await self.watch()
+        await self.add_peer(dict(self.flight, id="other-local-id"))
+        # Simulate two pre-existing grants before the new registration safeguard.
+        self.relay.db.execute("UPDATE comat_devices SET token=?", ('a'*64,))
+        self.relay.db.commit()
+        self.comat.provider.lookup.return_value = {"atd":self.now-10}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.sender.await_count, 1)
+        self.assertEqual(self.relay.db.execute("SELECT count(*) FROM comat_outbox WHERE sent=1").fetchone()[0], 2)
+
+    async def test_reprovisioning_same_phone_replaces_old_grant(self):
+        await self.watch()
+        self.id = str(uuid4())
+        response = await self.register()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.relay.db.execute("SELECT count(*) FROM comat_devices").fetchone()[0], 1)
+        self.assertEqual((await self.client.get('/comatalarm/v1/state', headers=self.headers)).status, 401)
+
+    async def test_watch_and_tick_cannot_double_send_pending_event(self):
+        await self.watch(relay_alerts=True)
+        self.comat.sender.return_value = False
+        self.comat.provider.lookup.return_value = {"atd":self.now-10}
+        await self.comat.tick(self.now+1)
+        self.comat.sender.reset_mock()
+        self.comat.sender.return_value = True
+        await asyncio.gather(self.comat.deliver(self.id, self.now+2), self.comat.deliver(self.id, self.now+2))
+        self.assertEqual(self.comat.sender.await_count, 1)
+
+    async def test_legacy_foreground_still_uses_local_alerts(self):
+        await self.watch(foreground=True)
+        await self.watch(foreground=True, flights=[dict(self.flight, atd=self.now-10)])
+        self.comat.sender.assert_not_awaited()
+
+    async def test_completed_handoff_does_not_raise_active_api_limit(self):
+        completed = [dict(self.flight, id=f"done-{i}", aibt=self.now-5) for i in range(12)]
+        active = [self.flight, dict(self.flight, id="second", number="LH186")]
+        self.assertEqual((await self.watch(relay_alerts=True, flights=active+completed)).status, 200)
+        self.assertEqual((await self.watch(relay_alerts=True, flights=active+[dict(self.flight, id="third")])).status, 400)
+
     async def test_push_contains_confirmed_widget_milestones(self):
         await self.watch()
         for index, field in enumerate(("atd", "ata", "aibt")):

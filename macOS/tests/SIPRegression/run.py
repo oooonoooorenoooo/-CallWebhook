@@ -11,7 +11,7 @@ def headers(data):
             key,value=line.split(':',1);out[key.lower()]=value.strip()
     return out
 
-def run(reason, expected, decline=False):
+def run(reason, expected, decline=False, requires_view=True):
     sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);sock.bind(('127.0.0.1',0));sock.settimeout(.1)
     port=sock.getsockname()[1]
     with open(ROOT/'work/sip-regression/runtime.log','w') as log:
@@ -50,15 +50,18 @@ def run(reason, expected, decline=False):
     match=re.search(r'RESULT (\{.*\})',text)
     if not match:
         print(text[-5000:]);raise AssertionError('No result')
-    result=json.loads(match.group(1));result['reason']=reason;result['cancel_to_stop_ms']=round((result['stopped_at']-cancel_at)*1000,2) if cancel_at else None;result['invite_to_view_ms']=round((result['view_at']-invite_at)*1000,2);result['invite_to_incoming_ms']=round((result['incoming_at']-invite_at)*1000,2)
+    result=json.loads(match.group(1));result['reason']=reason;result['cancel_to_stop_ms']=round((result['stopped_at']-cancel_at)*1000,2) if cancel_at else None;result['invite_to_incoming_ms']=round((result['incoming_at']-invite_at)*1000,2)
     print(json.dumps(result),flush=True)
     assert result['status']==expected,(result,expected)
     assert result['ring_stopped']
-    assert result['view_at'] > 0
+    if requires_view:
+        assert result['view_at'] > 0
+        result['invite_to_view_ms'] = round((result['view_at']-invite_at)*1000,2)
     return result
 
-results=[]
-for reason,expected in [('Q.850;cause=26;text="Answered elsewhere"','answered_elsewhere'),('SIP;cause=200;text="Call completed elsewhere"','answered_elsewhere'),('', 'missed'),('Q.850;cause=16;text="Normal clearing"','missed'),('SIP;cause=487;text="Request terminated"','missed')]:
-    results.append(run(reason,expected))
-results.append(run('', 'declined', decline=True))
-(ROOT/'work/sip-regression/results.json').write_text(json.dumps(results,indent=2))
+if __name__ == "__main__":
+    results=[]
+    for reason,expected in [('Q.850;cause=26;text="Answered elsewhere"','answered_elsewhere'),('SIP;cause=200;text="Call completed elsewhere"','answered_elsewhere'),('', 'missed'),('Q.850;cause=16;text="Normal clearing"','missed'),('SIP;cause=487;text="Request terminated"','missed')]:
+        results.append(run(reason,expected))
+    results.append(run('', 'declined', decline=True))
+    (ROOT/'work/sip-regression/results.json').write_text(json.dumps(results,indent=2))

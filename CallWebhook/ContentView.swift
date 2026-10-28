@@ -2849,6 +2849,10 @@ private struct CallsView: View {
                                                 .font(.subheadline).foregroundStyle(.secondary)
                                         }
                                         Text(call.lineLabel).font(.caption).foregroundStyle(.secondary)
+                                        if call.status == "answered_elsewhere" {
+                                            Text("Auf anderem Gerät angenommen")
+                                                .font(.caption).foregroundStyle(.green)
+                                        }
                                     }
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 3) {
@@ -3059,7 +3063,7 @@ private struct CallsView: View {
 
     private func callStatusColor(_ call: CallRecord) -> Color {
         let status = String(describing: call.status).lowercased()
-        return status == "connected" || call.connectedAt != nil || call.duration > 0 ? .green : .red
+        return status == "answered_elsewhere" || status == "connected" || call.connectedAt != nil || call.duration > 0 ? .green : .red
     }
 }
 

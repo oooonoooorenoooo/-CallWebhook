@@ -88,6 +88,10 @@ jobs:
         run: |
           swiftc CallWebhook/SetupAssignments.swift tests/SetupAssignmentsTests.swift -o "$RUNNER_TEMP/setup-assignment-tests"
           "$RUNNER_TEMP/setup-assignment-tests"
+      - name: Test incoming call termination and missed-call badges
+        run: |
+          swiftc CallWebhook/LocalCallHistory.swift CallWebhook/MissedCallState.swift CallWebhook/SIPCallTermination.swift tests/SIPCallTerminationTests.swift -o "$RUNNER_TEMP/sip-termination-tests"
+          "$RUNNER_TEMP/sip-termination-tests"
       - name: Test authenticated push relay
         run: |
           python3 -m venv "$RUNNER_TEMP/relay-tests"

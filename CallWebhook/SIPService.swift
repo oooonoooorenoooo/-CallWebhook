@@ -1,4 +1,6 @@
 import Foundation
+import Combine
+import OSLog
 import linphonesw
 
 @MainActor
@@ -14,6 +16,9 @@ final class SIPService: ObservableObject {
     private var historyID: UUID?
     private var trackedCall: Call?
     private var core: Core?
+    private var delegate: CoreDelegateStub?
+    private var termination = SIPCallTermination()
+    private let logger = Logger(subsystem: "de.reno.CallWebhook", category: "IncomingCall")
     private var iterateTimer: Timer?
 
     private init() {}
@@ -55,6 +60,7 @@ final class SIPService: ObservableObject {
 
         iterateTimer?.invalidate()
         core?.stop()
+        delegate = nil
         CallProximityController.shared.setCallInProgress(false)
         CallAudioRouteController.shared.setCallInProgress(false)
         core = nil
@@ -64,6 +70,7 @@ final class SIPService: ObservableObject {
         // Incoming calls use CallKit: let iOS activate the audio session before
         // Linphone starts capture/playback, especially when waking while locked.
         newCore.callkitEnabled = true
+        newCore.autoIterateEnabled = false
         let auth = try Factory.Instance.createAuthInfo(
             username: resolvedUsername,
             userid: nil,
@@ -86,6 +93,12 @@ final class SIPService: ObservableObject {
         let account = try newCore.createAccount(params: params)
         try newCore.addAccount(account: account)
         newCore.defaultAccount = account
+        let delegate = CoreDelegateStub(onCallStateChanged: { [weak self] _, call, state, _ in
+            // autoIterate is disabled; SDK callbacks run inside our main-actor iterate.
+            MainActor.assumeIsolated { self?.callChanged(call, state: state) }
+        })
+        self.delegate = delegate
+        newCore.addDelegate(delegate: delegate)
         try newCore.start()
 
         core = newCore
@@ -98,16 +111,14 @@ final class SIPService: ObservableObject {
                 self?.status = "SIP: \(stateText)"
                 self?.registered = stateText.lowercased().contains("ok")
             }
-            self?.updateCallState()
         }
         RunLoop.main.add(timer, forMode: .common)
         iterateTimer = timer
     }
 
-    private func updateCallState() {
+    private func callChanged(_ call: Call, state: Call.State) {
         defer { updateProximityMonitoring() }
-        if trackedCall == nil, let call = core?.currentCall,
-           String(describing: call.state).lowercased().contains("incoming") {
+        if trackedCall == nil, state == .IncomingReceived || state == .IncomingEarlyMedia {
             let caller = call.remoteAddress?.username ?? "Unbekannt"
             let id = call.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-ID")
             let lineHeader = call.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-Line")
@@ -117,38 +128,47 @@ final class SIPService: ObservableObject {
                 return
             }
             trackedCall = call
-            core?.callkitEnabled = true
+            termination = SIPCallTermination()
             historyID = IncomingCallProvider.shared.currentCallID
             active = true
             incoming = true
+            logger.notice("incoming_attached id=\(self.historyID?.uuidString ?? "-", privacy: .public)")
             callStatus = "Eingehender Anruf: \(caller)"
         }
-        guard let call = trackedCall else { return }
-        let state = String(describing: call.state).lowercased()
-        if state.contains("error") {
-            finishHistory(reason: "failed")
-            callStatus = "Anruf fehlgeschlagen: \(call.errorInfo?.phrase ?? "SIP-Verbindung abgelehnt")"
-            active = false
-            trackedCall = nil
-            incoming = false
-            IncomingCallProvider.shared.ended(failed: state.contains("error"))
-        } else if state == "end" || state.contains("released") {
-            finishHistory()
-            callStatus = "Anruf beendet"
-            active = false
-            trackedCall = nil
-            incoming = false
-            IncomingCallProvider.shared.ended(failed: state.contains("error"))
-        } else if state.contains("streamsrunning") || state == "connected" {
+        guard let trackedCall, trackedCall === call else { return }
+        switch state {
+        case .Connected, .StreamsRunning:
+            termination.connected = true
             if let historyID { LocalCallHistory.shared.connected(historyID) }
             incoming = false
             callStatus = "Gespräch verbunden"
-        } else if state.contains("incoming") {
-            return
-        } else if state.contains("ringing") {
+        case .End, .Error, .Released:
+            termination.failed = termination.failed || state == .Error
+            var info = call.errorInfo
+            for _ in 0..<4 {
+                guard let current = info else { break }
+                termination.observe(protocolName: current.proto, code: current.protocolCode)
+                logger.notice("terminal_reason protocol=\(current.proto ?? "-", privacy: .public) code=\(current.protocolCode, privacy: .public)")
+                info = current.subErrorInfo
+            }
+            termination.observe(acceptedElsewhere: call.callLog?.status == .AcceptedElsewhere)
+            active = false
+            incoming = false
+            // End CallKit immediately on End/Error, even though the SDK's final
+            // history classification can arrive at Released. Only this UUID ends.
+            if let historyID {
+                IncomingCallProvider.shared.end(id: historyID, failed: termination.failed,
+                    answeredElsewhere: termination.answeredElsewhere, recordHistory: false)
+            }
+            callStatus = termination.answeredElsewhere ? "Auf anderem Gerät angenommen" :
+                (termination.failed ? "Anruf fehlgeschlagen" : "Anruf beendet")
+            if state == .Released {
+                finishHistory(reason: termination.historyReason)
+                self.trackedCall = nil
+            }
+        case .OutgoingRinging:
             callStatus = "Gegenstelle klingelt …"
-        } else {
-            callStatus = "Verbindungsaufbau: \(call.state)"
+        default: break
         }
     }
 
@@ -187,7 +207,7 @@ final class SIPService: ObservableObject {
         }
         guard !IncomingRouteRepair.shared.running else { throw SIPError.provisioning }
         guard registered else { throw SIPError.notRegistered }
-        guard !active, !IncomingCallProvider.shared.hasCall else { throw SIPError.alreadyActive }
+        guard !active, trackedCall == nil, !IncomingCallProvider.shared.hasCall else { throw SIPError.alreadyActive }
         guard let targetNumber = SIPDialNumber.target(number, prefix: prefix) else { throw SIPError.invalidNumber }
         let target = try Factory.Instance.createAddress(addr: "sip:\(targetNumber)@\(host)")
         // Outgoing calls currently use DialerModel's explicitly activated session,
@@ -195,6 +215,7 @@ final class SIPService: ObservableObject {
         core.callkitEnabled = false
         core.configureAudioSession()
         let callID = UUID()
+        termination = SIPCallTermination(incoming: false)
         LocalCallHistory.shared.begin(id: callID, number: number, incoming: false, line: line)
         guard let call = core.inviteAddress(addr: target) else {
             LocalCallHistory.shared.end(callID, reason: "failed")
@@ -251,13 +272,16 @@ final class SIPService: ObservableObject {
     func hangup() {
         defer { updateProximityMonitoring() }
         guard let core else { IncomingCallProvider.shared.ended(); return }
+        let localReason = incoming ? "declined" : "cancelled"
+        termination.localReason = localReason
         do {
             try core.terminateAllCalls()
         } catch {
+            termination.localReason = nil
             status = "SIP-Auflegen fehlgeschlagen: \(error.localizedDescription)"
             return
         }
-        finishHistory(reason: incoming ? "declined" : "cancelled")
+        finishHistory(reason: localReason)
         active = false
         incoming = false
         callStatus = "Anruf beendet"

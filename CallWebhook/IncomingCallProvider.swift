@@ -1,11 +1,13 @@
 import AVFoundation
 import CallKit
+import OSLog
 
 @MainActor
 final class IncomingCallProvider: NSObject, CXProviderDelegate {
     static let shared = IncomingCallProvider()
     private let provider: CXProvider
     private let controller = CXCallController()
+    private let logger = Logger(subsystem: "de.reno.CallWebhook", category: "IncomingCall")
     private var callID: UUID?
     private var waitingForSIP = false
     private var finished: [UUID: Date] = [:]
@@ -84,19 +86,23 @@ final class IncomingCallProvider: NSObject, CXProviderDelegate {
         }
     }
 
-    func end(id: UUID, failed: Bool = false) {
+    func end(id: UUID, failed: Bool = false, answeredElsewhere: Bool = false, recordHistory: Bool = true) {
         guard callID == id else { return }
-        ended(failed: failed)
+        ended(failed: failed, answeredElsewhere: answeredElsewhere, recordHistory: recordHistory)
     }
 
-    func ended(failed: Bool = false) {
+    func ended(failed: Bool = false, answeredElsewhere: Bool = false, recordHistory: Bool = true) {
         guard let id = callID else { return }
-        LocalCallHistory.shared.end(id, reason: failed ? "failed" : nil)
+        if recordHistory {
+            LocalCallHistory.shared.end(id, reason: answeredElsewhere ? "answered_elsewhere" : (failed ? "failed" : nil))
+        }
         finished[id] = Date()
         callID = nil
         waitingForSIP = false
         VoIPPushService.shared.finish(id)
-        provider.reportCall(with: id, endedAt: Date(), reason: failed ? .failed : .remoteEnded)
+        let reason: CXCallEndedReason = answeredElsewhere ? .answeredElsewhere : (failed ? .failed : .remoteEnded)
+        provider.reportCall(with: id, endedAt: Date(), reason: reason)
+        logger.notice("callkit_ended id=\(id.uuidString, privacy: .public) elsewhere=\(answeredElsewhere, privacy: .public)")
     }
 
     nonisolated func providerDidReset(_ provider: CXProvider) {

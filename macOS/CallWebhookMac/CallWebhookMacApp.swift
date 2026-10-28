@@ -168,7 +168,7 @@ struct MacMainView: View {
                 HStack {
                     Text(sip.caller).font(.title2)
                     Spacer()
-                    if sip.incoming { Button("Annehmen") { Task { await sip.answer() } }.tint(.green) }
+                    if sip.incoming { Button("Annehmen") { Task { await sip.answer() } }.tint(.green).onAppear { sip.ringViewAppeared() } }
                     Button(sip.incoming ? "Ablehnen" : "Auflegen") { sip.hangup() }.tint(.red)
                 }
                 HStack {
@@ -193,7 +193,7 @@ struct MacMainView: View {
                     HStack {
                         VStack(alignment: .leading) {
                             Text(record.number)
-                            Text("\(record.direction == "incoming" ? "Eingehend" : "Ausgehend") · \(record.status) · \(Int(record.duration)) s").foregroundStyle(.secondary)
+                            Text("\(record.direction == "incoming" ? "Eingehend" : "Ausgehend") · \(MacCallOutcome.label(record.status)) · \(Int(record.duration)) s").foregroundStyle(.secondary)
                         }
                         Spacer(); Text(record.date, style: .date); Text(record.date, style: .time)
                         Button("Rückruf") { dial(record.number) }.disabled(!sip.registered || sip.active)

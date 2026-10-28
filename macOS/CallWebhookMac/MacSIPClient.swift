@@ -4,6 +4,7 @@ import AVFoundation
 import AppKit
 import UserNotifications
 import linphonesw
+import OSLog
 
 @MainActor
 final class MacSIPClient: ObservableObject {
@@ -13,6 +14,12 @@ final class MacSIPClient: ObservableObject {
     @Published private(set) var active = false
     @Published private(set) var caller = ""
     @Published var error: String?
+    private let logger = Logger(subsystem: "de.reno.CallWebhookMac", category: "CallTiming")
+    private var delegate: CoreDelegateStub?
+    private var receivedAt: TimeInterval?
+    private var acceptedElsewhere = false
+    private var localEndReason: String?
+    private var callFailed = false
     private var core: Core?
     private var timer: Timer?
     private var call: Call?
@@ -51,6 +58,12 @@ final class MacSIPClient: ObservableObject {
         let account = try newCore.createAccount(params: params)
         try newCore.addAccount(account: account)
         newCore.defaultAccount = account
+        let delegate = CoreDelegateStub(onCallStateChanged: { [weak self] _, call, state, _ in
+            // All SDK access, including iterate(), runs on the main actor.
+            MainActor.assumeIsolated { self?.callChanged(call, state: state) }
+        })
+        self.delegate = delegate
+        newCore.addDelegate(delegate: delegate)
         try newCore.start()
         core = newCore
         activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Festnetzanrufe empfangen")
@@ -68,7 +81,7 @@ final class MacSIPClient: ObservableObject {
         stopRinging()
         if let historyID { LocalCallHistory.shared.end(historyID, reason: "interrupted") }
         historyID = nil; call = nil
-        core?.stop(); core = nil
+        core?.stop(); core = nil; delegate = nil
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
         registered = false; active = false; incoming = false
@@ -84,7 +97,12 @@ final class MacSIPClient: ObservableObject {
                 status = "Anmeldung fehlgeschlagen: \(phrase) (\(info.protocolCode))"
             } else { status = "Verbindung zur Telefonanlage wird hergestellt …" }
         }
-        if call == nil, let candidate = core?.currentCall, candidate.state == .IncomingReceived {
+    }
+
+    private func callChanged(_ candidate: Call, state: Call.State) {
+        if call == nil, state == .IncomingReceived {
+            receivedAt = ProcessInfo.processInfo.systemUptime
+            acceptedElsewhere = false; callFailed = false; localEndReason = nil
             // The dedicated endpoint and dialplan enforce line 3 on the server too.
             guard candidate.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-Line") == "3" else {
                 try? candidate.terminate(); return
@@ -94,33 +112,58 @@ final class MacSIPClient: ObservableObject {
             let idHeader = candidate.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-ID")
             let id = idHeader.flatMap(UUID.init(uuidString:)) ?? UUID()
             historyID = id
-            LocalCallHistory.shared.begin(id: id, number: caller, incoming: true, line: 3)
+            logger.notice("incoming_received id=\(id.uuidString, privacy: .public) sip_call_id=\(candidate.callLog?.callId ?? "-", privacy: .public) wall=\(Date().timeIntervalSince1970, privacy: .public)")
             status = "Eingehend: \(caller)"
-            notify(id: id, caller: caller)
+            // Present and sound the ring before encoding/persisting up to 1000 records.
             NSSound.beep()
+            logger.notice("ring_requested wall=\(Date().timeIntervalSince1970, privacy: .public) callback_ms=\((ProcessInfo.processInfo.systemUptime - (self.receivedAt ?? 0)) * 1000, privacy: .public)")
             let ring = Timer(timeInterval: 3, repeats: true) { _ in NSSound.beep() }
             RunLoop.main.add(ring, forMode: .common); ringTimer = ring
+            notify(id: id, caller: caller)
+            LocalCallHistory.shared.begin(id: id, number: caller, incoming: true, line: 3)
         }
-        guard let call else { return }
-        switch call.state {
+        guard let call, call === candidate else { return }
+        switch state {
         case .Connected, .StreamsRunning:
             if let historyID { LocalCallHistory.shared.connected(historyID) }
             incoming = false; stopRinging(); status = "Gespräch verbunden"
         case .End, .Released, .Error:
-            let failed = call.state == .Error
-            if let historyID { LocalCallHistory.shared.end(historyID, reason: call.callLog?.status == .AcceptedElsewhere ? "answered_elsewhere" : (failed ? "failed" : nil)) }
-            stopRinging()
-            historyID = nil; self.call = nil; active = false; incoming = false
-            status = failed ? "Anruf fehlgeschlagen" : "Anruf beendet"
+            // End can precede final CallLog classification. Stop ringing immediately,
+            // but only persist the final outcome at Released.
+            callFailed = callFailed || state == .Error
+            var info = call.errorInfo
+            for _ in 0..<4 {
+                guard let current = info else { break }
+                logger.notice("terminal_reason protocol=\(current.proto ?? "-", privacy: .public) code=\(current.protocolCode, privacy: .public)")
+                acceptedElsewhere = acceptedElsewhere || MacCallOutcome.isAnsweredElsewhere(
+                    protocolName: current.proto, code: current.protocolCode)
+                info = current.subErrorInfo
+            }
+            acceptedElsewhere = acceptedElsewhere || call.callLog?.status == .AcceptedElsewhere
+            stopRinging(); active = false; incoming = false
+            logger.notice("ring_stopped id=\(self.historyID?.uuidString ?? "-", privacy: .public) wall=\(Date().timeIntervalSince1970, privacy: .public)")
+            status = callFailed ? "Anruf fehlgeschlagen" : "Anruf beendet"
+            if state == .Released {
+                if let historyID {
+                    LocalCallHistory.shared.end(historyID, reason: localEndReason ?? (acceptedElsewhere ? "answered_elsewhere" : (callFailed ? "failed" : nil)))
+                }
+                logger.notice("released elsewhere=\(self.acceptedElsewhere, privacy: .public)")
+                historyID = nil; self.call = nil; receivedAt = nil
+            }
         case .OutgoingRinging: status = "Gegenstelle klingelt …"
         default: break
         }
     }
 
+    func ringViewAppeared() {
+        guard incoming, let receivedAt else { return }
+        logger.notice("ring_view_appeared wall=\(Date().timeIntervalSince1970, privacy: .public) callback_ms=\((ProcessInfo.processInfo.systemUptime - receivedAt) * 1000, privacy: .public)")
+    }
+
     func dial(_ input: String) async {
         do {
             guard registered, let core else { throw MacError.message("Keine SIP-Registrierung.") }
-            guard !active else { throw MacError.message("Es läuft bereits ein Gespräch.") }
+            guard !active, call == nil else { throw MacError.message("Es läuft bereits ein Gespräch.") }
             guard let number = SIPDialNumber.normalized(input), number.count <= 64 else {
                 throw MacError.message("Ungültige Rufnummer.")
             }
@@ -128,14 +171,15 @@ final class MacSIPClient: ObservableObject {
                 throw MacError.message("Mikrofonzugriff in den Systemeinstellungen erlauben.")
             }
             // Recheck after the asynchronous permission sheet.
-            guard registered, !active else { throw MacError.message("SIP ist gerade nicht verfügbar.") }
+            guard registered, !active, call == nil else { throw MacError.message("SIP ist gerade nicht verfügbar.") }
             let address = try Factory.Instance.createAddress(addr: "sip:\(number)@\(host)")
             let params = try core.createCallParams(call: nil)
             params.videoEnabled = false
             guard let call = core.inviteAddressWithParams(addr: address, params: params) else {
                 throw MacError.message("Anruf konnte nicht gestartet werden.")
             }
-            self.call = call; active = true; incoming = false; caller = input
+            self.call = call; acceptedElsewhere = false; callFailed = false; localEndReason = nil
+            active = true; incoming = false; caller = input
             let id = UUID(); historyID = id
             LocalCallHistory.shared.begin(id: id, number: input, incoming: false, line: 3)
             status = "Festnetz: Verbindungsaufbau …"
@@ -157,9 +201,11 @@ final class MacSIPClient: ObservableObject {
 
     func hangup() {
         do {
+            // SDK callbacks may run synchronously inside decline/terminate.
+            localEndReason = incoming ? "declined" : "cancelled"
             if incoming { try call?.decline(reason: .Busy) }
             else { try call?.terminate() }
-            if let historyID { LocalCallHistory.shared.end(historyID, reason: incoming ? "declined" : "cancelled") }
+            if let historyID { LocalCallHistory.shared.end(historyID, reason: localEndReason) }
             stopRinging(); historyID = nil; call = nil; active = false; incoming = false
         } catch { self.error = error.localizedDescription }
     }

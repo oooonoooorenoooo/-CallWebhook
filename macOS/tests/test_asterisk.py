@@ -33,7 +33,9 @@ class AsteriskTests(unittest.TestCase):
         self.assertIn('${CW_TARGETS}&${CW_MAC}', extensions)
         self.assertIn('Set(CW_TARGETS=${CW_TARGETS}${CW_MAC})', extensions)
         self.assertIn('GotoIf($["${CW_TARGETS}"=""]?done)', extensions)
-        self.assertIn('b(callwebhook-push-header^s^1(${CW_ID}^${CW_LINE}))', extensions)
+        self.assertIn('Q(ANSWERED_ELSEWHERE)b(callwebhook-push-header^s^1(${CW_ID}^${CW_LINE}))', extensions)
+        # Lowercase c would also relabel caller cancellations as answered elsewhere.
+        self.assertNotIn(',60,c', extensions)
 
     def test_reject_injection_duplicate_and_unrecognized_config(self):
         for password in ('short', 'a' * 24 + '\ncontext=evil', 'a' * 24 + ';'):

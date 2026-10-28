@@ -27,7 +27,7 @@ def prepare(pjsip, extensions, password):
  same => n,ExecIf($["${CW_LINE}"="3"]?Set(CW_MAC=${PJSIP_DIAL_CONTACTS(callwebhook-mac)}))
  same => n,ExecIf($["${CW_TARGETS}"!="" & "${CW_MAC}"!=""]?Set(CW_TARGETS=${CW_TARGETS}&${CW_MAC}):Set(CW_TARGETS=${CW_TARGETS}${CW_MAC}))
  same => n,GotoIf($["${CW_TARGETS}"=""]?done)
- same => n,Dial(${CW_TARGETS},60,b(callwebhook-push-header^s^1(${CW_ID}^${CW_LINE})))'''
+ same => n,Dial(${CW_TARGETS},60,Q(ANSWERED_ELSEWHERE)b(callwebhook-push-header^s^1(${CW_ID}^${CW_LINE})))'''
     pjsip += f'''
 {MARKER}
 [callwebhook-mac-auth]

@@ -56,3 +56,35 @@ swiftc macOS/CallWebhookMac/MacConfiguration.swift macOS/tests/ConfigurationTest
 Zusätzlich bestehen die 68 vorhandenen Python-Backend-Tests (mit PyYAML) und alle 16 Swift-Testprogramme aus dem bestehenden iOS-Workflow. Der unsigned Debug-Build wurde lokal unter Xcode 27.1 erfolgreich kompiliert. Die neue GitHub-Actions-Datei baut ausschließlich die Mac-App, ohne Deployment oder Zugriff auf Produktionsgeheimnisse.
 
 Noch am echten System zu prüfen: Registrierung beider separaten Konten; ein-/ausgehend Leitung 3 mit Audio in beide Richtungen und DTMF; Leitung 1/2 klingelt nur am iPhone; Annahme auf jedem Gerät beendet das Klingeln des anderen; Ablehnen am Mac lässt das iPhone weiterklingeln; Mac offline verhindert iPhone-Annahme nicht; Mikrofon verweigert; VPN-/Netzverlust und Wake; Mailbox-TAM-Zuordnung und Audiowiedergabe. Es wurden keine produktiven Anrufe oder HA-Konfigurationsänderungen vorgenommen.
+
+
+## Rufende und Klingellatenz (Korrektur nach Testanruf)
+
+Der Mac verarbeitet Rufzustände direkt im SDK-Callback. Bei `End`/`Error` endet das Klingeln sofort; erst `Released` schreibt den endgültigen Verlauf. Als Annahme anderswo gelten der SDK-Status `AcceptedElsewhere`, `Reason: SIP;cause=200` oder `Reason: Q.850;cause=26` (auch in verketteten ErrorInfo-Daten). Ein CANCEL, SIP/487 oder Q.850/16 allein bleibt verpasst. Lokales Ablehnen hat Vorrang. Die Anzeige lautet „Auf iPhone/anderem Gerät angenommen“; das Signal identifiziert das annehmende Gerät nicht genauer. Bereits falsch gespeicherte Alteinträge werden ohne zuverlässige nachträgliche Signalisierung nicht umklassifiziert.
+
+Die vorbereitete Serverkonfiguration verwendet ausdrücklich `Q(ANSWERED_ELSEWHERE)` (siehe [Asterisk Dial-Dokumentation](https://docs.asterisk.org/Latest_API/API_Documentation/Dialplan_Applications/Dial/)). Dies ist bereits Asterisks Standard beim Abbruch der übrigen Zweige nach Annahme. **Nicht** die Dial-Option `c` verwenden: Diese würde auch andere Abbrüche als anderswo angenommen markieren. Die Änderung wird nur in vorbereitete Kopien geschrieben; die Live-Telefonanlage wird nicht neu geladen.
+
+Die Ringanzeige und der Ton werden vor der Verlaufsspeicherung ausgelöst. `CallTiming`-Logs enthalten Unix-Zeitpunkte, die gemeinsame Ruf-ID und die SIP-Call-ID, aber keine Rufnummern oder Zugangsdaten:
+
+```sh
+log stream --style compact --predicate 'subsystem == "de.reno.CallWebhookMac" AND category == "CallTiming"'
+```
+
+`incoming_received` markiert den SDK-Callback, **nicht** den Paketempfang. `ring_requested` markiert die Tonanforderung. `ring_view_appeared` markiert SwiftUIs onAppear bei offenem Fenster, nicht die physische Bildschirmausgabe; bei verborgenem Fenster fehlt dieser Eintrag erwartungsgemäß. `ring_stopped` und `terminal_reason` erlauben die Zuordnung zum CANCEL. Für eine echte Asterisk-INVITE-Messung muss dessen zeitgestempelter SIP-Trace anhand derselben Call-ID korreliert werden; die Rechneruhren müssen synchronisiert sein.
+
+Der Server erzeugt den Mac-INVITE weiterhin erst **nach** dem bestehenden iPhone-Push-Handshake mit bis zu 15 Sekunden HTTP-Timeout. Diese Zeit liegt vor der hier gemessenen INVITE-zu-Anzeige-Strecke. Ein Test am realen Anschluss und eine Änderung dieser gemeinsamen Rufsteuerung wurden auf Wunsch nicht durchgeführt; die Ursache der dort beobachteten deutlichen Verzögerung ist damit noch nicht abschließend bestätigt.
+
+### Reproduzierbarer lokaler SIP-Test
+
+Der Test baut denselben `MacSIPClient` mit dem echten Linphone-SDK in einem separaten App-Bundle. Registrierung und Anrufe laufen ausschließlich über Loopback mit Dummy-Zugangsdaten. Ein eigenes Bundle und dessen eigener Verlauf vermeiden Eingriffe in produktive Einstellungen und Schlüsselbunddaten. Ein kleines Testfenster prüft SwiftUI-onAppear. Die Test-App wird nach jedem Fall beendet.
+
+```sh
+mkdir -p work/sip-regression
+xcodegen generate --spec macOS/tests/SIPRegression/project.yml
+xcodebuild -project macOS/tests/SIPRegression/SIPRegression.xcodeproj \
+  -scheme SIPRegression -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath work/ring-build CODE_SIGNING_ALLOWED=NO build
+python3 macOS/tests/SIPRegression/run.py
+```
+
+Abgedeckt: Q.850/26 und SIP/200 → anderswo angenommen; CANCEL ohne Reason, Q.850/16 und SIP/487 → verpasst; lokales Ablehnen → abgelehnt. Jeder Fall prüft das Ende des Klingelzustands. Die JSON-Ergebnisse landen unter `work/sip-regression/results.json`. Beim lokalen Lauf nach der Korrektur lag INVITE-Versand bis SwiftUI-onAppear bei 25–72 ms und CANCEL-Versand bis Ende des Klingelzustands bei 41–55 ms. Dies sind Loopback-Messungen mit Testfenster, keine Messung am produktiven Asterisk und kein garantierter Grenzwert. Der macOS-Debug-Build mit bestehender Entwicklungssignatur war erfolgreich; die korrigierte App wurde auf dem Mac mini installiert. Die iPhone-App bleibt unverändert.

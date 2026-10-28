@@ -102,3 +102,32 @@ Asterisk is provisioned, and the call helper and incoming push are configured.
 Successful discoveries use matching green status rows. Technical slot/service
 listings and separate Asterisk fallback controls are no longer shown. A failed
 automatic setup can be retried without recreating already verified devices.
+
+
+## Parallele Festnetzanrufe auf iPhone und Mac
+
+Ab iPhone-Build 16 verarbeitet `SIPService` die Anrufzustände über direkte Linphone-Callbacks bei explizit deaktivierter automatischer Iteration; die bestehende Main-Runloop iteriert den Core weiterhin alle 20 ms. Dadurch wird das Rufende auch dann verarbeitet, wenn `currentCall` nach einem SIP-CANCEL bereits leer ist. Der eingehende CallKit-Ruf wird bei `End`/`Error` anhand seiner UUID sofort beendet. Seine endgültige lokale Verlaufsklassifizierung wird erst bei `Released` gespeichert. Signalisierung über `AcceptedElsewhere`, SIP Reason 200 oder Q.850 cause 26 wird als „Auf anderem Gerät angenommen“ an CallKit und den lokalen Verlauf weitergegeben. Ein bloßer CANCEL/487 oder normale Rufbeendigung bleibt ohne Annahmenachweis verpasst. Lokales Ablehnen und bereits verbundene Gespräche behalten ihren Status. Der getrennte ausgehende Mobilfunkanruf, etwa bei einem Selbsttest von SIM 1 auf die Festnetznummer, wird nicht verändert.
+
+Die iPhone-Anpassung wurde nach ausdrücklicher Aufhebung der ursprünglichen Vorgabe „iPhone unverändert“ ergänzt. Der Mac-Telefoniecode und die Live-Asterisk-Konfiguration werden dadurch nicht verändert. Frühere falsche Verlaufseinträge werden ohne zuverlässigen Nachweis nicht nachträglich umklassifiziert.
+
+Validierung der Korrektur:
+
+- iOS-Gerätebuild mit Xcode 27.1 und Linphone iOS SDK 5.4.128 erfolgreich; Entwicklungssignatur umfasst Push, Default Calling App und Default Dialer App.
+- Sechs lokale SIP-Tests kompilieren den echten iPhone-`SIPService` mit dem macOS-Linphone-SDK und Plattform-Doubles für CallKit, Mobilfunk und Schlüsselbund. Sie prüfen Q.850/26 und SIP/200 als anderswo angenommen; CANCEL ohne Reason, Q.850/16 und SIP/487 als verpasst; lokales Ablehnen als abgelehnt. Die Tests prüfen auch, dass die Anrufanzeige zum sofortigen Beenden aufgefordert wird, bevor der Verlauf endgültig gespeichert wird. Das ist kein echter CallKit-/iPhone-Klingeltest.
+- Zusätzliche Swift-Tests prüfen Verlauf, Badge, lokale Beendigung und bereits verbundene/ausgehende Gespräche; vorhandene Verlauf-/Badge-Tests und 68 Backend-Tests bestehen.
+
+```sh
+swiftc CallWebhook/LocalCallHistory.swift CallWebhook/MissedCallState.swift \
+  CallWebhook/SIPCallTermination.swift tests/SIPCallTerminationTests.swift -o /tmp/sip-end-tests
+/tmp/sip-end-tests
+python3 macOS/bootstrap_sdk.py
+xcodegen generate --spec tests/SIPServiceRegression/project.yml
+xcodebuild -project tests/SIPServiceRegression/SIPServiceRegression.xcodeproj \
+  -scheme SIPServiceRegression -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath work/ring-build CODE_SIGNING_ALLOWED=NO build
+python3 tests/SIPServiceRegression/run.py
+```
+
+Beim lokalen Build war das Linphone-GitLab nicht erreichbar. Deshalb wurde ausschließlich für diesen Build ein temporäres XcodeGen-Projekt mit dem unveränderten offiziellen SwiftPM-Paket von `https://download.linphone.org/releases/ios/spm/linphone-sdk-swift-ios-5.4.128/` verwendet. SwiftPM prüft dessen Binär-Prüfsummen; Quellenprüfsummen liegen lokal unter `work/ios-sdk/source-sha256.json`. Die reguläre Paketquelle in `project.yml` bleibt unverändert.
+
+Build 16 wurde auf dem verbundenen iPhone als Update derselben Bundle-ID erfolgreich installiert. Noch am echten Anschluss zu bestätigen: iPhone klingelt nach Annahme am Mac nicht weiter; „Auf anderem Gerät angenommen“ erscheint im iPhone-Verlauf und verursacht keinen Verpasst-Badge; echte Nichtannahme bleibt verpasst. Dies sowohl vom selben iPhone als auch von einem anderen Telefon und mit gesperrtem iPhone prüfen. Diagnoseeinträge `incoming_attached`, `terminal_reason` und `callkit_ended` unter `de.reno.CallWebhook` / `IncomingCall` enthalten Ruf-UUIDs und Statuscodes, keine Rufnummern oder Zugangsdaten.

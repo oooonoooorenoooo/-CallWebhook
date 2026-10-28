@@ -27,7 +27,7 @@ jobs:
           if os.environ['GITHUB_EVENT_NAME'] == 'push' and re.fullmatch(r'[0-9a-f]{40}', before) and before != '0' * 40:
               paths = subprocess.check_output(['git', 'diff', '--name-only', before, os.environ['GITHUB_SHA']], text=True).splitlines()
               def backend_only(path):
-                  return path.startswith(('push_relay/', 'homeassistant/', 'callwebhook_')) or path == '.github/workflows/build-ios.yml' or path.lower().endswith('.md')
+                  return path.startswith(('push_relay/', 'homeassistant/', 'callwebhook_', 'macOS/')) or path in ('.github/workflows/build-ios.yml', '.github/workflows/build-macos.yml') or path.lower().endswith('.md')
               publish = any(not backend_only(path) for path in paths)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('publish_app=' + str(publish).lower() + '\n')
@@ -88,6 +88,10 @@ jobs:
         run: |
           swiftc CallWebhook/SetupAssignments.swift tests/SetupAssignmentsTests.swift -o "$RUNNER_TEMP/setup-assignment-tests"
           "$RUNNER_TEMP/setup-assignment-tests"
+      - name: Test incoming call termination and missed-call badges
+        run: |
+          swiftc CallWebhook/LocalCallHistory.swift CallWebhook/MissedCallState.swift CallWebhook/SIPCallTermination.swift tests/SIPCallTerminationTests.swift -o "$RUNNER_TEMP/sip-termination-tests"
+          "$RUNNER_TEMP/sip-termination-tests"
       - name: Test authenticated push relay
         run: |
           python3 -m venv "$RUNNER_TEMP/relay-tests"
@@ -170,11 +174,6 @@ jobs:
           PROFILE_UUID="$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
-      - name: Prepare AppIcon filename
-        run: |
-          if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
-            mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
-          fi
       - name: Enable approved CarPlay and Siri capabilities
         run: |
           security cms -D -i "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" > "$RUNNER_TEMP/capability-profile.plist"
@@ -242,11 +241,6 @@ jobs:
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
-      - name: Prepare AppIcon filename
-        run: |
-          if [ -f CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 ]; then
-            mv CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024 CallWebhook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.jpg
-          fi
       - name: Enable approved CarPlay and Siri capabilities
         run: |
           security cms -D -i "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" > "$RUNNER_TEMP/capability-profile.plist"

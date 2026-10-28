@@ -1,0 +1,24 @@
+name: SIPRegression
+packages:
+  SDK:
+    path: ../../.sdk/linphone
+targets:
+  SIPRegression:
+    type: application
+    platform: macOS
+    deploymentTarget: '13.0'
+    sources:
+      - Harness.swift
+      - ../../CallWebhookMac/MacSIPClient.swift
+      - ../../CallWebhookMac/MacCallOutcome.swift
+      - ../../../CallWebhook/LocalCallHistory.swift
+      - ../../../CallWebhook/SIPDialNumber.swift
+    dependencies:
+      - package: SDK
+        product: linphonesw
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhookMac.SIPRegression
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: '5.0'
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks

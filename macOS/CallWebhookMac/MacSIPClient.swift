@@ -78,7 +78,12 @@ final class MacSIPClient: ObservableObject {
     private func iterate() {
         core?.iterate()
         registered = core?.defaultAccount?.state == .Ok
-        if !active { status = registered ? "Festnetz bereit" : "SIP: \(String(describing: core?.defaultAccount?.state))" }
+        if !active {
+            if registered { status = "Festnetz bereit" }
+            else if let info = core?.defaultAccount?.errorInfo, let phrase = info.phrase, !phrase.isEmpty {
+                status = "Anmeldung fehlgeschlagen: \(phrase) (\(info.protocolCode))"
+            } else { status = "Verbindung zur Telefonanlage wird hergestellt …" }
+        }
         if call == nil, let candidate = core?.currentCall, candidate.state == .IncomingReceived {
             // The dedicated endpoint and dialplan enforce line 3 on the server too.
             guard candidate.remoteParams?.getCustomHeader(headerName: "X-CallWebhook-Line") == "3" else {

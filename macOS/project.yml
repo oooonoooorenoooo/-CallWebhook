@@ -20,6 +20,7 @@ targets:
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallWebhook verbindet sich mit deiner Telefonanlage und Home Assistant im Heimnetz.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallWebhook benötigt das Mikrofon für Festnetztelefonate.
         INFOPLIST_KEY_NSContactsUsageDescription: CallWebhook zeigt Namen aus deinen Kontakten an.
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES

@@ -88,3 +88,10 @@ python3 macOS/tests/SIPRegression/run.py
 ```
 
 Abgedeckt: Q.850/26 und SIP/200 → anderswo angenommen; CANCEL ohne Reason, Q.850/16 und SIP/487 → verpasst; lokales Ablehnen → abgelehnt. Jeder Fall prüft das Ende des Klingelzustands. Die JSON-Ergebnisse landen unter `work/sip-regression/results.json`. Beim lokalen Lauf nach der Korrektur lag INVITE-Versand bis SwiftUI-onAppear bei 25–72 ms und CANCEL-Versand bis Ende des Klingelzustands bei 41–55 ms. Dies sind Loopback-Messungen mit Testfenster, keine Messung am produktiven Asterisk und kein garantierter Grenzwert. Der macOS-Debug-Build mit bestehender Entwicklungssignatur war erfolgreich; die korrigierte App wurde auf dem Mac mini installiert. Die iPhone-App bleibt unverändert.
+
+
+### Schutz vor verdrängter Mac-Registrierung
+
+Der Mac-AOR erlaubt genau einen Kontakt. Ein zweiter direkt gestarteter App-Prozess kann deshalb den Kontakt der ersten Instanz ersetzen, obwohl diese lokal noch „bereit“ anzeigt. Die App prüft vor dem SIP-Start auf eine bereits laufende Instanz mit derselben Bundle-ID und beendet den Zweitprozess ohne Registrierung. Ein manueller Zweitstart aktiviert die vorhandene Instanz. Registrierungswechsel werden als `registration_state` protokolliert. Nach einem Update muss beim Neustart das vollständige Ende des alten Prozesses abgewartet werden, bevor `open` ausgeführt wird.
+
+Nach dem gemeldeten Empfangsausfall wurde die App sauber neu gestartet; Asterisk bestätigte `registration_state=Ok`. Der Doppelstarttest ließ genau die ursprüngliche Prozess-ID bestehen und erzeugte keine zweite SIP-Registrierung. Xcode-Build und Signaturprüfung waren erfolgreich. Ein erneuter echter Festnetzanruf wurde dabei nicht durchgeführt.

@@ -20,6 +20,18 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationC
     private var observations = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A second process would replace the first SIP contact (max_contacts=1).
+        // Launch Services normally reuses the app, but direct executable/Xcode
+        // launches can otherwise create another independent registration.
+        if let identifier = Bundle.main.bundleIdentifier,
+           let existing = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+            .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }) {
+            if !CommandLine.arguments.contains("--background") {
+                existing.activate(options: [.activateIgnoringOtherApps])
+            }
+            NSApp.terminate(nil)
+            return
+        }
         let event = NSAppleEventManager.shared().currentAppleEvent
         let loginLaunch = event?.eventID == kAEOpenApplication &&
             event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem

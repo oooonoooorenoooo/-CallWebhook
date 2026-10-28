@@ -61,6 +61,10 @@ final class MacSIPClient: ObservableObject {
         let delegate = CoreDelegateStub(onCallStateChanged: { [weak self] _, call, state, _ in
             // All SDK access, including iterate(), runs on the main actor.
             MainActor.assumeIsolated { self?.callChanged(call, state: state) }
+        }, onAccountRegistrationStateChanged: { [weak self] _, _, state, _ in
+            MainActor.assumeIsolated {
+                self?.logger.notice("registration_state=\(String(describing: state), privacy: .public)")
+            }
         })
         self.delegate = delegate
         newCore.addDelegate(delegate: delegate)

@@ -1,0 +1,29 @@
+name: Build macOS client (no deployment)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['macOS/**', 'CallWebhook/SIPDialNumber.swift', 'CallWebhook/LocalCallHistory.swift', '.github/workflows/build-macos.yml']
+  push:
+    branches: [main, codex/macos-line3]
+    paths: ['macOS/**', '.github/workflows/build-macos.yml']
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test separate line 3 routing
+        run: python3 -m unittest discover -s macOS/tests -v
+      - name: Test Mac configuration validation
+        run: |
+          swiftc macOS/CallWebhookMac/MacConfiguration.swift macOS/tests/ConfigurationTests.swift -o "$RUNNER_TEMP/mac-config-tests"
+          "$RUNNER_TEMP/mac-config-tests"
+      - name: Fetch and verify pinned official SDK
+        run: python3 macOS/bootstrap_sdk.py
+      - name: Generate independent Mac project
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec macOS/project.yml
+      - name: Build Mac client without signing or deployment
+        run: xcodebuild -project macOS/CallWebhookMac.xcodeproj -scheme CallWebhookMac -configuration Debug -destination 'platform=macOS' -derivedDataPath macOS/.build CODE_SIGNING_ALLOWED=NO build

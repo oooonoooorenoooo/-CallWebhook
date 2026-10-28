@@ -1,0 +1,5 @@
+.sdk/
+.build/
+*.xcodeproj/
+__pycache__/
+tests/__pycache__/

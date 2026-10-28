@@ -4,6 +4,12 @@ import AppKit
 
 final class MacAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Refresh the running Dock tile as well as the bundle's Finder icon.
+        // macOS may retain the generic icon after replacing an installed build.
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }

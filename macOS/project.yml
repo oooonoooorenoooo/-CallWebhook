@@ -19,6 +19,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhookMac
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_IDENTITY: Apple Development
+        DEVELOPMENT_TEAM: U98PKCA4W7
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallWebhook verbindet sich mit deiner Telefonanlage und Home Assistant im Heimnetz.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallWebhook benötigt das Mikrofon für Festnetztelefonate.

@@ -1,3 +1,9 @@
+## 1.2.8
+
+- Apple-Testerprüfung liest die Mitglieder direkt aus den internen ComatAlarm-Testgruppen. Zusätzliche Abgleiche mit den globalen Benutzer- und Testerlisten entfallen.
+- Weiterhin nur bestätigte Apple-E-Mail und echte interne Gruppenzugehörigkeit; keine Administrator-Ausnahme oder automatische Einladung.
+- Unvollständige Apple-Antworten werden als Prüffehler behandelt, nicht als fehlende Mitgliedschaft.
+
 ## 1.2.7
 
 - Prüft die bestätigte Apple-Anmeldung und bestehende interne TestFlight-Mitgliedschaft für ComatAlarm serverseitig.

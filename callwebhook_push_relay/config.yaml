@@ -19,6 +19,7 @@ options:
   asc_issuer_id: ""
   asc_key_id: ""
   asc_private_key: ""
+  comatalarm_firebase_service_account: ""
 schema:
   apns_team_id: str
   apns_key_id: str
@@ -30,4 +31,6 @@ schema:
   asc_issuer_id: str?
   asc_key_id: str?
   asc_private_key: password?
+  comatalarm_firebase_service_account: password?
+
 

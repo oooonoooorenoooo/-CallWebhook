@@ -64,6 +64,24 @@ def configure(options, data_dir):
             file.write(asc_key)
         os.chmod(asc_path, 0o600)
         values.update(ASC_ISSUER_ID=issuer, ASC_KEY_ID=asc[1], ASC_KEY_FILE=str(asc_path))
+    firebase = options.get("comatalarm_firebase_service_account", "").strip()
+    if firebase:
+        account = json.loads(firebase)
+        if (account.get("type") != "service_account" or account.get("project_id") != "comat-ber-alarm"
+                or account.get("token_uri") != "https://oauth2.googleapis.com/token"
+                or not str(account.get("client_email", "")).endswith(".gserviceaccount.com")
+                or not account.get("private_key")):
+            raise ValueError("Firebase-Dienstkonto für comat-ber-alarm erforderlich")
+        firebase_path = data_dir / "comatalarm-firebase.json"
+        fd = os.open(firebase_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as file:
+            json.dump(account, file)
+        os.chmod(firebase_path, 0o600)
+        values["COMATALARM_FIREBASE_CREDENTIALS"] = str(firebase_path)
+    else:
+        # Removing the option must also disable previously configured access.
+        values["COMATALARM_FIREBASE_CREDENTIALS"] = ""
+        (data_dir / "comatalarm-firebase.json").unlink(missing_ok=True)
     return values
 
 
@@ -75,4 +93,5 @@ if __name__ == "__main__":
         raise SystemExit("Push-Dienst nicht gestartet: APNs-Konfiguration prüfen; optionale App-Store-Connect-Felder entweder vollständig und gültig ausfüllen oder leer lassen. APNs und App Store Connect verwenden unterschiedliche Schlüssel.") from None
     os.environ.update(environment)
     os.execvp("python", ["python", "-m", "push_relay.server"])
+
 

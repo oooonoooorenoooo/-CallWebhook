@@ -1,3 +1,10 @@
+## 1.2.11
+
+- Entfernt die Anzahlgrenze aktiver Flüge je Gerät. Die neue App übergibt alle aktiven Flüge innerhalb des bestehenden Zeitfensters.
+- Gemeinsame Abfragen identischer Flugvorgänge und 24-Stunden-Gültigkeit bleiben erhalten.
+- Bei ausgeschöpftem API-Budget erhalten noch nicht erfolgreich abgefragte Flüge im nächsten Durchlauf Vorrang; der Minutenschutz bleibt aktiv.
+- Tests prüfen zwölf gemeinsame Flüge auf fünf Geräten, größere Übergaben und faire Fortsetzung nach dem Minutenlimit.
+
 ## 1.2.10
 
 - Bis zu vier aktive Flüge je Gerät statt zwei; die 24-Stunden-Gültigkeit bleibt erhalten.

@@ -22,6 +22,10 @@ if ! grep -Fq '("POST", "comatalarm/v1/register")' "$TARGET/__init__.py"; then
   echo "ComatAlarm relay routes missing after download." >&2
   exit 1
 fi
+if ! grep -Fq '("POST", "comatalarm/v1/apple/approve")' "$TARGET/__init__.py"; then
+  echo "ComatAlarm Apple approval route missing after download." >&2
+  exit 1
+fi
 echo "CallWebhook backend files installed successfully."
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
   echo "Requesting Home Assistant restart..."

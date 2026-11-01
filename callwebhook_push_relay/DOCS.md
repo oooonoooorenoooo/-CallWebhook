@@ -140,3 +140,13 @@ anlegen. Neue App und Add-on müssen deshalb gemeinsam aktualisiert werden.
 Mehrere COMATAlarm-Geräte mit demselben FR24-Token teilen sich die Abfrage eines Fluges für 60 Sekunden, auch bei unterschiedlichen lokalen Eintrags-IDs oder Erstellungszeiten. Benachrichtigungen und Alarm-Einstellungen bleiben pro Gerät getrennt. Ein aktiver API-Leader liefert seine synchronisierten Ereignisse an Hintergrundgeräte; ein geöffnetes Folgegerät blockiert die Hintergrundabfrage nicht.
 
 Für die vollständige Korrektur auch COMATAlarm auf allen Tester-Geräten aktualisieren: Die App führt doppelte Flugeinträge und Verlaufseinträge zusammen und erhält deren alte IDs für spätere Synchronisierung und Löschung.
+
+## Version 1.2.7 – Apple-Testerfreigabe
+
+Zuerst Bootstrap 1.2.6 aktualisieren und einmal starten, um HA-Komponente 1.2.14 zu installieren. Dabei wird Home Assistant neu gestartet. Dann Push-Dienst 1.2.7 installieren. Bestehende APNs- und App-Store-Connect-Optionen bleiben erhalten.
+
+Im Google-Cloud-Projekt `comat-ber-alarm` ein eigenes Dienstkonto mit `roles/firebaseauth.viewer` und `roles/datastore.user` erstellen. Dessen JSON-Schlüssel ausschließlich in die geheime Add-on-Option `comatalarm_firebase_service_account` eintragen (vollständiges JSON, kein Base64). Nicht in GitHub, Chat oder die App eintragen. Optionen speichern und Push-Dienst neu starten.
+
+Das Dienstkonto kann Firestore-Daten lesen und schreiben. Der Server prüft vor jeder Freigabe eine bestätigte Apple-E-Mail, die angenommene App-Store-Connect-Mitgliedschaft, den Zugriff auf ComatAlarm, eine interne TestFlight-Gruppe und eine mögliche Gerätesperre. Private Relay-Adressen werden nicht freigegeben. Bestehende Apple-Zugangsdaten brauchen Lesezugriff auf Benutzer, Apps und Testgruppen.
+
+Erst nach erfolgreichem Test in der neuen Master-App die strengen BER-Zugriffsregeln aktivieren. Die neue Anmeldung und automatische Freigabe sind durch das Add-on-Update allein noch nicht aktiv. Ohne Dienstkonto bleibt nur die neue Freigabe-Route gesperrt; bisherige Push-Funktionen benötigen diesen Schlüssel nicht.

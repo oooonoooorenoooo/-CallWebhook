@@ -857,7 +857,8 @@ RELAY_PUBLIC_ROUTES = {("GET", "healthz"), ("POST", "v1/challenge"),
     ("POST", "hatts/v1/register"), ("POST", "hatts/v1/speak"),
     ("POST", "comatalarm/v1/register"), ("POST", "comatalarm/v1/watch"),
     ("GET", "comatalarm/v1/state"), ("DELETE", "comatalarm/v1/registration"),
-    ("POST", "comatalarm/v1/test"), ("GET", "comatalarm/v1/testflight/groups"), ("POST", "comatalarm/v1/testflight/testers")}
+    ("POST", "comatalarm/v1/test"), ("POST", "comatalarm/v1/apple/approve"),
+    ("GET", "comatalarm/v1/testflight/groups"), ("POST", "comatalarm/v1/testflight/testers")}
 
 
 async def forward_push_relay(request, endpoint):
@@ -877,7 +878,10 @@ async def forward_push_relay(request, endpoint):
         headers["X-ComatAlarm-Setup-Key"] = setup_key
     if endpoint in ("v1/registration", "v1/ring") or (endpoint.startswith("comatalarm/") and endpoint != "comatalarm/v1/register"):
         authorization = request.headers.get("Authorization", "")
-        if not re.fullmatch(r"Bearer [0-9a-f]{64}", authorization):
+        # Only the Apple approval endpoint uses a Firebase JWT. The relay verifies
+        # its signature, project, expiry and revocation before granting access.
+        pattern = r"Bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+" if endpoint == "comatalarm/v1/apple/approve" else r"Bearer [0-9a-f]{64}"
+        if len(authorization) > 16007 or not re.fullmatch(pattern, authorization):
             raise web.HTTPUnauthorized()
         headers["Authorization"] = authorization
     body_limit = 131072 if endpoint == "comatalarm/v1/watch" else 32768
@@ -892,7 +896,7 @@ async def forward_push_relay(request, endpoint):
     if not target:
         return web.json_response({"ready": False, "error": "Push-Dienst-Add-on nicht gestartet"}, status=503)
     try:
-        async with ClientSession(timeout=ClientTimeout(total=65 if endpoint.startswith("comatalarm/v1/testflight/") else 8)) as session:
+        async with ClientSession(timeout=ClientTimeout(total=65 if endpoint.startswith("comatalarm/v1/testflight/") or endpoint == "comatalarm/v1/apple/approve" else 8)) as session:
             async with session.request(request.method, target + "/" + endpoint,
                     data=bytes(body) or None, headers=headers, allow_redirects=False) as response:
                 result = await response.read()
@@ -2448,4 +2452,5 @@ async def async_setup(
     )
 
     return True
+
 

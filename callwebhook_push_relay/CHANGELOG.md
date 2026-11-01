@@ -1,3 +1,11 @@
+## 1.2.12
+
+- Gemeinsamer API-Status für FR24, FlightStats, FlightAware, BER, ADSB.lol und OpenSky statt separater Statusabfragen jedes Geräts.
+- Automatische Prüfung alle 15 Minuten bei gültiger Registrierung; manuelle Prüfwünsche werden zusammengefasst und auf einen Durchlauf je Minute begrenzt.
+- Ergebnis und Prüfzeitpunkt werden gespeichert und über den bestehenden Geräteabgleich verteilt. Die aktualisierte App kennzeichnet veraltete Ergebnisse.
+- FR24-Minutenbudget und Anbieter-Sperrfristen werden berücksichtigt. Keine neue HA-Proxy-Route erforderlich.
+- Zusätzliche API-Zugangsdaten werden von der aktualisierten App über die bestehende geschützte Verbindung übergeben und nicht an andere Geräte ausgegeben.
+
 ## 1.2.11
 
 - Entfernt die Anzahlgrenze aktiver Flüge je Gerät. Die neue App übergibt alle aktiven Flüge innerhalb des bestehenden Zeitfensters.

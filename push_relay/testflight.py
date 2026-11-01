@@ -72,6 +72,33 @@ class TestFlight:
         return [{'id': x['id'], 'name': x['attributes']['name']} for x in result.get('data', [])
                 if x.get('attributes', {}).get('isInternalGroup') is True]
 
+    async def is_internal_tester(self, email):
+        """Read-only: an invitation or external group is not an authorization."""
+        app_id = await self.app_id()
+        groups = await self.groups(app_id)
+        if not groups:
+            return False
+        users = await self.request('GET', 'users', params={'filter[username]': email, 'limit': '2'})
+        matches = [u for u in users.get('data', []) if u.get('attributes', {}).get('username', '').casefold() == email.casefold()]
+        if len(matches) != 1 or users.get('links', {}).get('next'):
+            return False
+        user = matches[0]
+        attributes = user.get('attributes', {})
+        if not set(attributes.get('roles', [])) & {'ACCOUNT_HOLDER', 'ADMIN', 'APP_MANAGER', 'DEVELOPER', 'MARKETING'}:
+            return False
+        if not attributes.get('allAppsVisible'):
+            visible = await self.request('GET', f"users/{user['id']}/visibleApps", params={'limit': '200'})
+            if app_id not in {x['id'] for x in visible.get('data', [])}:
+                return False
+        testers = await self.request('GET', 'betaTesters', params={'filter[email]': email, 'limit': '2'})
+        matches = [t for t in testers.get('data', []) if t.get('attributes', {}).get('email', '').casefold() == email.casefold()]
+        if len(matches) != 1 or testers.get('links', {}).get('next'):
+            return False
+        for group in groups:
+            if await self.in_group('betaTesters', matches[0]['id'], group['id']):
+                return True
+        return False
+
     async def in_group(self, resource_type, resource_id, group_id):
         # Apple exposes build membership from the group; the inverse GET
         # /builds/{id}/relationships/betaGroups is not an API endpoint.
@@ -182,3 +209,4 @@ class TestFlight:
                     except (AppleError, ValueError, ClientError, asyncio.TimeoutError) as error:
                         result = {'state': 'pending', 'message': str(error) if isinstance(error, (AppleError, ValueError)) else 'Apple momentan nicht erreichbar. Zuweisung wird erneut geprüft.'}
                 self.save_result(row['email'], result)
+

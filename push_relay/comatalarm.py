@@ -6,6 +6,7 @@ import asyncio
 import base64
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .testflight import TestFlight, AppleError, failure
+from .apple_access import AppleAccess
 import hashlib
 import hmac
 import json
@@ -218,6 +219,7 @@ class ComatAlarm:
         self.delivery_lock = asyncio.Lock()
         self.shared_results = []
         self.testflight = TestFlight(self.db)
+        self.apple_access = AppleAccess(self.relay, self.testflight)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
                 id TEXT PRIMARY KEY, credential TEXT NOT NULL, token TEXT NOT NULL,
@@ -511,6 +513,7 @@ class ComatAlarm:
                         self.db.execute("UPDATE comat_devices SET error=? WHERE id=?",("Apple hat die Push-Meldung nicht angenommen; APNs-Konfiguration prüfen",device_id))
 
     def routes(self, app):
+        app.router.add_post("/comatalarm/v1/apple/approve", self.apple_access.approve)
         for method, path, handler in (("POST","register",self.register),("POST","watch",self.watch),("GET","state",self.state),("DELETE","registration",self.revoke),("POST","test",self.test),("GET","testflight/groups",self.test_groups),("POST","testflight/testers",self.add_tester)):
             app.router.add_route(method,"/comatalarm/v1/"+path,handler)
         async def worker():
@@ -575,3 +578,4 @@ def match_stand(point, positions):
     if ranked and distances[ranked[0]] <= 160 and (len(ranked)==1 or distances[ranked[1]]-distances[ranked[0]] >= 12):
         return ranked[0]
     return None
+

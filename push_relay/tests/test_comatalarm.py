@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 from aiohttp.test_utils import TestClient, TestServer
 from push_relay.server import Relay, application
-from push_relay.comatalarm import FlightProvider
+from push_relay.comatalarm import FlightProvider, SharedAPIStatus
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
@@ -41,6 +41,38 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await response.json())["background_ready"])
         response = await self.watch(foreground=True, fr24_token="")
         self.assertFalse((await response.json())["background_ready"])
+
+
+    async def test_shared_api_check_is_coalesced_and_visible_to_all_devices(self):
+        peer = await self.add_peer(self.flight)
+        await asyncio.gather(*[self.watch(api_status_request=True) for _ in range(5)])
+        if self.comat.api_status.task: await self.comat.api_status.task
+        self.assertEqual(self.comat.api_status.probe.await_count, 1)
+        left = await (await self.client.get("/comatalarm/v1/state", headers=self.headers)).json()
+        right = await (await self.client.get("/comatalarm/v1/state", headers=peer)).json()
+        self.assertEqual(left["api_status"], right["api_status"])
+        self.assertEqual(left["api_status"]["results"]["FR24"], "OK")
+        self.assertTrue(left["api_status_supported"])
+        self.assertNotIn("credentials", left["api_status"])
+
+    async def test_shared_api_check_automatic_ttl_and_manual_throttle(self):
+        await self.watch(api_status_request=True, api_credentials={"FLIGHTAWARE_API_KEY":"test-private"})
+        if self.comat.api_status.task: await self.comat.api_status.task
+        checked = self.comat.api_status.snapshot()["checked_at"]
+        await self.comat.api_status.refresh("private", now=checked+61)
+        self.assertEqual(self.comat.api_status.probe.await_count, 1)
+        await self.comat.api_status.refresh("private", manual=True, now=checked+61)
+        self.assertEqual(self.comat.api_status.probe.await_count, 2)
+        await self.comat.api_status.refresh("private", now=checked+962)
+        self.assertEqual(self.comat.api_status.probe.await_count, 3)
+        restored = SharedAPIStatus(self.relay.db, FlightProvider())
+        self.assertEqual(restored.snapshot(), self.comat.api_status.snapshot())
+        self.assertNotIn("test-private", json.dumps(restored.snapshot()))
+
+    async def test_invalid_api_status_inputs_rejected(self):
+        self.assertEqual((await self.watch(api_status_request="yes")).status, 400)
+        self.assertEqual((await self.watch(api_credentials={"URL":"https://example.com"})).status, 400)
+        self.comat.api_status.probe.assert_not_awaited()
 
     async def test_relay_owns_foreground_transitions_exactly_once(self):
         response = await self.watch(foreground=True, relay_alerts=True)
@@ -156,6 +188,7 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.comat = self.relay.comatalarm
         self.comat.provider = AsyncMock()
         self.comat.provider.lookup.return_value = {}
+        self.comat.api_status.probe = AsyncMock(return_value={name: "OK" for name in SharedAPIStatus.names})
         self.comat.sender = AsyncMock(return_value=True)
         app = application(self.relay)
         app.cleanup_ctx.clear() # Deterministic clock; tests drive tick explicitly.
@@ -442,3 +475,48 @@ class ArrivalProviderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(calls), count)
             await provider.lookup(flight, 'secret', now+901)
             self.assertGreater(len(calls), count)
+
+class APIStatusProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fixed_hosts_auth_and_invalid_payloads(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        status = SharedAPIStatus(db, FlightProvider())
+        requests = []
+        class Response:
+            status = 200
+            headers = {}
+            def __init__(self, url): self.url = url
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def json(self):
+                if "fr24api" in self.url: return {"data":[]}
+                if "aeroapi" in self.url: return {"flights":[]}
+                if "adsb.lol" in self.url: return {"unexpected":True}
+                if "auth.opensky" in self.url: return {"access_token":"access"}
+                if "opensky" in self.url: return {"time":123,"states":None}
+                if "ber.berlin" in self.url: return {"data":{"items":[]}}
+                return {}
+        session = AsyncMock()
+        def request(method, url, **kwargs):
+            requests.append((method,url,kwargs))
+            return Response(url)
+        session.request = request
+        with patch("push_relay.comatalarm.ClientSession") as cls:
+            cls.return_value.__aenter__.return_value = session
+            result = await status.probe("fr24-private", {"FLIGHTAWARE_API_KEY":"fa-private","OPENSKY_CLIENT_ID":"id","OPENSKY_CLIENT_SECRET":"os-private"}, time.time())
+            import hashlib
+            status.provider.requests[hashlib.sha256(b"fr24-private").hexdigest()] = [time.time()]*8
+            first_requests = list(requests)
+            requests.clear()
+            limited = await status.probe("fr24-private", {}, time.time())
+            self.assertIn("Minutenschutz", limited["FR24"])
+            self.assertFalse(any("fr24api" in url for _,url,_ in requests))
+        self.assertTrue(result["FR24"].startswith("Erreichbar"))
+        self.assertEqual(result["ADSB.lol"], "Ungültige Antwort")
+        self.assertEqual(result["OpenSky"], "OK")
+        self.assertEqual(result["BER"], "OK")
+        self.assertNotIn("private", json.dumps(result))
+        self.assertTrue(all(not kw["allow_redirects"] for _,_,kw in requests))
+        self.assertEqual(next(kw for _,url,kw in first_requests if "aeroapi" in url)["headers"]["x-apikey"], "fa-private")
+        db.close()

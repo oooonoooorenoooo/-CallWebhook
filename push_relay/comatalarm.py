@@ -211,10 +211,148 @@ class FlightProvider:
         return result
 
 
+
+class SharedAPIStatus:
+    """One persistent health snapshot for the shared provider accounts."""
+    names = ("FR24", "FlightStats", "FlightAware", "BER", "ADSB.lol", "OpenSky")
+    keys = ("FLIGHTSTATS_APP_ID", "FLIGHTSTATS_APP_KEY", "FLIGHTAWARE_API_KEY", "OPENSKY_CLIENT_ID", "OPENSKY_CLIENT_SECRET")
+
+    def __init__(self, db, provider):
+        self.db, self.provider = db, provider
+        self.lock = asyncio.Lock()
+        self.task = None
+        self.cooldown = {}
+        db.execute("CREATE TABLE IF NOT EXISTS comat_api_status (id INTEGER PRIMARY KEY CHECK(id=1), credentials TEXT NOT NULL, checked REAL NOT NULL, results TEXT NOT NULL)")
+        db.execute("INSERT OR IGNORE INTO comat_api_status VALUES(1,'{}',0,'{}')")
+        db.commit()
+
+    def configure(self, values):
+        if values is None:
+            return
+        if not isinstance(values, dict) or any(k not in self.keys or not isinstance(v, str) or len(v)>8192 or any(ord(c)<32 for c in v) for k,v in values.items()):
+            raise ValueError("Invalid provider credentials")
+        old = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
+        updated = dict(old, **{k:v for k,v in values.items() if v})
+        if updated != old:
+            with self.db:
+                self.db.execute("UPDATE comat_api_status SET credentials=?,checked=0,results='{}' WHERE id=1", (json.dumps(updated),))
+
+    def snapshot(self):
+        row = self.db.execute("SELECT checked,results FROM comat_api_status WHERE id=1").fetchone()
+        return {"checked_at": row["checked"], "results": json.loads(row["results"]), "valid_for": 1800}
+
+    def request_refresh(self, token):
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self.refresh(token, manual=True))
+            self.task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+
+    async def refresh(self, token, manual=False, now=None):
+        now = time.time() if now is None else now
+        async with self.lock:
+            snapshot = self.snapshot()
+            if snapshot["checked_at"] and now-snapshot["checked_at"] < (60 if manual else 900):
+                return snapshot
+            credentials = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
+            results = await self.probe(token, credentials, now)
+            with self.db:
+                self.db.execute("UPDATE comat_api_status SET checked=?,results=? WHERE id=1", (now,json.dumps(results)))
+            return self.snapshot()
+
+    async def probe(self, token, credentials, now):
+        day = datetime.fromtimestamp(now, ZoneInfo("Europe/Berlin"))
+        async with ClientSession(timeout=ClientTimeout(total=8)) as session:
+            async def get(name, url, params=None, headers=None, method="GET", data=None):
+                if self.cooldown.get(name, 0) > now:
+                    return "Abfrage pausiert · Anbieter-Sperrfrist"
+                try:
+                    async with session.request(method, url, params=params, headers=headers, data=data, allow_redirects=False) as response:
+                        if response.status in (401,402,403,429):
+                            self.cooldown[name] = now + retry_delay(response, now)
+                        if not 200 <= response.status < 300:
+                            return f"HTTP {response.status}"
+                        payload = await response.json()
+                        return payload if isinstance(payload, (dict,list)) else "Ungültige Antwort"
+                except Exception:
+                    return "Verbindung oder Antwort fehlgeschlagen"
+
+            async def fr24():
+                if not token:
+                    return "Zugang fehlt"
+                identity = hashlib.sha256(token.encode()).hexdigest()
+                if self.provider.cooldown.get(identity,0) > now:
+                    return "Abfrage pausiert · Anbieter-Sperrfrist"
+                recent = [t for t in self.provider.requests.get(identity,[]) if now-t < 60]
+                self.provider.requests[identity] = recent
+                if len(recent) >= 8:
+                    return "Abfrage pausiert · Minutenschutz"
+                recent.append(now)
+                payload = await get("FR24", "https://fr24api.flightradar24.com/api/flight-summary/full",
+                    {"flights":"LH194", "flight_datetime_from":day.replace(hour=0,minute=0,second=0,microsecond=0).isoformat(), "flight_datetime_to":day.isoformat()},
+                    {"Authorization":"Bearer "+token,"Accept":"application/json","Accept-Version":"v1"})
+                if self.cooldown.get("FR24",0)>now:
+                    self.provider.cooldown[identity] = self.cooldown["FR24"]
+                return payload
+
+            async def flightstats():
+                if credentials.get("FLIGHTSTATS_APP_ID") and credentials.get("FLIGHTSTATS_APP_KEY"):
+                    return await get("FlightStats", f"https://api.flightstats.com/flex/flightstatus/rest/v2/json/flight/status/LH/194/dep/{day.year}/{day.month}/{day.day}",
+                        {"appId":credentials["FLIGHTSTATS_APP_ID"],"appKey":credentials["FLIGHTSTATS_APP_KEY"],"utc":"false"})
+                return await get("FlightStats", f"https://www.flightstats.com/v2/api-next/flight-tracker/LH/194/{day.year}/{day.month}/{day.day}",
+                    headers={"Accept":"application/json","User-Agent":"ComatAlarm/1.0","Referer":"https://www.flightstats.com/"})
+
+            async def flightaware():
+                key = credentials.get("FLIGHTAWARE_API_KEY")
+                if not key:
+                    return "Zugang fehlt"
+                return await get("FlightAware", "https://aeroapi.flightaware.com/aeroapi/flights/DLH194",
+                    {"start":(day-timedelta(days=1)).isoformat(),"end":day.isoformat()}, {"x-apikey":key})
+
+            async def opensky():
+                headers = {}
+                if credentials.get("OPENSKY_CLIENT_ID") and credentials.get("OPENSKY_CLIENT_SECRET"):
+                    auth = await get("OpenSky", "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token",
+                        method="POST", data={"grant_type":"client_credentials","client_id":credentials["OPENSKY_CLIENT_ID"],"client_secret":credentials["OPENSKY_CLIENT_SECRET"]})
+                    if isinstance(auth,str):
+                        return auth
+                    if not isinstance(auth,dict) or not auth.get("access_token"):
+                        return "Anmeldung fehlgeschlagen"
+                    headers["Authorization"] = "Bearer "+auth["access_token"]
+                return await get("OpenSky", "https://opensky-network.org/api/states/all",
+                    {"lamin":"52.30","lomin":"13.38","lamax":"52.44","lomax":"13.62"}, headers)
+
+            responses = await asyncio.gather(fr24(), flightstats(), flightaware(),
+                get("BER", "https://ber.berlin-airport.de/api.flights.json", {"arrivalDeparture":"A","dateFrom":day.date().isoformat()+"T00:00:00","dateUntil":(day.date()+timedelta(days=1)).isoformat(),"search":"LH194","lang":"de","page":"1","terminal":""}),
+                get("ADSB.lol", "https://api.adsb.lol/v2/point/52.3667/13.5033/10"), opensky())
+            result = {}
+            for name,payload in zip(self.names,responses):
+                if isinstance(payload,str):
+                    result[name] = payload
+                elif isinstance(payload,dict) and payload.get("error"):
+                    result[name] = "Anbieter meldet Fehler"
+                elif not isinstance(payload,dict):
+                    result[name] = "Ungültige Antwort"
+                elif name == "FR24" and not isinstance(payload.get("data"),list):
+                    result[name] = "Ungültige Antwort"
+                elif name == "FlightAware" and not isinstance(payload.get("flights"),list):
+                    result[name] = "Ungültige Antwort"
+                elif name == "ADSB.lol" and not isinstance(payload.get("ac"),list):
+                    result[name] = "Ungültige Antwort"
+                elif name == "OpenSky" and "time" not in payload:
+                    result[name] = "Ungültige Antwort"
+                elif name == "BER" and not isinstance(payload.get("data"),dict):
+                    result[name] = "Ungültige Antwort"
+                elif not payload or (name == "FR24" and not payload["data"]) or (name == "FlightAware" and not payload["flights"]):
+                    result[name] = "Erreichbar · keine Flugdaten für Prüfflug"
+                else:
+                    result[name] = "OK"
+            return result
+
+
 class ComatAlarm:
     def __init__(self, relay, sender=None, provider=None):
         self.relay, self.db, self.sender = relay, relay.db, sender
         self.provider = provider or FlightProvider()
+        self.api_status = SharedAPIStatus(self.db, self.provider)
         self.poll_lock = asyncio.Lock()
         self.delivery_lock = asyncio.Lock()
         self.shared_results = []
@@ -325,6 +463,10 @@ class ComatAlarm:
             raise ValueError("Invalid alert ownership")
         if not isinstance(flights, list) or not isinstance(preferences, dict):
             raise ValueError("Invalid watch")
+        status_request = body.get("api_status_request", False)
+        if not isinstance(status_request, bool):
+            raise ValueError("Invalid status request")
+        self.api_status.configure(body.get("api_credentials"))
         now = time.time()
         prior = {f["id"]: f for f in json.loads(device["watch"])}
         clean = []
@@ -393,11 +535,13 @@ class ComatAlarm:
                     if old is not None:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", self.events(device["id"], old, row, prefs, now))
         await self.deliver(device["id"], now)
-        return web.json_response({"watching": len(clean), "background_ready": bool(api_token), "expires": now+86400, "relay_alerts": relay_alerts})
+        if status_request:
+            self.api_status.request_refresh(api_token)
+        return web.json_response({"api_status": self.api_status.snapshot(), "watching": len(clean), "background_ready": bool(api_token), "expires": now+86400, "relay_alerts": relay_alerts})
 
     async def state(self, request):
         row = self.device(request)
-        return web.json_response({"relay_alerts_supported": True, "flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
+        return web.json_response({"api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -484,6 +628,9 @@ class ComatAlarm:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
         for device in self.db.execute("SELECT id FROM comat_devices WHERE expires>?", (now,)).fetchall():
             await self.deliver(device["id"], now)
+        active = self.db.execute("SELECT api_token FROM comat_devices WHERE expires>? AND api_token!='' ORDER BY expires DESC LIMIT 1", (now,)).fetchone()
+        if active:
+            await self.api_status.refresh(active["api_token"], now=now)
         with self.db:
             self.db.execute("DELETE FROM comat_outbox WHERE created<?",(now-2*86400,))
             self.db.execute("DELETE FROM comat_delivered WHERE sent_at<?", (now-2*86400,))
@@ -552,6 +699,8 @@ class ComatAlarm:
         async def context(app):
             tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker())]
             yield
+            if self.api_status.task is not None:
+                tasks.append(self.api_status.task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

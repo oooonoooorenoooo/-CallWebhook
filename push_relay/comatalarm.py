@@ -322,7 +322,7 @@ class ComatAlarm:
         relay_alerts = body.get("relay_alerts", False)
         if not isinstance(relay_alerts, bool):
             raise ValueError("Invalid alert ownership")
-        if not isinstance(flights, list) or len(flights) > (14 if relay_alerts else 2) or not isinstance(preferences, dict):
+        if not isinstance(flights, list) or len(flights) > (16 if relay_alerts else 4) or not isinstance(preferences, dict):
             raise ValueError("Invalid watch")
         now = time.time()
         prior = {f["id"]: f for f in json.loads(device["watch"])}
@@ -350,8 +350,8 @@ class ComatAlarm:
             if any(entry["id"] == row["id"] for entry in clean):
                 raise ValueError("Duplicate flight")
             clean.append(row)
-        if sum(not (f.get("aibt") or f.get("cancelled") or f.get("diverted")) for f in clean) > 2:
-            raise ValueError("At most two active flights")
+        if sum(not (f.get("aibt") or f.get("cancelled") or f.get("diverted")) for f in clean) > 4:
+            raise ValueError("At most four active flights")
         prefs = {key: preferences.get(key, True) for key in FLAGS + ("enabled",)}
         if not all(isinstance(v, bool) for v in prefs.values()) or not isinstance(body.get("foreground"), bool):
             raise ValueError("Invalid preferences")

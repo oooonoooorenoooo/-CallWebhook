@@ -97,9 +97,32 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completed_handoff_does_not_raise_active_api_limit(self):
         completed = [dict(self.flight, id=f"done-{i}", aibt=self.now-5) for i in range(12)]
-        active = [self.flight, dict(self.flight, id="second", number="LH186")]
+        active = [dict(self.flight, id=f"active-{i}", number=f"LH{180+i}") for i in range(4)]
         self.assertEqual((await self.watch(relay_alerts=True, flights=active+completed)).status, 200)
-        self.assertEqual((await self.watch(relay_alerts=True, flights=active+[dict(self.flight, id="third")])).status, 400)
+        self.assertEqual((await self.watch(relay_alerts=True, flights=active+[dict(self.flight, id="fifth", number="EW999")])).status, 400)
+
+
+    async def test_four_shared_flights_five_closed_devices_poll_once_each(self):
+        flights = [dict(self.flight, id=f"flight-{i}", number=f"LH{180+i}") for i in range(4)]
+        await self.watch(flights=flights, relay_alerts=True)
+        for peer in range(4):
+            await self.add_peer(self.flight, flights=[dict(f, id=f"peer-{peer}-{i}") for i, f in enumerate(flights)], relay_alerts=True)
+        self.comat.provider.lookup.return_value = {"atd": self.now}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 4)
+        self.assertEqual(self.comat.sender.await_count, 20)
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count, 8)
+        self.assertEqual(self.comat.sender.await_count, 20)
+
+    async def test_server_tracks_union_not_four_global_flights(self):
+        flights = [dict(self.flight, id=f"flight-{i}", number=f"LH{180+i}") for i in range(4)]
+        await self.watch(flights=flights, relay_alerts=True)
+        await self.add_peer(dict(self.flight, id="extra", number="EW123"))
+        self.comat.provider.lookup.return_value = {"atd": self.now}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 5)
+        self.assertEqual(self.comat.sender.await_count, 5)
 
     async def test_push_contains_confirmed_widget_milestones(self):
         await self.watch()

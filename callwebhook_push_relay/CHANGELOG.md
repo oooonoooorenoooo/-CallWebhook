@@ -1,3 +1,10 @@
+## 1.2.10
+
+- Bis zu vier aktive Flüge je Gerät statt zwei; die 24-Stunden-Gültigkeit bleibt erhalten.
+- Identische Flugvorgänge mit demselben API-Zugang werden weiterhin gemeinsam abgefragt. Unterschiedliche Flüge weiterer Geräte werden zusätzlich überwacht, ohne globale Vier-Flüge-Grenze.
+- Tests decken vier Flüge auf fünf geschlossenen Geräten, zusätzliche Flüge weiterer Geräte und die Grenze inklusive abgeschlossener Flüge ab.
+- Für die Übergabe von vier Flügen ist die aktualisierte ComatAlarm-App erforderlich.
+
 ## 1.2.9
 
 - Bewahrt den gespeicherten FR24-Schlüssel, wenn eine Hintergrund-Übergabe der App einen leeren Schlüssel enthält. Damit unterbricht ein vorübergehender lokaler Lesefehler nicht die serverseitigen Flugabfragen.

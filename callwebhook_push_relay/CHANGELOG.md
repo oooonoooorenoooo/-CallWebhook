@@ -1,3 +1,9 @@
+## 1.2.9
+
+- Bewahrt den gespeicherten FR24-Schlüssel, wenn eine Hintergrund-Übergabe der App einen leeren Schlüssel enthält. Damit unterbricht ein vorübergehender lokaler Lesefehler nicht die serverseitigen Flugabfragen.
+- Tests sichern Flugabfrage und einmalige Push-Zustellung bei geschlossener App sowie die automatische Übernahme nach Ablauf der Vordergrund-Frist ab.
+- Bestehende Einrichtung bleibt erhalten; keine neuen Zugangsdaten erforderlich.
+
 ## 1.2.8
 
 - Apple-Testerprüfung liest die Mitglieder direkt aus den internen ComatAlarm-Testgruppen. Zusätzliche Abgleiche mit den globalen Benutzer- und Testerlisten entfallen.

@@ -95,25 +95,38 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         await self.watch(foreground=True, flights=[dict(self.flight, atd=self.now-10)])
         self.comat.sender.assert_not_awaited()
 
-    async def test_completed_handoff_does_not_raise_active_api_limit(self):
+    async def test_handoff_accepts_all_active_and_recent_completed_flights(self):
         completed = [dict(self.flight, id=f"done-{i}", aibt=self.now-5) for i in range(12)]
-        active = [dict(self.flight, id=f"active-{i}", number=f"LH{180+i}") for i in range(4)]
+        active = [dict(self.flight, id=f"active-{i}", number=f"LH{180+i}") for i in range(20)]
         self.assertEqual((await self.watch(relay_alerts=True, flights=active+completed)).status, 200)
-        self.assertEqual((await self.watch(relay_alerts=True, flights=active+[dict(self.flight, id="fifth", number="EW999")])).status, 400)
+        self.assertEqual((await self.watch(relay_alerts=True, flights=active+[dict(self.flight, id="extra", number="EW999")])).status, 200)
 
 
-    async def test_four_shared_flights_five_closed_devices_poll_once_each(self):
-        flights = [dict(self.flight, id=f"flight-{i}", number=f"LH{180+i}") for i in range(4)]
+    async def test_twelve_shared_flights_five_closed_devices_poll_once_each(self):
+        flights = [dict(self.flight, id=f"flight-{i}", number=f"LH{180+i}") for i in range(12)]
         await self.watch(flights=flights, relay_alerts=True)
         for peer in range(4):
             await self.add_peer(self.flight, flights=[dict(f, id=f"peer-{peer}-{i}") for i, f in enumerate(flights)], relay_alerts=True)
         self.comat.provider.lookup.return_value = {"atd": self.now}
         await self.comat.tick(self.now+1)
-        self.assertEqual(self.comat.provider.lookup.await_count, 4)
-        self.assertEqual(self.comat.sender.await_count, 20)
+        self.assertEqual(self.comat.provider.lookup.await_count, 12)
+        self.assertEqual(self.comat.sender.await_count, 60)
         await self.comat.tick(self.now+62)
-        self.assertEqual(self.comat.provider.lookup.await_count, 8)
-        self.assertEqual(self.comat.sender.await_count, 20)
+        self.assertEqual(self.comat.provider.lookup.await_count, 24)
+        self.assertEqual(self.comat.sender.await_count, 60)
+
+    async def test_api_budget_deferred_flights_get_next_cycle_priority(self):
+        flights = [dict(self.flight, id=f"flight-{i}", number=f"LH{180+i}") for i in range(12)]
+        await self.watch(flights=flights, relay_alerts=True)
+        attempts = []
+        async def limited(flight, token, now):
+            attempts.append(flight["number"])
+            return {} if len(attempts) <= 8 else {"_error": "FR24: Minutenschutz aktiv"}
+        self.comat.provider.lookup.side_effect = limited
+        await self.comat.tick(self.now+1)
+        attempts.clear()
+        await self.comat.tick(self.now+62)
+        self.assertEqual(attempts[:4], ["LH188", "LH189", "LH190", "LH191"])
 
     async def test_server_tracks_union_not_four_global_flights(self):
         flights = [dict(self.flight, id=f"flight-{i}", number=f"LH{180+i}") for i in range(4)]

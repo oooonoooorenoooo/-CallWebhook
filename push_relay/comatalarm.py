@@ -218,6 +218,7 @@ class ComatAlarm:
         self.poll_lock = asyncio.Lock()
         self.delivery_lock = asyncio.Lock()
         self.shared_results = []
+        self.last_successful_lookup = {}
         self.testflight = TestFlight(self.db)
         self.apple_access = AppleAccess(self.relay, self.testflight)
         self.db.executescript("""
@@ -322,7 +323,7 @@ class ComatAlarm:
         relay_alerts = body.get("relay_alerts", False)
         if not isinstance(relay_alerts, bool):
             raise ValueError("Invalid alert ownership")
-        if not isinstance(flights, list) or len(flights) > (16 if relay_alerts else 4) or not isinstance(preferences, dict):
+        if not isinstance(flights, list) or not isinstance(preferences, dict):
             raise ValueError("Invalid watch")
         now = time.time()
         prior = {f["id"]: f for f in json.loads(device["watch"])}
@@ -350,8 +351,6 @@ class ComatAlarm:
             if any(entry["id"] == row["id"] for entry in clean):
                 raise ValueError("Duplicate flight")
             clean.append(row)
-        if sum(not (f.get("aibt") or f.get("cancelled") or f.get("diverted")) for f in clean) > 4:
-            raise ValueError("At most four active flights")
         prefs = {key: preferences.get(key, True) for key in FLAGS + ("enabled",)}
         if not all(isinstance(v, bool) for v in prefs.values()) or not isinstance(body.get("foreground"), bool):
             raise ValueError("Invalid preferences")
@@ -420,6 +419,11 @@ class ComatAlarm:
     def enabled(prefs, now):
         return prefs.get("enabled", True) and ("active_windows" not in prefs or any(start <= now < end for start, end in prefs["active_windows"]))
 
+    @staticmethod
+    def polling_key(flight, token):
+        day = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).date().isoformat()
+        return (hashlib.sha256(token.encode()).hexdigest(), flight["number"], day, flight.get("origin", ""), flight.get("destination", ""))
+
     async def shared_lookup(self, flight, token, now):
         # Foreground leadership is separate from a phone merely showing the app.
         # Its synced event snapshot supplies background recipients without another
@@ -437,6 +441,11 @@ class ComatAlarm:
             result = dict(await self.provider.lookup(flight, token, now))
         except Exception:
             result = {"_error": "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"}
+        # Flights deferred by the API budget keep priority over flights already
+        # queried successfully, independent of each phone's local record IDs.
+        if not result.get("_error"):
+            self.last_successful_lookup[self.polling_key(flight, token)] = now
+        self.last_successful_lookup = {k: v for k, v in self.last_successful_lookup.items() if now-v < 2*86400}
         # Store provider IDs discovered by this request to separate real legs.
         self.shared_results.append((identity, dict(flight, **{k: result[k] for k in ("fr24ID", "origin", "destination") if result.get(k)}), now, result))
         return dict(result)
@@ -451,7 +460,8 @@ class ComatAlarm:
             flights = json.loads(device["watch"])
             if now-device["last_poll"] >= 60:
                 error, pending = "", []
-                for flight in flights:
+                ordered = sorted(flights, key=lambda f: self.last_successful_lookup.get(self.polling_key(f, device["api_token"]), 0))
+                for flight in ordered:
                     if arrival_tracking_expired(flight, now) or flight.get("aibt") or flight.get("cancelled") or flight.get("diverted"):
                         continue
                     try:

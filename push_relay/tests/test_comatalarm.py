@@ -12,6 +12,36 @@ from push_relay.server import Relay, application
 from push_relay.comatalarm import FlightProvider
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_background_handoff_preserves_token_and_polls_without_app(self):
+        await self.watch(foreground=True, api_foreground=True, relay_alerts=True)
+        response = await self.watch(foreground=False, fr24_token="", relay_alerts=True)
+        self.assertTrue((await response.json())["background_ready"])
+        self.comat.provider.lookup.return_value = {"atd": self.now}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.call_args.args[1], "private-api-token")
+        self.assertEqual(self.comat.sender.await_count, 1)
+        self.assertIn("atd", self.comat.sender.call_args.args[2]["flight_state"])
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.sender.await_count, 1)
+
+    async def test_force_quit_without_handoff_expires_foreground_lease(self):
+        await self.watch(foreground=True, api_foreground=True, relay_alerts=True)
+        self.comat.provider.lookup.return_value = {"atd": self.now}
+        await self.comat.tick(self.now+30)
+        self.comat.provider.lookup.assert_not_awaited()
+        await self.comat.tick(self.now+91)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+        self.assertEqual(self.comat.sender.await_count, 1)
+
+    async def test_omitted_token_preserves_existing_but_foreground_clear_works(self):
+        await self.watch()
+        body = dict(flights=[self.flight], preferences={}, foreground=False)
+        response = await self.client.post("/comatalarm/v1/watch", headers=self.headers, json=body)
+        self.assertTrue((await response.json())["background_ready"])
+        response = await self.watch(foreground=True, fr24_token="")
+        self.assertFalse((await response.json())["background_ready"])
+
     async def test_relay_owns_foreground_transitions_exactly_once(self):
         response = await self.watch(foreground=True, relay_alerts=True)
         self.assertTrue((await response.json())["relay_alerts"])

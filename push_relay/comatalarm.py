@@ -370,6 +370,11 @@ class ComatAlarm:
         api_token = body.get("fr24_token", device["api_token"])
         if not isinstance(api_token, str) or len(api_token) > 8192 or '\n' in api_token or '\r' in api_token:
             raise ValueError("Invalid API token")
+        # Older clients send an empty token when a background keychain read fails.
+        # Keep the registered credential during handoff; explicit foreground clearing
+        # and registration revocation retain their existing semantics.
+        if not api_token and not body["foreground"]:
+            api_token = device["api_token"]
         index = body.get("stand_positions")
         encrypted_index = device["stand_index"]
         if index:

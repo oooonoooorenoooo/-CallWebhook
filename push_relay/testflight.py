@@ -73,30 +73,28 @@ class TestFlight:
                 if x.get('attributes', {}).get('isInternalGroup') is True]
 
     async def is_internal_tester(self, email):
-        """Read-only: an invitation or external group is not an authorization."""
+        """Read-only membership proof from this app's internal groups.
+
+        Internal groups already constrain membership to App Store Connect team
+        users. Do not join the global users/betaTesters directories: those
+        independent records can disagree with the actual app group membership.
+        """
         app_id = await self.app_id()
         groups = await self.groups(app_id)
-        if not groups:
-            return False
-        users = await self.request('GET', 'users', params={'filter[username]': email, 'limit': '2'})
-        matches = [u for u in users.get('data', []) if u.get('attributes', {}).get('username', '').casefold() == email.casefold()]
-        if len(matches) != 1 or users.get('links', {}).get('next'):
-            return False
-        user = matches[0]
-        attributes = user.get('attributes', {})
-        if not set(attributes.get('roles', [])) & {'ACCOUNT_HOLDER', 'ADMIN', 'APP_MANAGER', 'DEVELOPER', 'MARKETING'}:
-            return False
-        if not attributes.get('allAppsVisible'):
-            visible = await self.request('GET', f"users/{user['id']}/visibleApps", params={'limit': '200'})
-            if app_id not in {x['id'] for x in visible.get('data', [])}:
-                return False
-        testers = await self.request('GET', 'betaTesters', params={'filter[email]': email, 'limit': '2'})
-        matches = [t for t in testers.get('data', []) if t.get('attributes', {}).get('email', '').casefold() == email.casefold()]
-        if len(matches) != 1 or testers.get('links', {}).get('next'):
+        expected = email.strip().casefold()
+        if not expected:
             return False
         for group in groups:
-            if await self.in_group('betaTesters', matches[0]['id'], group['id']):
-                return True
+            result = await self.request('GET', f"betaGroups/{group['id']}/betaTesters",
+                                        params={'limit': '200'})
+            for tester in result.get('data', []):
+                actual = tester.get('attributes', {}).get('email')
+                if isinstance(actual, str) and actual.strip().casefold() == expected:
+                    return True
+            # Internal groups support at most 100 testers. Never turn an
+            # unexpectedly truncated response into a false non-member verdict.
+            if result.get('links', {}).get('next'):
+                raise AppleError('Apple hat die interne Testerliste unvollständig geliefert.')
         return False
 
     async def in_group(self, resource_type, resource_id, group_id):

@@ -35,34 +35,48 @@ class IdentityTests(unittest.TestCase):
 
 
 class MembershipTests(unittest.IsolatedAsyncioTestCase):
-    def service(self, *, role="MARKETING", visible=True, member=True, user=True):
+    def service(self, *, email="tester@example.org", groups=None):
         service = TestFlight()
         service.app_id = AsyncMock(return_value="comat")
-        service.groups = AsyncMock(return_value=[{"id": "internal"}])
-        service.in_group = AsyncMock(return_value=member)
+        service.groups = AsyncMock(return_value=groups if groups is not None else [{"id": "internal"}])
         async def request(method, path, **kwargs):
             self.assertEqual(method, "GET")
-            if path == "users":
-                return {"data": [{"id": "user", "attributes": {"username": "tester@example.org", "roles": [role], "allAppsVisible": visible}}] if user else []}
-            if path.endswith("visibleApps"):
-                return {"data": []}
-            if path == "betaTesters":
-                return {"data": [{"id": "tester", "attributes": {"email": "tester@example.org"}}]}
-            raise AssertionError(path)
+            self.assertIn(path, ["betaGroups/internal/betaTesters", "betaGroups/other/betaTesters"])
+            return {"data": [{"id": "tester", "attributes": {"email": email}}]}
         service.request = AsyncMock(side_effect=request)
         return service
 
-    async def test_internal_member_with_app_access_is_eligible(self):
-        self.assertTrue(await self.service().is_internal_tester("tester@example.org"))
-
-    async def test_invited_external_wrong_role_and_wrong_app_are_denied(self):
-        for options in [{"user": False}, {"member": False}, {"role": "FINANCE"}, {"visible": False}]:
-            self.assertFalse(await self.service(**options).is_internal_tester("tester@example.org"))
-
-    async def test_no_internal_group_is_denied(self):
+    async def test_internal_member_is_eligible_without_global_directory_join(self):
         service = self.service()
-        service.groups.return_value = []
+        self.assertTrue(await service.is_internal_tester("tester@example.org"))
+        service.groups.assert_awaited_once_with("comat")
+        service.request.assert_awaited_once_with("GET", "betaGroups/internal/betaTesters", params={"limit": "200"})
+
+    async def test_account_holder_email_in_internal_group_is_eligible(self):
+        self.assertTrue(await self.service(email=" Reno.Klose@posteo.eu ").is_internal_tester("reno.klose@posteo.eu"))
+
+    async def test_unlisted_email_is_denied(self):
+        self.assertFalse(await self.service(email="someone-else@example.org").is_internal_tester("tester@example.org"))
+
+    async def test_no_internal_group_is_denied_without_querying_external_testers(self):
+        service = self.service(groups=[])
         self.assertFalse(await service.is_internal_tester("tester@example.org"))
+        service.request.assert_not_awaited()
+
+    async def test_missing_email_is_denied(self):
+        self.assertFalse(await self.service(email=None).is_internal_tester("tester@example.org"))
+
+    async def test_later_internal_group_is_checked(self):
+        service = self.service(groups=[{"id": "other"}, {"id": "internal"}])
+        service.request.side_effect = [{"data": []}, {"data": [{"attributes": {"email": "tester@example.org"}}]}]
+        self.assertTrue(await service.is_internal_tester("tester@example.org"))
+
+    async def test_truncated_response_is_not_a_non_member_verdict(self):
+        service = self.service()
+        service.request.side_effect = None
+        service.request.return_value = {"data": [], "links": {"next": "next-page"}}
+        with self.assertRaises(AppleError):
+            await service.is_internal_tester("tester@example.org")
 
     async def test_apple_error_is_not_an_approval(self):
         service = self.service()

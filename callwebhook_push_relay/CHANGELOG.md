@@ -1,3 +1,12 @@
+## 1.2.13
+
+- Neue App-Versionen übergeben die laufenden Flugabfragen dauerhaft an den Pi, auch bei geöffneten Apps. Bestehende Clients behalten bis zum App-Update das bisherige Übergabeverhalten.
+- Gemeinsame Flugplan- und Positionsdaten für die Geräte: FR24, BER sowie FlightStats und FlightAware. Start, Landung und AIBT werden weiterhin serverseitig ausgewertet und per APNs gemeldet.
+- Pi-Ergebnisse bleiben bei erneuter Geräte-Synchronisierung erhalten. Weiterflüge werden auch nach AIBT des ankommenden Fluges überwacht.
+- Fehlende AIBT-Koordinaten jüngerer Verlaufseinträge können zentral nachgeholt werden: höchstens zwei Versuche im Abstand von mindestens 15 Minuten.
+- Gemeinsame Abfrageergebnisse, Anbieter-Sperrfristen, FR24-Minutenbudget und die bestehende Registrierungsgültigkeit von 24 Stunden bleiben erhalten.
+- Nach dem Dienst-Update die neue App auf den beteiligten Geräten installieren und einmal öffnen.
+
 ## 1.2.12
 
 - Gemeinsamer API-Status für FR24, FlightStats, FlightAware, BER, ADSB.lol und OpenSky statt separater Statusabfragen jedes Geräts.

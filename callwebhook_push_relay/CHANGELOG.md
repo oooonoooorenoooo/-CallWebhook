@@ -1,3 +1,12 @@
+## 1.2.16
+
+- Korrigiert die Zeitparameter für FR24 und FlightAware: UTC auf ganze Sekunden im jeweiligen Anbieterformat, ohne lokale Zeitzonenoffsets und Nachkommastellen. Gilt für die gemeinsame Statusprüfung sowie Flug-, Vorflug- und Weiterflug-Abfragen.
+- Die Statusprüfung verwendet ein vollständiges 24-Stunden-Fenster, auch um Mitternacht. Sommerzeitwechsel werden berücksichtigt.
+- Statusprüfung und Flugüberwachung teilen sich die Sperrfristen für BER, FlightStats, FlightAware und FR24. Eine abgelehnte Abfrage wird nicht durch den jeweils anderen Abfrageweg erneut ausgelöst; Retry-After bleibt wirksam.
+- HTTP 400, 401, 402, 403 und 429 werden verständlich unterschieden. Sichere Protokollzeilen nennen Anbieter, HTTP-Status, Antworttyp und Sperrdauer, ohne Zugangsdaten oder Antwortinhalte.
+- Eine tatsächliche BER-Zugriffsablehnung bleibt als Fehler sichtbar. Dieses Update hebt keine anbieterseitige Sperre auf.
+- Keine neue App-Version oder erneute Einrichtung erforderlich.
+
 ## 1.2.15
 
 - Fehlende BER-Parkpositionen abgehender Flüge werden auch nach dem eigenen Abflug anhand des tatsächlichen Vorflugs weiter gesucht. Ein ATD beendet diesen Abgleich nicht mehr vorzeitig.

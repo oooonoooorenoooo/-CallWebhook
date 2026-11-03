@@ -10,6 +10,7 @@ from .apple_access import AppleAccess
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -165,6 +166,30 @@ def retry_delay(response, now):
     return delay
 
 
+def utc_query_time(value, suffix=""):
+    """Provider query timestamps: UTC seconds, no local offset or fractions.
+
+    FR24 documents YYYY-MM-DDTHH:MM:SS; AeroAPI uses the trailing Z.
+    """
+    return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + suffix
+
+
+def provider_http_status(name, response, cooldown, key, now):
+    """Share provider backoff and expose safe diagnostics, never response bodies."""
+    if 200 <= response.status < 300:
+        return None
+    if response.status in (401, 402, 403, 429):
+        cooldown[key] = max(cooldown.get(key, 0), now + retry_delay(response, now))
+    content_type = str(getattr(response, "headers", {}).get("Content-Type", "")).lower()
+    kind = "JSON" if "json" in content_type else "HTML" if "html" in content_type else "other"
+    logging.warning("ComatAlarm provider=%s HTTP=%s response=%s pause_seconds=%s",
+                    name, response.status, kind, max(0, int(cooldown.get(key, now)-now)))
+    reason = {400: "Anfrageparameter abgelehnt", 401: "Zugangsdaten abgelehnt",
+              402: "Tarif oder Guthaben prüfen", 403: "Anbieter verweigert Zugriff",
+              429: "Abfragelimit erreicht"}.get(response.status)
+    return f"HTTP {response.status}" + (f" · {reason}" if reason else "")
+
+
 def arrival_tracking_expired(flight, now):
     return bool(not departure_from_ber(flight) and flight.get("ata") and not flight.get("aibt") and now - flight["ata"] >= 25 * 60)
 
@@ -188,8 +213,8 @@ class FlightProvider:
             return {"_inbound":{}}
         cutoff = min(stamp(flight.get("atd")) or now, now)
         rows = await fr24("flight-summary/full", {"registrations":flight["registration"],
-            "flight_datetime_from":datetime.fromtimestamp(cutoff-48*3600, timezone.utc).isoformat(),
-            "flight_datetime_to":datetime.fromtimestamp(cutoff, timezone.utc).isoformat(), "limit":"100"})
+            "flight_datetime_from":utc_query_time(cutoff-48*3600),
+            "flight_datetime_to":utc_query_time(cutoff), "limit":"100"})
         result = {"_inbound_check_at":now, "_inbound_registration":reg, "_inbound":{}}
         # A truncated response cannot prove which leg immediately preceded this one.
         inbound = previous_ber_leg(rows, flight, now) if len(rows) < 100 else None
@@ -261,10 +286,9 @@ class FlightProvider:
                 recent.append(now)
                 async with session.get("https://fr24api.flightradar24.com/api/" + path, params=params,
                         headers={"Authorization": "Bearer " + token, "Accept": "application/json", "Accept-Version": "v1"}, allow_redirects=False) as response:
-                    if response.status in (401, 402, 403, 429):
-                        self.cooldown[identity] = now + retry_delay(response, now)
-                    if response.status != 200:
-                        raise RuntimeError(f"FR24: HTTP {response.status}")
+                    error = provider_http_status("FR24", response, self.cooldown, identity, now)
+                    if error:
+                        raise RuntimeError("FR24: " + error)
                     body = await response.json()
                     if not isinstance(body, dict) or not isinstance(body.get("data"), list):
                         raise RuntimeError("FR24: Antwortformat ungültig")
@@ -293,7 +317,7 @@ class FlightProvider:
                             start = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
                             if start >= now:
                                 raise RuntimeError("Flugtag liegt in der Zukunft")
-                            params = {"flights": flight["number"], "flight_datetime_from": datetime.fromtimestamp(start, timezone.utc).isoformat(), "flight_datetime_to": datetime.fromtimestamp(min((datetime.fromtimestamp(start, ZoneInfo("Europe/Berlin")) + timedelta(days=1)).timestamp(), now), timezone.utc).isoformat()}
+                            params = {"flights": flight["number"], "flight_datetime_from": utc_query_time(start), "flight_datetime_to": utc_query_time(min((datetime.fromtimestamp(start, ZoneInfo("Europe/Berlin")) + timedelta(days=1)).timestamp(), now))}
                         rows = await fr24("flight-summary/full", params)
                         matches = [r for r in rows if isinstance(r, dict) and
                             (not identifier or r.get("fr24_id") == identifier) and
@@ -346,8 +370,8 @@ class FlightProvider:
                                 and (not flight.get("outbound_number") or row.get("flight") == flight["outbound_number"])
                                 and row.get("flight") and row.get("fr24_id") != identifier)
                         outgoing = await fr24("flight-summary/full", {"registrations":flight["registration"],
-                            "flight_datetime_from":datetime.fromtimestamp(flight.get("aibt") or flight["ata"], timezone.utc).isoformat(),
-                            "flight_datetime_to":datetime.fromtimestamp(now, timezone.utc).isoformat()})
+                            "flight_datetime_from":utc_query_time(flight.get("aibt") or flight["ata"]),
+                            "flight_datetime_to":utc_query_time(now)})
                         outgoing = [r for r in outgoing if matches_outbound(r) and stamp(r.get("datetime_takeoff")) and (flight.get("aibt") or flight["ata"]) <= stamp(r["datetime_takeoff"]) <= now]
                         if outgoing:
                             row = min(outgoing, key=lambda r: stamp(r["datetime_takeoff"]))
@@ -381,8 +405,7 @@ class FlightProvider:
                 if self.cooldown.get("ber", 0) > now:
                     raise RuntimeError("BER: Abfrage pausiert")
                 async with session.get("https://ber.berlin-airport.de/api.flights.json", params=params, allow_redirects=False) as response:
-                    if response.status in (401, 402, 403, 429):
-                        self.cooldown["ber"] = now + retry_delay(response, now)
+                    provider_http_status("BER", response, self.cooldown, "ber", now)
                     if response.status == 200:
                         body = await response.json()
                         for row in body.get("data", {}).get("items", []):
@@ -467,7 +490,7 @@ class SharedAPIStatus:
         self.db, self.provider = db, provider
         self.lock = asyncio.Lock()
         self.task = None
-        self.cooldown = {}
+        self.cooldown = provider.cooldown
         db.execute("CREATE TABLE IF NOT EXISTS comat_api_status (id INTEGER PRIMARY KEY CHECK(id=1), credentials TEXT NOT NULL, checked REAL NOT NULL, results TEXT NOT NULL)")
         db.execute("INSERT OR IGNORE INTO comat_api_status VALUES(1,'{}',0,'{}')")
         db.commit()
@@ -508,14 +531,14 @@ class SharedAPIStatus:
         day = datetime.fromtimestamp(now, ZoneInfo("Europe/Berlin"))
         async with ClientSession(timeout=ClientTimeout(total=8)) as session:
             async def get(name, url, params=None, headers=None, method="GET", data=None):
-                if self.cooldown.get(name, 0) > now:
+                key = hashlib.sha256(token.encode()).hexdigest() if name == "FR24" else name.lower()
+                if self.cooldown.get(key, 0) > now:
                     return "Abfrage pausiert · Anbieter-Sperrfrist"
                 try:
                     async with session.request(method, url, params=params, headers=headers, data=data, allow_redirects=False) as response:
-                        if response.status in (401,402,403,429):
-                            self.cooldown[name] = now + retry_delay(response, now)
-                        if not 200 <= response.status < 300:
-                            return f"HTTP {response.status}"
+                        error = provider_http_status(name, response, self.cooldown, key, now)
+                        if error:
+                            return error
                         payload = await response.json()
                         return payload if isinstance(payload, (dict,list)) else "Ungültige Antwort"
                 except Exception:
@@ -533,10 +556,8 @@ class SharedAPIStatus:
                     return "Abfrage pausiert · Minutenschutz"
                 recent.append(now)
                 payload = await get("FR24", "https://fr24api.flightradar24.com/api/flight-summary/full",
-                    {"flights":"LH194", "flight_datetime_from":day.replace(hour=0,minute=0,second=0,microsecond=0).isoformat(), "flight_datetime_to":day.isoformat()},
+                    {"flights":"LH194", "flight_datetime_from":utc_query_time(now-86400), "flight_datetime_to":utc_query_time(now)},
                     {"Authorization":"Bearer "+token,"Accept":"application/json","Accept-Version":"v1"})
-                if self.cooldown.get("FR24",0)>now:
-                    self.provider.cooldown[identity] = self.cooldown["FR24"]
                 return payload
 
             async def flightstats():
@@ -551,7 +572,7 @@ class SharedAPIStatus:
                 if not key:
                     return "Zugang fehlt"
                 return await get("FlightAware", "https://aeroapi.flightaware.com/aeroapi/flights/DLH194",
-                    {"start":(day-timedelta(days=1)).isoformat(),"end":day.isoformat()}, {"x-apikey":key})
+                    {"start":utc_query_time(now-86400, "Z"),"end":utc_query_time(now, "Z")}, {"x-apikey":key})
 
             async def opensky():
                 headers = {}

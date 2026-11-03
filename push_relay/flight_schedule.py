@@ -58,7 +58,7 @@ def flightstats(root, official, reference):
 
 
 async def schedule_lookup(session, flight, credentials, cooldown, now):
-    from .comatalarm import retry_delay
+    from .comatalarm import provider_http_status
     if cooldown.get("flightstats", 0) > now:
         return {}
     parts = re.fullmatch(r"([A-Z][A-Z0-9]{1,2}?)([0-9]{1,5})", flight["number"])
@@ -74,8 +74,7 @@ async def schedule_lookup(session, flight, credentials, cooldown, now):
     else:
         url, params = "https://www.flightstats.com/v2/api-next/flight-tracker/"+suffix, None
     async with session.get(url, params=params, headers={"Accept":"application/json", "Referer":"https://www.flightstats.com/", "User-Agent":"ComatAlarm/1.0"}, allow_redirects=False) as response:
-        if response.status in (401,402,403,429):
-            cooldown["flightstats"] = now + retry_delay(response, now)
+        provider_http_status("FlightStats", response, cooldown, "flightstats", now)
         if response.status != 200:
             return {}
         result = flightstats(await response.json(), official, flight["reference"])
@@ -88,15 +87,14 @@ async def schedule_lookup(session, flight, credentials, cooldown, now):
 
 
 async def aware_lookup(session, flight, credentials, cooldown, now):
-    from .comatalarm import retry_delay
+    from .comatalarm import provider_http_status, utc_query_time
     key = credentials.get("FLIGHTAWARE_API_KEY")
     if not key or cooldown.get("flightaware", 0) > now:
         return {}
-    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat()
+    iso = lambda t: utc_query_time(t, "Z")
     params = {"start":iso(flight["reference"]-86400), "end":iso(flight["reference"]+86400)}
     async with session.get("https://aeroapi.flightaware.com/aeroapi/flights/"+flight["number"], params=params, headers={"x-apikey":key}, allow_redirects=False) as response:
-        if response.status in (401,402,403,429):
-            cooldown["flightaware"] = now + retry_delay(response, now)
+        provider_http_status("FlightAware", response, cooldown, "flightaware", now)
         if response.status != 200:
             return {}
         rows = (await response.json()).get("flights") or []

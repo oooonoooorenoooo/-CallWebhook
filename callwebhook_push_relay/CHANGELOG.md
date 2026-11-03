@@ -1,3 +1,12 @@
+## 1.2.14
+
+- Bei Abflügen ab BER ermittelt der Pi den unmittelbar vorhergehenden Flug derselben Registrierung mit tatsächlicher Landung in BER. Keine Zuordnung nach Flugnummer minus eins.
+- AIBT und GPS-Koordinate des Vorfluges liefern den BER-Standplatz. Start, Ankunft und Abschluss des eingegebenen Abfluges bleiben getrennt; der BER-Vorgang endet mit dessen ATD.
+- Berücksichtigt Nachtstopps innerhalb von 48 Stunden. Flugzeugwechsel, Zwischenflüge, Umleitungen und unklare Daten führen zu keiner Übernahme eines alten Standplatzes.
+- Vorflugprüfung frühestens alle fünf Minuten; bestätigte AIBT-Koordinaten werden wiederverwendet. Fehlende ältere Ereignisse erhalten höchstens zwei Wiederholungsversuche im Abstand von 15 Minuten.
+- Ergebnisse werden zwischen Geräten geteilt und bei Geräte-Synchronisierung erhalten. Standplatz-Push enthält den Vorflug und die Paketzahlen; die neue App aktualisiert damit auch das Widget ohne einen falschen Ankunftsstatus.
+- Für die Anzeige des Vorfluges und des Abflug-Standplatzes die zugehörige neue App installieren.
+
 ## 1.2.13
 
 - Neue App-Versionen übergeben die laufenden Flugabfragen dauerhaft an den Pi, auch bei geöffneten Apps. Bestehende Clients behalten bis zum App-Update das bisherige Übergabeverhalten.

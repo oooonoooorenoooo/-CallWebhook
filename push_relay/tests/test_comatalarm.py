@@ -13,6 +13,68 @@ from push_relay.comatalarm import FlightProvider, SharedAPIStatus
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_pi_polls_with_all_five_apps_open_and_preserves_server_snapshot(self):
+        await self.watch(foreground=True, api_foreground=True, server_polling=True, relay_alerts=True)
+        peers = [self.headers]
+        for index in range(4):
+            peers.append(await self.add_peer(dict(self.flight, id=f"open-{index}"), foreground=True, server_polling=True, relay_alerts=True))
+        self.comat.provider.lookup.return_value = {"atd":self.now-5, "_schedule":{"sta":self.now+2000}, "_live":{"lat":52.4,"lon":13.5,"timestamp":self.now}}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+        self.assertTrue(self.comat.provider.lookup.call_args.args[0]["_central"])
+        self.assertEqual(self.comat.sender.await_count, 5)
+        for headers in peers:
+            state = await (await self.client.get('/comatalarm/v1/state', headers=headers)).json()
+            self.assertTrue(state['server_polling_supported'])
+            self.assertEqual(state['flights'][0]['_schedule']['sta'], self.now+2000)
+        # A phone posting its older local snapshot cannot erase Pi-owned values.
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
+        state = await (await self.client.get('/comatalarm/v1/state', headers=self.headers)).json()
+        self.assertIn('_live',state['flights'][0])
+        self.assertEqual(state['flights'][0]['atd'],self.now-5)
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.sender.await_count, 5)
+
+    async def test_pi_keeps_polling_when_all_apps_close_without_handoff(self):
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
+        self.comat.provider.lookup.return_value = {'atd':self.now}
+        await self.comat.tick(self.now+1)
+        self.comat.provider.lookup.return_value = {'ata':self.now+61}
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count,2)
+        self.assertEqual(self.comat.sender.await_count,2)
+        await self.comat.tick(self.now+86401)
+        self.assertEqual(self.comat.provider.lookup.await_count,2)
+
+    async def test_pi_repairs_archived_aibt_once_without_replaying_alert(self):
+        self.flight.update(aibt=self.now-3600, ata=self.now-3800, reference=self.now-7200, repair_arrival=True)
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
+        self.comat.provider.lookup.return_value = {'aibt_position':{'latitude':52.36507,'longitude':13.5053,'timestamp':self.now-3600}}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count,1)
+        self.comat.sender.assert_not_awaited()
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count,1)
+
+    async def test_invalid_server_ownership_is_rejected(self):
+        self.assertEqual((await self.watch(server_polling='yes')).status,400)
+
+    async def test_pi_parking_recovery_is_bounded_and_outbound_continues(self):
+        self.flight.update(aibt=self.now-3600, ata=self.now-3800, reference=self.now-7200, repair_arrival=True)
+        await self.watch(foreground=True, server_polling=True)
+        for offset in (1, 62, 902, 1803):
+            await self.comat.tick(self.now+offset)
+        self.assertEqual(self.comat.provider.lookup.await_count,2)
+        # A completed inbound flight can still carry outgoing packages.
+        self.flight.update(repair_arrival=False, track_outbound=True, outbound_number='LH187')
+        await self.watch(foreground=True, server_polling=True)
+        self.comat.provider.lookup.return_value = {'_outbound':{'number':'LH187','atd':self.now+1804,'destination':'FRA'}}
+        await self.comat.tick(self.now+1864)
+        self.assertEqual(self.comat.provider.lookup.await_count,3)
+        await self.comat.tick(self.now+1925)
+        self.assertEqual(self.comat.provider.lookup.await_count,3)
+
     async def test_background_handoff_preserves_token_and_polls_without_app(self):
         await self.watch(foreground=True, api_foreground=True, relay_alerts=True)
         response = await self.watch(foreground=False, fr24_token="", relay_alerts=True)
@@ -257,7 +319,8 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         await self.comat.tick(self.now+1)
         self.comat.provider.lookup.assert_not_awaited()
         self.assertEqual(self.comat.sender.await_count, 1)
-        await self.comat.tick(self.now+100)
+        lease = self.comat.db.execute("SELECT MAX(api_foreground_until) FROM comat_devices").fetchone()[0]
+        await self.comat.tick(max(self.now+100, lease+1))
         self.assertEqual(self.comat.provider.lookup.await_count, 1)
 
     async def test_foreground_follower_does_not_block_background_provider(self):
@@ -520,3 +583,4 @@ class APIStatusProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not kw["allow_redirects"] for _,_,kw in requests))
         self.assertEqual(next(kw for _,url,kw in first_requests if "aeroapi" in url)["headers"]["x-apikey"], "fa-private")
         db.close()
+

@@ -23,7 +23,7 @@ from aiohttp import ClientSession, ClientTimeout, ClientError, web
 
 BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
-FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand")
+FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number")
 
 
 
@@ -106,11 +106,13 @@ class FlightProvider:
         self.cooldown = {}
         self.cache = {}
         self.requests = {}
+        self.credentials = {}
+        self.aware_cache = {}
 
     async def lookup(self, flight, token, now):
         if arrival_tracking_expired(flight, now):
             return {}
-        cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"))
+        cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"), bool(flight.get("_central")))
         cached = self.cache.get(cache_key)
         if cached and now - cached[0] < 60:
             return dict(cached[1])
@@ -163,7 +165,7 @@ class FlightProvider:
                             actual, planned = row.get("dest_iata_actual"), row.get("dest_iata")
                             if actual and planned and actual != planned:
                                 result["diverted"] = True
-                    if identifier and (result.get("ata") or flight.get("ata")):
+                    if identifier and (result.get("ata") or flight.get("ata") or flight.get("aibt")) and not flight.get("aibt_position"):
                         rows = await fr24("historic/flight-events/light", {"flight_ids": identifier, "event_types": "gate_arrival"})
                         for row in rows:
                             if not isinstance(row, dict) or row.get("fr24_id") != identifier:
@@ -176,8 +178,54 @@ class FlightProvider:
                                     result["aibt"] = when
                                     details = event.get("details") or {}
                                     lat, lon = details.get("gate_lat"), details.get("gate_lon")
+                                    if not valid_coordinate(lat, lon):
+                                        for location in (event, event.get("position") or {}, details.get("position") or {}):
+                                            lat, lon = location.get("lat", location.get("latitude")), location.get("lon", location.get("longitude"))
+                                            if valid_coordinate(lat, lon):
+                                                break
                                     if valid_coordinate(lat, lon):
                                         result["aibt_position"] = {"latitude":lat,"longitude":lon,"timestamp":when}
+                        aibt = result.get("aibt") or flight.get("aibt")
+                        if flight.get("_central") and aibt and not result.get("aibt_position"):
+                            rows = await fr24("historic/flight-positions/light", {"timestamp": str(int(aibt)), "flights": flight["number"], "limit":"1"})
+                            for point in rows:
+                                if not isinstance(point, dict) or point.get("fr24_id") != identifier:
+                                    continue
+                                observed = stamp(point.get("timestamp"))
+                                speed = point.get("gspeed")
+                                if observed and abs(observed-aibt) <= 60 and valid_coordinate(point.get("lat"), point.get("lon")) and isinstance(speed, (int,float)) and not isinstance(speed,bool) and 0 <= speed*1.852 <= 5:
+                                    result["aibt_position"] = {"latitude":point["lat"],"longitude":point["lon"],"timestamp":observed}
+                    if flight.get("_central") and flight.get("track_outbound") and flight.get("registration") and (flight.get("ata") or flight.get("aibt")):
+                        airport = flight.get("destination") or "BER"
+                        def matches_outbound(row):
+                            return (isinstance(row, dict) and row.get("orig_iata") == airport
+                                and (not flight.get("outbound_number") or row.get("flight") == flight["outbound_number"])
+                                and row.get("flight") and row.get("fr24_id") != identifier)
+                        outgoing = await fr24("flight-summary/full", {"registrations":flight["registration"],
+                            "flight_datetime_from":datetime.fromtimestamp(flight.get("aibt") or flight["ata"], timezone.utc).isoformat(),
+                            "flight_datetime_to":datetime.fromtimestamp(now, timezone.utc).isoformat()})
+                        outgoing = [r for r in outgoing if matches_outbound(r) and stamp(r.get("datetime_takeoff")) and (flight.get("aibt") or flight["ata"]) <= stamp(r["datetime_takeoff"]) <= now]
+                        if outgoing:
+                            row = min(outgoing, key=lambda r: stamp(r["datetime_takeoff"]))
+                            result["_outbound"] = {"number":row["flight"],"id":row.get("fr24_id"),"destination":row.get("dest_iata") or "","atd":stamp(row["datetime_takeoff"])}
+                        else:
+                            outgoing = await fr24("live/flight-positions/full", {"registrations":flight["registration"]})
+                            row = next((r for r in outgoing if matches_outbound(r)), None)
+                            if row:
+                                result["_outbound"] = {"number":row["flight"],"id":row.get("fr24_id"),"destination":row.get("dest_iata") or ""}
+                    if flight.get("_central") and not (result.get("aibt") or flight.get("aibt")):
+                        rows = await fr24("live/flight-positions/full", {"flights": flight["number"]})
+                        matches = [r for r in rows if isinstance(r, dict)
+                            and (r.get("fr24_id") == identifier if identifier else r.get("flight") == flight["number"])
+                            and (not flight.get("destination") or r.get("dest_iata") == flight["destination"])
+                            and (not flight.get("origin") or r.get("orig_iata") == flight["origin"])
+                            and stamp(r.get("timestamp")) and now-120 <= stamp(r["timestamp"]) <= now+10]
+                        if matches:
+                            live = max(matches, key=lambda r: stamp(r["timestamp"]))
+                            lat, lon = live.get("lat"), live.get("lon")
+                            if all(isinstance(v,(float,int)) and not isinstance(v,bool) and math.isfinite(v) for v in (lat,lon)) and -90<=lat<=90 and -180<=lon<=180:
+                                # Only retain fields consumed by FR24Client.sample; no credentials.
+                                result["_live"] = {k:v for k,v in live.items() if k in ("fr24_id","hex","lat","lon","alt","gspeed","track","vspeed","on_ground","timestamp","eta","sta","reg","orig_iata","dest_iata","type")}
             except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
                 provider_error = "FR24: Token, Tarif oder Verbindung prüfen"
             # BER remains the gate source; a passenger gate is never a GPS stand.
@@ -195,6 +243,9 @@ class FlightProvider:
                             aliases = [row.get("flight_number", "")] + row.get("code_shares", [])
                             if flight["number"] not in [re.sub(r"\s", "", a).upper() for a in aliases if isinstance(a, str)]:
                                 continue
+                            if flight.get("_central"):
+                                from .flight_schedule import ber_schedule
+                                result["_schedule"] = ber_schedule(row, flight.get("origin") == "BER")
                             gate = row.get("gate")
                             if isinstance(gate, str) and gate.strip() and gate != "-":
                                 result["gate"] = gate[:32]
@@ -204,6 +255,40 @@ class FlightProvider:
                             break
             except (RuntimeError, ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
                 pass
+            if flight.get("_central"):
+                from .flight_schedule import schedule_lookup, aware_lookup
+                schedule = {}
+                try:
+                    schedule = await schedule_lookup(session, flight, self.credentials, self.cooldown, now)
+                except (RuntimeError, ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
+                    pass
+                # Preserve the existing low-frequency FlightAware fallback/status check.
+                aware_key = (cache_key[0], flight["number"], int(flight["reference"]//86400))
+                aware = self.aware_cache.get(aware_key)
+                if not aware or now-aware[0] >= (1800 if schedule.get("std") else 300):
+                    try:
+                        values = await aware_lookup(session, flight, self.credentials, self.cooldown, now)
+                        self.aware_cache[aware_key] = (now, values)
+                        aware = (now, values)
+                    except (RuntimeError, ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
+                        pass
+                self.aware_cache = {k:v for k,v in self.aware_cache.items() if now-v[0] < 86400}
+                if aware:
+                    fallback = dict(aware[1]); fallback.update(schedule)
+                    for flag in ("cancelled", "diverted"):
+                        fallback[flag] = bool(schedule.get(flag) or aware[1].get(flag))
+                    schedule = fallback
+                # BER owns arrival estimate and gate; other sources supply departure.
+                schedule.update(result.get("_schedule", {}))
+                result["_schedule"] = schedule
+                for key in ("atd", "ata", "cancelled", "diverted"):
+                    if not result.get(key) and schedule.get(key):
+                        result[key] = schedule[key]
+                result["_checked_at"] = now
+        for key in ("atd", "ata", "aibt"):
+            if result.get(key) is not None and not flight["reference"]-86400 <= result[key] <= now+60:
+                result.pop(key)
+                if key == "aibt": result.pop("aibt_position", None)
         result = {k: v for k, v in result.items() if v is not None}
         if provider_error:
             result["_error"] = provider_error
@@ -377,6 +462,9 @@ class ComatAlarm:
         if "api_foreground_until" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
             self.db.execute("ALTER TABLE comat_devices ADD COLUMN api_foreground_until REAL NOT NULL DEFAULT 0")
 
+        if "server_polling" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
+            self.db.execute("ALTER TABLE comat_devices ADD COLUMN server_polling INTEGER NOT NULL DEFAULT 0")
+
         if "stand_index" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
             self.db.execute("ALTER TABLE comat_devices ADD COLUMN stand_index TEXT NOT NULL DEFAULT ''")
 
@@ -480,14 +568,14 @@ class ComatAlarm:
             for field in ("atd", "ata", "aibt"):
                 if field in row and (stamp(row[field]) is None or not reference - 86400 <= row[field] <= now + 60):
                     raise ValueError("Invalid event time")
-            for field in ("fr24ID", "origin", "destination", "gate", "registration", "packets", "stand"):
+            for field in ("fr24ID", "origin", "destination", "gate", "registration", "packets", "stand", "outbound_number"):
                 if field in row and (not isinstance(row[field], str) or len(row[field]) > 64):
                     raise ValueError("Invalid flight field")
-            for field in ("cancelled", "diverted"):
+            for field in ("cancelled", "diverted", "repair_arrival", "track_outbound"):
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")
             old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), {})
-            for key in ("atd", "ata", "aibt", "fr24ID", "registration", "stand", "aibt_position", "cancelled", "diverted"):
+            for key in ("atd", "ata", "aibt", "fr24ID", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_outbound"):
                 if old.get(key):
                     row[key] = old[key]
             if any(entry["id"] == row["id"] for entry in clean):
@@ -505,7 +593,10 @@ class ComatAlarm:
                 if not isinstance(window, list) or len(window) != 2 or not all(isinstance(v, (int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in window) or not now-86400 <= window[0] < window[1] <= now+2*86400:
                     raise ValueError("Invalid calendar window")
             prefs["active_windows"] = windows
-        api_foreground = body.get("api_foreground", body["foreground"])
+        server_polling = body.get("server_polling", False)
+        if not isinstance(server_polling, bool):
+            raise ValueError("Invalid polling ownership")
+        api_foreground = False if server_polling else body.get("api_foreground", body["foreground"])
         if not isinstance(api_foreground, bool):
             raise ValueError("Invalid API foreground flag")
         api_token = body.get("fr24_token", device["api_token"])
@@ -526,6 +617,7 @@ class ComatAlarm:
                     raise ValueError("Invalid stand position")
             encrypted_index = protect_index(index)
         with self.db:
+            self.db.execute("UPDATE comat_devices SET server_polling=? WHERE id=?", (int(server_polling), device["id"]))
             self.db.execute("UPDATE comat_devices SET stand_index=?,api_foreground_until=? WHERE id=?", (encrypted_index, now+90 if body["foreground"] and api_foreground else 0, device["id"]))
             self.db.execute("UPDATE comat_devices SET watch=?,preferences=?,api_token=?,foreground_until=?,expires=? WHERE id=?", (json.dumps(clean),json.dumps(prefs),api_token,now+90 if body["foreground"] else 0,now+86400,device["id"]))
             if relay_alerts:
@@ -541,7 +633,7 @@ class ComatAlarm:
 
     async def state(self, request):
         row = self.device(request)
-        return web.json_response({"api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
+        return web.json_response({"server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -568,21 +660,22 @@ class ComatAlarm:
         day = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).date().isoformat()
         return (hashlib.sha256(token.encode()).hexdigest(), flight["number"], day, flight.get("origin", ""), flight.get("destination", ""))
 
-    async def shared_lookup(self, flight, token, now):
+    async def shared_lookup(self, flight, token, now, central=False):
         # Foreground leadership is separate from a phone merely showing the app.
         # Its synced event snapshot supplies background recipients without another
         # provider request for the same flight.
-        for peer in self.db.execute("SELECT watch FROM comat_devices WHERE expires>? AND api_foreground_until>?", (now, now)).fetchall():
+        for peer in ([] if central else self.db.execute("SELECT watch FROM comat_devices WHERE expires>? AND api_foreground_until>?", (now, now)).fetchall()):
             for snapshot in json.loads(peer["watch"]):
                 if same_occurrence(flight, snapshot):
                     return {k: snapshot[k] for k in ("atd", "ata", "aibt", "fr24ID", "registration", "gate", "cancelled", "diverted") if snapshot.get(k)}
         identity = hashlib.sha256(token.encode()).hexdigest()
         self.shared_results = [entry for entry in self.shared_results if now-entry[2] < 60]
         for owner, snapshot, _, result in self.shared_results:
-            if owner == identity and same_occurrence(snapshot, flight):
+            if owner == identity and bool(snapshot.get("_central")) == central and same_occurrence(snapshot, flight):
                 return dict(result)
         try:
-            result = dict(await self.provider.lookup(flight, token, now))
+            query = dict(flight, _central=True) if central else flight
+            result = dict(await self.provider.lookup(query, token, now))
         except Exception:
             result = {"_error": "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"}
         # Flights deferred by the API budget keep priority over flights already
@@ -591,7 +684,7 @@ class ComatAlarm:
             self.last_successful_lookup[self.polling_key(flight, token)] = now
         self.last_successful_lookup = {k: v for k, v in self.last_successful_lookup.items() if now-v < 2*86400}
         # Store provider IDs discovered by this request to separate real legs.
-        self.shared_results.append((identity, dict(flight, **{k: result[k] for k in ("fr24ID", "origin", "destination") if result.get(k)}), now, result))
+        self.shared_results.append((identity, dict(flight, _central=central, **{k: result[k] for k in ("fr24ID", "origin", "destination") if result.get(k)}), now, result))
         return dict(result)
 
     async def tick(self, now=None):
@@ -599,18 +692,26 @@ class ComatAlarm:
             await self._tick(time.time() if now is None else now)
 
     async def _tick(self, now):
-        for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND foreground_until<=?", (now,now)).fetchall():
+        self.provider.credentials = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
+        for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND (server_polling=1 OR foreground_until<=?)", (now,now)).fetchall():
             prefs = json.loads(device["preferences"])
             flights = json.loads(device["watch"])
             if now-device["last_poll"] >= 60:
                 error, pending = "", []
                 ordered = sorted(flights, key=lambda f: self.last_successful_lookup.get(self.polling_key(f, device["api_token"]), 0))
                 for flight in ordered:
-                    if arrival_tracking_expired(flight, now) or flight.get("aibt") or flight.get("cancelled") or flight.get("diverted"):
+                    repairing = bool(device["server_polling"] and flight.get("repair_arrival") and flight.get("aibt") and not flight.get("aibt_position"))
+                    outbound = bool(device["server_polling"] and flight.get("track_outbound") and not flight.get("_outbound", {}).get("atd"))
+                    if arrival_tracking_expired(flight, now) or (flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
+                        continue
+                    if repairing and (flight.get("_repair_attempts", 0) >= 2 or now-flight.get("_repair_attempted_at", 0) < 900):
                         continue
                     try:
-                        changes = await self.shared_lookup(flight, device["api_token"], now)
+                        changes = await self.shared_lookup(flight, device["api_token"], now, central=bool(device["server_polling"]))
                         error = changes.pop("_error", error)
+                        if repairing:
+                            changes["_repair_attempted_at"] = now
+                            changes["_repair_attempts"] = flight.get("_repair_attempts", 0) + 1
                         if changes.get("aibt_position"):
                             stand = match_stand(changes["aibt_position"], unprotect_index(device["stand_index"]))
                             if stand:
@@ -623,7 +724,7 @@ class ComatAlarm:
                 # Compare-and-swap the entire snapshot after all network I/O. Removed
                 # flights, changed preferences and foreground takeovers win the race.
                 with self.db:
-                    changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND foreground_until<=? AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
+                    changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND (server_polling=1 OR foreground_until<=?) AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
                     if changed:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
         for device in self.db.execute("SELECT id FROM comat_devices WHERE expires>?", (now,)).fetchall():
@@ -742,4 +843,5 @@ def match_stand(point, positions):
     if ranked and distances[ranked[0]] <= 160 and (len(ranked)==1 or distances[ranked[1]]-distances[ranked[0]] >= 12):
         return ranked[0]
     return None
+
 

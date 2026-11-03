@@ -1,3 +1,11 @@
+## 1.2.15
+
+- Fehlende BER-Parkpositionen abgehender Flüge werden auch nach dem eigenen Abflug anhand des tatsächlichen Vorflugs weiter gesucht. Ein ATD beendet diesen Abgleich nicht mehr vorzeitig.
+- Bereits vorzeitig abgeschlossene Einträge werden bei fehlenden Vorflug-Daten wieder aufgenommen. Nach Abflug erfolgen höchstens vier erfolgreiche Nachsuchen, frühestens alle 15 Minuten und nur innerhalb von 24 Stunden; bestehende API-Limits bleiben aktiv.
+- Ein teilweise bekannter Vorflug ohne AIBT darf später ergänzt werden. Vorübergehende API-Fehler verbrauchen den Nachsuchzähler nicht und bleiben zeitlich begrenzt.
+- Die Nachsuche fragt nur die Vorflug-Daten ab, nicht die spätere Ankunft des abgehenden Flugs. AIBT wird weiterhin ausschließlich aus dem tatsächlichen FR24-Gate-Ereignis übernommen.
+- App-Update erforderlich, damit auch archivierte Abflüge mit unvollständigem Vorflug zur Nachsuche angemeldet bleiben.
+
 ## 1.2.14
 
 - Bei Abflügen ab BER ermittelt der Pi den unmittelbar vorhergehenden Flug derselben Registrierung mit tatsächlicher Landung in BER. Keine Zuordnung nach Flugnummer minus eins.

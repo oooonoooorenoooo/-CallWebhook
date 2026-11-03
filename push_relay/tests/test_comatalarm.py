@@ -13,6 +13,39 @@ from push_relay.comatalarm import FlightProvider, SharedAPIStatus
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_departure_previous_arrival_shared_persisted_without_false_arrival(self):
+        self.flight.update(number='LH207', origin='BER', destination='FRA', registration='D-AIZD')
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True,
+                         stand_positions=[dict(name='A12',latitude=52.36507,longitude=13.5053)])
+        peer = await self.add_peer(dict(self.flight, id='peer-departure'), foreground=True, server_polling=True, relay_alerts=True,
+                                   stand_positions=[dict(name='A12',latitude=52.36507,longitude=13.5053)])
+        inbound = dict(id='206', number='LH206', registration='D-AIZD', destination='BER', ata=self.now-800, aibt=self.now-600,
+                       aibt_position=dict(latitude=52.36507,longitude=13.5053,timestamp=self.now-600))
+        self.comat.provider.lookup.return_value = {'_inbound':inbound, '_inbound_check_at':self.now, '_inbound_registration':'DAIZD'}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+        self.assertEqual(self.comat.sender.await_count, 2)
+        payload = self.comat.sender.call_args.args[2]['flight_state']
+        self.assertEqual(payload['parking_aibt'], self.now-600)
+        self.assertNotIn('aibt', payload)
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
+        state = await (await self.client.get('/comatalarm/v1/state', headers=self.headers)).json()
+        self.assertEqual(state['flights'][0]['_inbound']['id'], '206')
+        self.comat.provider.lookup.return_value = {'atd':self.now+61}
+        await self.comat.tick(self.now+62)
+        calls = self.comat.provider.lookup.await_count
+        await self.comat.tick(self.now+123)
+        self.assertEqual(self.comat.provider.lookup.await_count, calls)
+
+    async def test_departure_invalidated_stand_cannot_be_restored_by_client(self):
+        self.flight.update(number='LH207', origin='BER', destination='FRA', registration='D-AIZD', stand='A12')
+        await self.watch(server_polling=True)
+        self.comat.provider.lookup.return_value = {'_inbound':{}}
+        await self.comat.tick(self.now+1)
+        await self.watch(server_polling=True)
+        state = await (await self.client.get('/comatalarm/v1/state', headers=self.headers)).json()
+        self.assertIsNone(state['flights'][0].get('stand'))
+
     async def test_pi_polls_with_all_five_apps_open_and_preserves_server_snapshot(self):
         await self.watch(foreground=True, api_foreground=True, server_polling=True, relay_alerts=True)
         peers = [self.headers]

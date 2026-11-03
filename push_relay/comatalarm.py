@@ -52,6 +52,54 @@ def stamp(value):
     return None
 
 
+def registration_key(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def departure_from_ber(flight):
+    return flight.get("origin") == "BER" and bool(flight.get("destination")) and flight["destination"] != "BER"
+
+
+def previous_ber_leg(rows, flight, now):
+    """The immediately preceding movement of the assigned aircraft, never number - 1.
+
+    Inspect all routes so an intervening departure/airborne leg cannot make an
+    older BER arrival look like the current turnaround. Missing identity is not
+    evidence. A date range also covers overnight stops.
+    """
+    registration = registration_key(flight.get("registration"))
+    cutoff = min(stamp(flight.get("atd")) or now, now)
+    movements = []
+    for row in rows:
+        if not isinstance(row, dict) or not registration or registration_key(row.get("reg") or row.get("registration")) != registration:
+            continue
+        identifier = row.get("fr24_id")
+        if not identifier or identifier == flight.get("fr24ID"):
+            continue
+        takeoff = stamp(row.get("datetime_takeoff"))
+        seen = stamp(row.get("first_seen"))
+        started = takeoff or seen
+        if not started or not cutoff-48*3600 <= started < cutoff:
+            continue
+        # The current departure may already have ground observations but no ATD.
+        if not flight.get("fr24ID") and row.get("flight") == flight["number"] and row.get("orig_iata") == "BER" and row.get("dest_iata") == flight.get("destination") and abs(started-flight["reference"]) < 6*3600:
+            continue
+        movements.append((started, row))
+    if not movements:
+        return None
+    latest = max(t for t, _ in movements)
+    candidates = {r["fr24_id"]:r for t,r in movements if t == latest}
+    if len(candidates) != 1:
+        return None
+    row = next(iter(candidates.values()))
+    arrived = stamp(row.get("datetime_landed"))
+    destination = row.get("dest_iata_actual") or row.get("dest_iata")
+    if destination != "BER" or not row.get("flight") or not arrived or not latest <= arrived <= cutoff:
+        return None
+    return {"id":row["fr24_id"], "number":row["flight"], "registration":flight["registration"],
+            "origin":row.get("orig_iata") or "", "destination":"BER", "ata":arrived}
+
+
 def package_instructions(packets):
     result = []
     for index, value in enumerate(str(packets or "").split("/")[:2]):
@@ -78,6 +126,12 @@ def transitions(old, new):
             events.append((field, flag, title, body))
     if new.get("gate") and old.get("gate") != new["gate"]:
         events.append(("gate:" + new["gate"], "alarmGate", "Gate-Update", f"{number} · Gate {new['gate']}"))
+    if departure_from_ber(new) and not new.get("atd") and new.get("stand"):
+        inbound, previous = new.get("_inbound") or {}, old.get("_inbound") or {}
+        if inbound.get("aibt") and (inbound.get("id") != previous.get("id") or old.get("stand") != new["stand"]):
+            body = f"{number} · {new.get('registration') or 'Kennzeichen unbekannt'} · Stand {new['stand']} · Vorflug {inbound['number']}"
+            packages = package_instructions(new.get("packets"))
+            events.append(("inbound-parking:"+inbound["id"], "alarmParking", "Standplatz für Abflug", body + (" · "+packages if packages else "")))
     return events
 
 
@@ -98,7 +152,7 @@ def retry_delay(response, now):
 
 
 def arrival_tracking_expired(flight, now):
-    return bool(flight.get("ata") and not flight.get("aibt") and now - flight["ata"] >= 25 * 60)
+    return bool(not departure_from_ber(flight) and flight.get("ata") and not flight.get("aibt") and now - flight["ata"] >= 25 * 60)
 
 
 class FlightProvider:
@@ -109,10 +163,70 @@ class FlightProvider:
         self.credentials = {}
         self.aware_cache = {}
 
+    async def previous_arrival(self, flight, fr24, now):
+        """Pi-only lookup; persisted throttles survive client reposts and restarts."""
+        old = flight.get("_inbound") or {}
+        reg = registration_key(flight.get("registration"))
+        same_aircraft = reg and reg == registration_key(old.get("registration"))
+        if reg == flight.get("_inbound_registration") and now-flight.get("_inbound_check_at", 0) < 300:
+            return {}
+        if not reg:
+            return {"_inbound":{}}
+        cutoff = min(stamp(flight.get("atd")) or now, now)
+        rows = await fr24("flight-summary/full", {"registrations":flight["registration"],
+            "flight_datetime_from":datetime.fromtimestamp(cutoff-48*3600, timezone.utc).isoformat(),
+            "flight_datetime_to":datetime.fromtimestamp(cutoff, timezone.utc).isoformat(), "limit":"100"})
+        result = {"_inbound_check_at":now, "_inbound_registration":reg, "_inbound":{}}
+        # A truncated response cannot prove which leg immediately preceded this one.
+        inbound = previous_ber_leg(rows, flight, now) if len(rows) < 100 else None
+        if not inbound:
+            return result
+        if same_aircraft and old.get("id") == inbound["id"]:
+            inbound = dict(old, **inbound)
+        result["_inbound"] = inbound
+        if inbound.get("aibt") and inbound.get("aibt_position"):
+            return result
+        # Delayed historic events get two bounded recovery attempts; ongoing
+        # taxi-in is checked at the same five-minute interval as the rotation.
+        stale = now-inbound["ata"] > 25*60
+        if stale and (inbound.get("recovery_attempts", 0) >= 2 or now-inbound.get("event_checked_at", 0) < 900):
+            return result
+        events = await fr24("historic/flight-events/light", {"flight_ids":inbound["id"], "event_types":"gate_arrival"})
+        inbound["event_checked_at"] = now
+        if stale:
+            inbound["recovery_attempts"] = inbound.get("recovery_attempts", 0)+1
+        for row in events:
+            if not isinstance(row, dict) or row.get("fr24_id") != inbound["id"]:
+                continue
+            for event in row.get("events", []):
+                if not isinstance(event, dict) or event.get("type") != "gate_arrival":
+                    continue
+                when = next((stamp(event.get(k)) for k in ("timestamp","time","event_time","datetime") if stamp(event.get(k))), None)
+                if not when or not inbound["ata"] <= when <= cutoff:
+                    continue
+                inbound["aibt"] = when
+                details = event.get("details") or {}
+                locations = [{"lat":details.get("gate_lat"), "lon":details.get("gate_lon")}, event, event.get("position") or {}, details.get("position") or {}]
+                for location in locations:
+                    lat, lon = location.get("lat", location.get("latitude")), location.get("lon", location.get("longitude"))
+                    if valid_coordinate(lat, lon):
+                        inbound["aibt_position"] = {"latitude":lat, "longitude":lon, "timestamp":when}
+                        break
+        if inbound.get("aibt") and not inbound.get("aibt_position"):
+            points = await fr24("historic/flight-positions/light", {"timestamp":str(int(inbound["aibt"])), "flights":inbound["number"], "limit":"10"})
+            for point in points:
+                if not isinstance(point, dict) or point.get("fr24_id") != inbound["id"]:
+                    continue
+                observed, speed = stamp(point.get("timestamp")), point.get("gspeed")
+                if observed and abs(observed-inbound["aibt"]) <= 60 and inbound["ata"] <= observed <= cutoff and valid_coordinate(point.get("lat"), point.get("lon")) and isinstance(speed, (int,float)) and not isinstance(speed,bool) and 0 <= speed*1.852 <= 5:
+                    inbound["aibt_position"] = {"latitude":point["lat"], "longitude":point["lon"], "timestamp":observed}
+                    break
+        return result
+
     async def lookup(self, flight, token, now):
         if arrival_tracking_expired(flight, now):
             return {}
-        cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"), bool(flight.get("_central")))
+        cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"), bool(flight.get("_central")), registration_key(flight.get("registration")))
         cached = self.cache.get(cache_key)
         if cached and now - cached[0] < 60:
             return dict(cached[1])
@@ -157,15 +271,18 @@ class FlightProvider:
                         matches = [r for r in rows if isinstance(r, dict) and
                             (not identifier or r.get("fr24_id") == identifier) and
                             (identifier or r.get("flight") == flight["number"]) and
-                            (not flight.get("destination") or r.get("dest_iata") == flight["destination"])]
+                            (not flight.get("destination") or r.get("dest_iata") == flight["destination"]) and
+                            (not flight.get("origin") or r.get("orig_iata") == flight["origin"])]
                         if matches:
                             row = min(matches, key=lambda r: abs((stamp(r.get("datetime_takeoff")) or flight["reference"]) - flight["reference"]))
                             identifier = row.get("fr24_id")
                             result.update(registration=row.get("reg") or row.get("registration") or flight.get("registration"), fr24ID=identifier, atd=stamp(row.get("datetime_takeoff")), ata=stamp(row.get("datetime_landed")))
+                            for key, field in (("origin","orig_iata"),("destination","dest_iata")):
+                                if row.get(field): result[key] = row[field]
                             actual, planned = row.get("dest_iata_actual"), row.get("dest_iata")
                             if actual and planned and actual != planned:
                                 result["diverted"] = True
-                    if identifier and (result.get("ata") or flight.get("ata") or flight.get("aibt")) and not flight.get("aibt_position"):
+                    if not departure_from_ber(dict(flight, **result)) and identifier and (result.get("ata") or flight.get("ata") or flight.get("aibt")) and not flight.get("aibt_position"):
                         rows = await fr24("historic/flight-events/light", {"flight_ids": identifier, "event_types": "gate_arrival"})
                         for row in rows:
                             if not isinstance(row, dict) or row.get("fr24_id") != identifier:
@@ -195,7 +312,7 @@ class FlightProvider:
                                 speed = point.get("gspeed")
                                 if observed and abs(observed-aibt) <= 60 and valid_coordinate(point.get("lat"), point.get("lon")) and isinstance(speed, (int,float)) and not isinstance(speed,bool) and 0 <= speed*1.852 <= 5:
                                     result["aibt_position"] = {"latitude":point["lat"],"longitude":point["lon"],"timestamp":observed}
-                    if flight.get("_central") and flight.get("track_outbound") and flight.get("registration") and (flight.get("ata") or flight.get("aibt")):
+                    if flight.get("_central") and not departure_from_ber(flight) and flight.get("track_outbound") and flight.get("registration") and (flight.get("ata") or flight.get("aibt")):
                         airport = flight.get("destination") or "BER"
                         def matches_outbound(row):
                             return (isinstance(row, dict) and row.get("orig_iata") == airport
@@ -226,6 +343,8 @@ class FlightProvider:
                             if all(isinstance(v,(float,int)) and not isinstance(v,bool) and math.isfinite(v) for v in (lat,lon)) and -90<=lat<=90 and -180<=lon<=180:
                                 # Only retain fields consumed by FR24Client.sample; no credentials.
                                 result["_live"] = {k:v for k,v in live.items() if k in ("fr24_id","hex","lat","lon","alt","gspeed","track","vspeed","on_ground","timestamp","eta","sta","reg","orig_iata","dest_iata","type")}
+                                for key, field in (("origin","orig_iata"),("destination","dest_iata"),("registration","reg")):
+                                    if live.get(field): result[key] = live[field]
             except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
                 provider_error = "FR24: Token, Tarif oder Verbindung prüfen"
             # BER remains the gate source; a passenger gate is never a GPS stand.
@@ -285,6 +404,21 @@ class FlightProvider:
                     if not result.get(key) and schedule.get(key):
                         result[key] = schedule[key]
                 result["_checked_at"] = now
+                for key in ("origin", "destination", "registration"):
+                    if not result.get(key) and schedule.get(key): result[key] = schedule[key]
+                if result.get("registration") and registration_key(result["registration"]) != registration_key(flight.get("registration")) and "_live" not in result:
+                    result["_live"] = {}
+                resolved = dict(flight, **{k:v for k,v in result.items() if v is not None})
+                if departure_from_ber(resolved):
+                    # Destination-arrival milestones never describe the BER stand.
+                    result.pop("aibt", None); result.pop("aibt_position", None)
+                    try:
+                        if token: result.update(await self.previous_arrival(resolved, fr24, now))
+                    except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
+                        provider_error = "Vorflug-Abgleich vorübergehend nicht verfügbar"
+                        previous = flight.get("_inbound") or {}
+                        if registration_key(previous.get("registration")) != registration_key(resolved.get("registration")):
+                            result["_inbound"] = {}
         for key in ("atd", "ata", "aibt"):
             if result.get(key) is not None and not flight["reference"]-86400 <= result[key] <= now+60:
                 result.pop(key)
@@ -575,9 +709,13 @@ class ComatAlarm:
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")
             old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), {})
-            for key in ("atd", "ata", "aibt", "fr24ID", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_outbound"):
+            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_outbound"):
                 if old.get(key):
                     row[key] = old[key]
+            for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized"):
+                if key in old: row[key] = old[key]
+            if departure_from_ber(row) and "_inbound" in old:
+                row["stand"] = old.get("stand")
             if any(entry["id"] == row["id"] for entry in clean):
                 raise ValueError("Duplicate flight")
             clean.append(row)
@@ -671,7 +809,7 @@ class ComatAlarm:
         identity = hashlib.sha256(token.encode()).hexdigest()
         self.shared_results = [entry for entry in self.shared_results if now-entry[2] < 60]
         for owner, snapshot, _, result in self.shared_results:
-            if owner == identity and bool(snapshot.get("_central")) == central and same_occurrence(snapshot, flight):
+            if owner == identity and bool(snapshot.get("_central")) == central and same_occurrence(snapshot, flight) and registration_key(snapshot.get("registration")) == registration_key(flight.get("registration")):
                 return dict(result)
         try:
             query = dict(flight, _central=True) if central else flight
@@ -700,15 +838,18 @@ class ComatAlarm:
                 error, pending = "", []
                 ordered = sorted(flights, key=lambda f: self.last_successful_lookup.get(self.polling_key(f, device["api_token"]), 0))
                 for flight in ordered:
+                    if departure_from_ber(flight) and flight.get("_departure_finalized"):
+                        continue
                     repairing = bool(device["server_polling"] and flight.get("repair_arrival") and flight.get("aibt") and not flight.get("aibt_position"))
                     outbound = bool(device["server_polling"] and flight.get("track_outbound") and not flight.get("_outbound", {}).get("atd"))
-                    if arrival_tracking_expired(flight, now) or (flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
+                    if arrival_tracking_expired(flight, now) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
                         continue
                     if repairing and (flight.get("_repair_attempts", 0) >= 2 or now-flight.get("_repair_attempted_at", 0) < 900):
                         continue
                     try:
                         changes = await self.shared_lookup(flight, device["api_token"], now, central=bool(device["server_polling"]))
-                        error = changes.pop("_error", error)
+                        lookup_error = changes.pop("_error", "")
+                        error = lookup_error or error
                         if repairing:
                             changes["_repair_attempted_at"] = now
                             changes["_repair_attempts"] = flight.get("_repair_attempts", 0) + 1
@@ -716,7 +857,12 @@ class ComatAlarm:
                             stand = match_stand(changes["aibt_position"], unprotect_index(device["stand_index"]))
                             if stand:
                                 changes["stand"] = stand
+                        if "_inbound" in changes:
+                            point = (changes["_inbound"] or {}).get("aibt_position")
+                            changes["stand"] = match_stand(point, unprotect_index(device["stand_index"])) if point else None
                         updated = dict(flight, **changes)
+                        if departure_from_ber(updated) and updated.get("atd") and not lookup_error:
+                            changes["_departure_finalized"] = True
                         pending.extend(self.events(device["id"], flight, updated, prefs, now))
                         flight.update(changes)
                     except Exception:
@@ -745,8 +891,12 @@ class ComatAlarm:
                 day = datetime.fromtimestamp(updated["reference"], ZoneInfo("Europe/Berlin")).date().isoformat()
                 identity = updated["number"] + ":" + day + ":" + event
                 event_id = hashlib.sha256(identity.encode()).hexdigest()
-                payload = json.dumps({"title":title,"body":body,"flight_id":updated["id"],"event_id":event_id,"flag":flag,
-                    "flight_state":{k:updated[k] for k in ("id","atd","ata","aibt","stand") if updated.get(k)}})
+                state = {k:updated[k] for k in ("id","atd","ata","aibt","stand") if updated.get(k)}
+                if departure_from_ber(updated):
+                    state["departure_from_ber"] = True
+                    if updated.get("_inbound", {}).get("aibt"):
+                        state["parking_aibt"] = updated["_inbound"]["aibt"]
+                payload = json.dumps({"title":title,"body":body,"flight_id":updated["id"],"event_id":event_id,"flag":flag,"flight_state":state})
                 pending.append((device_id, event_id, payload, now))
         return pending
 

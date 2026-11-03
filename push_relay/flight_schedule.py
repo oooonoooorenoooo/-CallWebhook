@@ -18,6 +18,16 @@ def compact(values):
     return {k:v for k,v in values.items() if v is not None and v != ""}
 
 
+def passenger_gate(value, source):
+    """Provider gate evidence for prediction, never a confirmed parking stand."""
+    if not isinstance(value, str):
+        return {}
+    value = value.strip().upper()
+    if not value or value in ("-", "--", "—", "NULL", "NONE", "N/A") or len(value) > 32 or any(ord(c) < 32 for c in value):
+        return {}
+    return {"gate": value, "gate_source": source}
+
+
 def ber_schedule(row, departing):
     result = {}
     fields = {"std": ("dep_scheduled_time", "scheduled_time"), "etd": ("dep_estimated_time",)} if departing else {"sta": ("arr_scheduled_time", "scheduled_time"), "eta": ("arr_estimated_time",)}
@@ -27,7 +37,7 @@ def ber_schedule(row, departing):
     return compact(result)
 
 
-def flightstats(root, official, reference):
+def flightstats(root, official, reference, departing=False):
     if official:
         rows = root.get("flightStatuses") or []
         def value(row, key):
@@ -38,6 +48,7 @@ def flightstats(root, official, reference):
         result = {k:value(row, v) for k,v in {"std":"scheduledGateDeparture", "etd":"estimatedGateDeparture", "atd":"actualRunwayDeparture", "sta":"scheduledGateArrival", "eta":"estimatedRunwayArrival", "ata":"actualRunwayArrival", "eibt":"estimatedGateArrival"}.items()}
         result["eta"] = result["eta"] or result["eibt"]
         equipment = row.get("flightEquipment") or {}
+        result.update(passenger_gate((row.get("airportResources") or {}).get("departureGate" if departing else "arrivalGate"), "FlightStats"))
         result.update(origin=row.get("departureAirportFsCode"), destination=row.get("arrivalAirportFsCode"), registration=equipment.get("tailNumber"), aircraftType=equipment.get("actualEquipmentIataCode") or equipment.get("scheduledEquipmentIataCode"), cancelled=row.get("status")=="C", diverted=row.get("status")=="D")
     else:
         row = root.get("data", root) or {}
@@ -52,6 +63,7 @@ def flightstats(root, official, reference):
         if result["ata"] is None and note.get("hasActualRunwayArrivalTime") is True:
             result["ata"] = result["eta"]
         equipment, status = row.get("equipment") or {}, row.get("status") or {}
+        result.update(passenger_gate((departure if departing else arrival).get("gate"), "FlightStats"))
         result.update(origin=departure.get("iata") or departure.get("fs"), destination=arrival.get("iata") or arrival.get("fs"), registration=equipment.get("tailNumber"), aircraftType=equipment.get("iata"), cancelled=status.get("statusCode")=="C" or "cancel" in str(status.get("status", "")).lower(), diverted=status.get("statusCode")=="D" or "divert" in str(status.get("status", "")).lower())
     # AIBT remains the FR24 gate-arrival event, not a schedule estimate.
     return compact(result)
@@ -77,7 +89,7 @@ async def schedule_lookup(session, flight, credentials, cooldown, now):
         provider_http_status("FlightStats", response, cooldown, "flightstats", now)
         if response.status != 200:
             return {}
-        result = flightstats(await response.json(), official, flight["reference"])
+        result = flightstats(await response.json(), official, flight["reference"], flight.get("origin") == "BER")
     if any(flight.get(k) and result.get(k) and flight[k] != result[k] for k in ("origin","destination")):
         return {}
     for k in ("atd","ata"):
@@ -114,5 +126,6 @@ async def aware_lookup(session, flight, credentials, cooldown, now):
     row = min(rows, key=lambda r: abs((timestamp(r.get("scheduled_out")) or timestamp(r.get("scheduled_off")))-flight["reference"]))
     result = {k:timestamp(row.get(v)) for k,v in {"std":"scheduled_out","etd":"estimated_out","atd":"actual_off","sta":"scheduled_in","eta":"estimated_on","ata":"actual_on","eibt":"estimated_in"}.items()}
     result["eta"] = result["eta"] or result["eibt"]
+    result.update(passenger_gate(row.get("gate_origin" if flight.get("origin") == "BER" else "gate_destination"), "FlightAware"))
     result.update(registration=row.get("registration"), aircraftType=row.get("aircraft_type"), cancelled=row.get("cancelled") is True, diverted=row.get("diverted") is True)
     return compact(result)

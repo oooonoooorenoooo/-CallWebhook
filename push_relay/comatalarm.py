@@ -398,7 +398,8 @@ class FlightProvider:
                                     if live.get(field): result[key] = live[field]
             except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
                 provider_error = "FR24: Token, Tarif oder Verbindung prüfen"
-            # BER remains the gate source; a passenger gate is never a GPS stand.
+            # Prefer BER gate evidence; other schedule sources can fill gaps.
+            from .flight_schedule import passenger_gate
             date = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).date()
             params = {"arrivalDeparture": "D" if flight.get("origin") == "BER" else "A", "dateFrom": date.isoformat() + "T00:00:00", "dateUntil": (date + timedelta(days=1)).isoformat(), "search": flight["number"], "lang": "de", "page": "1", "terminal": ""}
             try:
@@ -415,9 +416,7 @@ class FlightProvider:
                             if flight.get("_central"):
                                 from .flight_schedule import ber_schedule
                                 result["_schedule"] = ber_schedule(row, flight.get("origin") == "BER")
-                            gate = row.get("gate")
-                            if isinstance(gate, str) and gate.strip() and gate != "-":
-                                result["gate"] = gate[:32]
+                            result.update(passenger_gate(row.get("gate"), "BER"))
                             status = str(row.get("status", row.get("status_text", ""))).lower()
                             if any(x in status for x in ("cancel", "annull", "gestrichen")):
                                 result["cancelled"] = True
@@ -447,9 +446,12 @@ class FlightProvider:
                     for flag in ("cancelled", "diverted"):
                         fallback[flag] = bool(schedule.get(flag) or aware[1].get(flag))
                     schedule = fallback
-                # BER owns arrival estimate and gate; other sources supply departure.
+                # Prefer BER where available, then FlightStats, then FlightAware.
+                # Reuse the existing responses: no additional gate API requests.
                 schedule.update(result.get("_schedule", {}))
                 result["_schedule"] = schedule
+                if not result.get("gate") and schedule.get("gate"):
+                    result.update(gate=schedule["gate"], gate_source=schedule["gate_source"])
                 for key in ("atd", "ata", "cancelled", "diverted"):
                     if not result.get(key) and schedule.get(key):
                         result[key] = schedule[key]
@@ -762,6 +764,9 @@ class ComatAlarm:
                     row[key] = old[key]
             for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized", "_departure_repair_at", "_departure_repair_attempts"):
                 if key in old: row[key] = old[key]
+            # A stale phone repost must not erase or relabel Pi-owned gate data.
+            if old.get("gate_source") and old.get("gate"):
+                row.update(gate=old["gate"], gate_source=old["gate_source"])
             if departure_from_ber(row) and "_inbound" in old:
                 row["stand"] = old.get("stand")
             if any(entry["id"] == row["id"] for entry in clean):
@@ -853,7 +858,7 @@ class ComatAlarm:
         for peer in ([] if central else self.db.execute("SELECT watch FROM comat_devices WHERE expires>? AND api_foreground_until>?", (now, now)).fetchall()):
             for snapshot in json.loads(peer["watch"]):
                 if same_occurrence(flight, snapshot):
-                    return {k: snapshot[k] for k in ("atd", "ata", "aibt", "fr24ID", "registration", "gate", "cancelled", "diverted") if snapshot.get(k)}
+                    return {k: snapshot[k] for k in ("atd", "ata", "aibt", "fr24ID", "registration", "gate", "gate_source", "cancelled", "diverted") if snapshot.get(k)}
         identity = hashlib.sha256(token.encode()).hexdigest()
         self.shared_results = [entry for entry in self.shared_results if now-entry[2] < 60]
         for owner, snapshot, _, result in self.shared_results:

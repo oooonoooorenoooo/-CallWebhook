@@ -13,6 +13,26 @@ from push_relay.comatalarm import FlightProvider, SharedAPIStatus
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_provider_gate_survives_stale_phone_reposts_and_is_shared(self):
+        self.flight.update(number='LH206', origin='FRA', destination='BER', gate='OLD')
+        await self.watch(server_polling=True)
+        peer = await self.add_peer(dict(self.flight, id='peer-flight'), server_polling=True)
+        self.comat.provider.lookup.return_value = {'gate':'C1', 'gate_source':'FlightStats'}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+        response = await self.watch(server_polling=True)
+        self.assertEqual(response.status, 200)
+        for headers in (self.headers, peer):
+            state = await (await self.client.get('/comatalarm/v1/state', headers=headers)).json()
+            self.assertEqual(state['flights'][0]['gate'], 'C1')
+            self.assertEqual(state['flights'][0]['gate_source'], 'FlightStats')
+        # A later provider gate change still replaces the preserved value.
+        self.comat.provider.lookup.return_value = {'gate':'A2', 'gate_source':'BER'}
+        await self.comat.tick(self.now+62)
+        state = await (await self.client.get('/comatalarm/v1/state', headers=self.headers)).json()
+        self.assertEqual(state['flights'][0]['gate'], 'A2')
+        self.assertEqual(state['flights'][0]['gate_source'], 'BER')
+
     async def test_old_finalized_departure_recovers_partial_previous_arrival_after_takeoff(self):
         self.flight.update(number='LH207', origin='BER', destination='FRA', registration='D-AIZD', atd=self.now-300)
         await self.watch(server_polling=True, relay_alerts=True,

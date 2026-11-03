@@ -1,11 +1,27 @@
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
-from push_relay.flight_schedule import flightstats, ber_schedule, timestamp
+from push_relay.flight_schedule import flightstats, ber_schedule, timestamp, passenger_gate
 from push_relay.comatalarm import FlightProvider
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_flightstats_gate_is_selected_for_the_ber_leg(self):
+        public = {'data':{'departureAirport':{'gate':'Z 1'}, 'arrivalAirport':{'gate':' c1 '}}}
+        official = {'flightStatuses':[{'airportResources':{'departureGate':'Z 1', 'arrivalGate':' c1 '}}]}
+        for root, is_official in ((public, False), (official, True)):
+            with self.subTest(official=is_official):
+                arriving = flightstats(root, is_official, time.time())
+                departing = flightstats(root, is_official, time.time(), departing=True)
+                self.assertEqual((arriving['gate'], arriving['gate_source']), ('C1', 'FlightStats'))
+                self.assertEqual(departing['gate'], 'Z 1')
+                self.assertNotIn('stand', arriving)
+                self.assertNotIn('aibt', arriving)
+
+    def test_missing_gate_values_do_not_overwrite_valid_fallbacks(self):
+        for gate in (None, '', ' - ', '—', 'NULL', 'N/A', {}, 42, 'x'*33, 'A\n1'):
+            self.assertEqual(passenger_gate(gate, 'FlightStats'), {})
+
     def test_gate_departure_is_not_takeoff(self):
         root = {'schedule':{'scheduledDepartureUTC':'2026-11-03T12:00:00Z','estimatedActualDepartureUTC':'2026-11-03T12:03:00Z'}, 'flightNote':{'hasActualGateDepartureTime':True}}
         result = flightstats(root,False,time.time())
@@ -28,6 +44,50 @@ class ScheduleTests(unittest.TestCase):
 
 
 class CentralProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ber_denial_keeps_schedule_gate_fallback_and_shared_cache(self):
+        now = timestamp('2026-11-03T21:24:00Z')
+        for ber_status, stats_gate, expected, source in (
+                (403, 'C1', 'C1', 'FlightStats'),
+                (403, '-', 'B3', 'FlightAware'),
+                (200, 'C1', 'A2', 'BER')):
+            with self.subTest(ber=ber_status, stats_gate=stats_gate):
+                calls = []
+                class Response:
+                    headers = {}
+                    def __init__(self, status, body): self.status, self.body = status, body
+                    async def __aenter__(self): return self
+                    async def __aexit__(self, *args): pass
+                    async def json(self): return self.body
+                def get(url, **kwargs):
+                    calls.append(url)
+                    if 'ber.berlin-airport' in url:
+                        return Response(ber_status, {'data':{'items':[{'flight_number':'LH 206', 'gate':'A2'}]}})
+                    if 'flightstats.com' in url:
+                        return Response(200, {'data':{'schedule':{'scheduledDepartureUTC':'2026-11-03T21:00:00Z'},
+                            'departureAirport':{'iata':'FRA', 'gate':'WRONG'}, 'arrivalAirport':{'iata':'BER', 'gate':stats_gate}}})
+                    if 'flightaware.com' in url:
+                        return Response(200, {'flights':[{'scheduled_out':'2026-11-03T21:00:00Z',
+                            'origin':{'code_iata':'FRA'}, 'destination':{'code_iata':'BER'}, 'gate_origin':'WRONG', 'gate_destination':'B3'}]})
+                    self.fail('Unexpected provider request: '+url)
+                session = AsyncMock(); session.get = get
+                with patch('push_relay.comatalarm.ClientSession') as cls:
+                    cls.return_value.__aenter__.return_value = session
+                    provider = FlightProvider(); provider.credentials = {'FLIGHTAWARE_API_KEY':'test-key'}
+                    flight = dict(number='LH206', reference=now, origin='FRA', destination='BER', _central=True)
+                    result = await provider.lookup(flight, '', now)
+                    again = await provider.lookup(dict(flight, id='another-phone'), '', now+1)
+                    self.assertEqual((result['gate'], result['gate_source']), (expected, source))
+                    self.assertEqual(result, again)
+                    self.assertEqual(len(calls), 3, 'reuse schedule responses and the same flight across phones')
+                    self.assertNotIn('stand', result)
+                    self.assertNotIn('aibt', result)
+                    if ber_status == 403:
+                        self.assertGreater(provider.cooldown['ber'], now+61)
+                        later = await provider.lookup(flight, '', now+61)
+                        self.assertEqual(later['gate'], expected)
+                        self.assertEqual(sum('ber.berlin-airport' in url for url in calls), 1, 'respect BER cooldown')
+                        self.assertEqual(len(calls), 4, 'FlightAware keeps its existing low-frequency cache')
+
     async def test_live_snapshot_matches_occurrence_and_is_shared_with_schedule(self):
         now = time.time()
         payloads = [

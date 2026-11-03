@@ -60,6 +60,19 @@ def departure_from_ber(flight):
     return flight.get("origin") == "BER" and bool(flight.get("destination")) and flight["destination"] != "BER"
 
 
+def previous_parking_ready(flight):
+    previous = flight.get("_inbound") or {}
+    point = previous.get("aibt_position") or {}
+    return bool(previous.get("aibt") and previous.get("ata") and previous.get("id")
+        and previous.get("destination") == "BER" and previous["id"] != flight.get("fr24ID")
+        and registration_key(previous.get("registration"))
+        and registration_key(previous.get("registration")) == registration_key(flight.get("registration"))
+        and previous["ata"] <= previous["aibt"] <= (flight.get("atd") or time.time())
+        and valid_coordinate(point.get("latitude"), point.get("longitude"))
+        and stamp(point.get("timestamp")) and point["timestamp"] >= previous["ata"]
+        and abs(point["timestamp"]-previous["aibt"]) <= 60)
+
+
 def previous_ber_leg(rows, flight, now):
     """The immediately preceding movement of the assigned aircraft, never number - 1.
 
@@ -82,7 +95,8 @@ def previous_ber_leg(rows, flight, now):
         if not started or not cutoff-48*3600 <= started < cutoff:
             continue
         # The current departure may already have ground observations but no ATD.
-        if not flight.get("fr24ID") and row.get("flight") == flight["number"] and row.get("orig_iata") == "BER" and row.get("dest_iata") == flight.get("destination") and abs(started-flight["reference"]) < 6*3600:
+        known_id = flight.get("fr24ID") or ""
+        if (not known_id or known_id.startswith(("TEMP_", "NS_"))) and row.get("flight") == flight["number"] and row.get("orig_iata") == "BER" and row.get("dest_iata") == flight.get("destination") and abs(started-flight["reference"]) < 6*3600:
             continue
         movements.append((started, row))
     if not movements:
@@ -189,7 +203,10 @@ class FlightProvider:
         # Delayed historic events get two bounded recovery attempts; ongoing
         # taxi-in is checked at the same five-minute interval as the rotation.
         stale = now-inbound["ata"] > 25*60
-        if stale and (inbound.get("recovery_attempts", 0) >= 2 or now-inbound.get("event_checked_at", 0) < 900):
+        # After takeoff the outer poller owns a separate bounded recovery budget.
+        # Old pre-departure attempts must not permanently suppress a late event.
+        departed = bool(stamp(flight.get("atd")) and flight["atd"] <= now)
+        if stale and ((not departed and inbound.get("recovery_attempts", 0) >= 2) or now-inbound.get("event_checked_at", 0) < 900):
             return result
         events = await fr24("historic/flight-events/light", {"flight_ids":inbound["id"], "event_types":"gate_arrival"})
         inbound["event_checked_at"] = now
@@ -252,6 +269,16 @@ class FlightProvider:
                     if not isinstance(body, dict) or not isinstance(body.get("data"), list):
                         raise RuntimeError("FR24: Antwortformat ungültig")
                     return body["data"]
+
+            if flight.get("_central") and departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now:
+                # Recover the BER turnaround, not this departure's later arrival
+                # at another airport. No live/schedule/provider fan-out is needed.
+                try:
+                    result = await self.previous_arrival(flight, fr24, now) if token else {"_error":"FR24-Token fehlt"}
+                except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
+                    result = {"_error":"Vorflug-Abgleich vorübergehend nicht verfügbar"}
+                self.cache[cache_key] = (now, result)
+                return result
 
             identifier = flight.get("fr24ID")
             if identifier and identifier.startswith(("TEMP_", "NS_")):
@@ -712,7 +739,7 @@ class ComatAlarm:
             for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_outbound"):
                 if old.get(key):
                     row[key] = old[key]
-            for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized"):
+            for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized", "_departure_repair_at", "_departure_repair_attempts"):
                 if key in old: row[key] = old[key]
             if departure_from_ber(row) and "_inbound" in old:
                 row["stand"] = old.get("stand")
@@ -838,8 +865,21 @@ class ComatAlarm:
                 error, pending = "", []
                 ordered = sorted(flights, key=lambda f: self.last_successful_lookup.get(self.polling_key(f, device["api_token"]), 0))
                 for flight in ordered:
-                    if departure_from_ber(flight) and flight.get("_departure_finalized"):
-                        continue
+                    departed = departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now
+                    if departed:
+                        if previous_parking_ready(flight):
+                            # A newly installed local index can now match saved
+                            # evidence without spending another FR24 request.
+                            flight["stand"] = match_stand(flight["_inbound"]["aibt_position"], unprotect_index(device["stand_index"])) or flight.get("stand")
+                            flight["_departure_finalized"] = True
+                            continue
+                        # Reopen legacy finalizations that had no predecessor
+                        # evidence. At most four attempts, 15 minutes apart, 24h.
+                        if now-flight["atd"] >= 86400 or flight.get("_departure_repair_attempts", 0) >= 4:
+                            flight["_departure_finalized"] = True
+                            continue
+                        if now-flight.get("_departure_repair_at", 0) < 900:
+                            continue
                     repairing = bool(device["server_polling"] and flight.get("repair_arrival") and flight.get("aibt") and not flight.get("aibt_position"))
                     outbound = bool(device["server_polling"] and flight.get("track_outbound") and not flight.get("_outbound", {}).get("atd"))
                     if arrival_tracking_expired(flight, now) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
@@ -861,8 +901,12 @@ class ComatAlarm:
                             point = (changes["_inbound"] or {}).get("aibt_position")
                             changes["stand"] = match_stand(point, unprotect_index(device["stand_index"])) if point else None
                         updated = dict(flight, **changes)
-                        if departure_from_ber(updated) and updated.get("atd") and not lookup_error:
-                            changes["_departure_finalized"] = True
+                        if departure_from_ber(updated) and updated.get("atd"):
+                            changes["_departure_finalized"] = previous_parking_ready(updated)
+                            if not changes["_departure_finalized"]:
+                                changes["_departure_repair_at"] = now
+                                if not lookup_error:
+                                    changes["_departure_repair_attempts"] = flight.get("_departure_repair_attempts", 0)+1
                         pending.extend(self.events(device["id"], flight, updated, prefs, now))
                         flight.update(changes)
                     except Exception:

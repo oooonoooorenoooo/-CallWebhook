@@ -45,8 +45,40 @@ class RotationTests(unittest.TestCase):
         later = self.leg("LH208", "future", datetime_takeoff=self.now+3600, datetime_landed=self.now+5000)
         self.assertEqual(previous_ber_leg([later, own, self.leg()], departing, self.now)["id"], "inbound")
 
+    def test_placeholder_id_does_not_make_current_ground_departure_block_its_predecessor(self):
+        own = self.leg("LH207", "outgoing", orig_iata="BER", dest_iata="FRA",
+                       datetime_takeoff=None, first_seen=self.now-100, datetime_landed=None)
+        for placeholder in ("TEMP_LH207", "NS_LH207"):
+            result = previous_ber_leg([own, self.leg()], dict(self.flight, fr24ID=placeholder), self.now)
+            self.assertEqual(result["id"], "inbound")
+
 
 class PreviousArrivalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_departed_flight_retries_event_after_predeparture_budget_was_spent(self):
+        now = time.time()
+        old = dict(id="206", number="LH206", registration="D-AIZD", ata=now-8000,
+                   recovery_attempts=2, event_checked_at=now-1800)
+        flight = dict(number="LH207", origin="BER", destination="FRA", registration="D-AIZD", reference=now-500,
+                      atd=now-300, _inbound=old, _inbound_check_at=now-1800, _inbound_registration="DAIZD")
+        fr24 = AsyncMock(side_effect=[
+            [dict(fr24_id="206", flight="LH206", reg="D-AIZD", orig_iata="FRA", dest_iata="BER", datetime_takeoff=now-10000, datetime_landed=now-8000)],
+            [dict(fr24_id="206", events=[dict(type="gate_arrival", timestamp=now-7500, details={"gate_lat":52.36507,"gate_lon":13.5053})])]])
+        result = await FlightProvider().previous_arrival(flight, fr24, now)
+        self.assertEqual(result["_inbound"]["aibt"], now-7500)
+        self.assertEqual(fr24.await_count, 2)
+
+    async def test_postdeparture_recovery_does_not_query_own_destination_or_schedules(self):
+        now = time.time()
+        flight = dict(number="LH207", origin="BER", destination="FRA", registration="D-AIZD", reference=now-500, atd=now-300, _central=True)
+        with patch("push_relay.comatalarm.ClientSession") as cls, patch("push_relay.flight_schedule.schedule_lookup", new_callable=AsyncMock) as schedule:
+            session = cls.return_value.__aenter__.return_value
+            provider = FlightProvider()
+            provider.previous_arrival = AsyncMock(return_value={"_inbound":{}})
+            await provider.lookup(flight, "secret", now)
+        provider.previous_arrival.assert_awaited_once()
+        schedule.assert_not_awaited()
+        session.get.assert_not_called()
+
     async def test_real_event_and_historic_position_are_separate_from_departure(self):
         now = time.time()
         flight = dict(number="LH207", origin="BER", destination="FRA", registration="D-AIZD", reference=now+1800)

@@ -13,6 +13,49 @@ from push_relay.comatalarm import FlightProvider, SharedAPIStatus
 
 class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_old_finalized_departure_recovers_partial_previous_arrival_after_takeoff(self):
+        self.flight.update(number='LH207', origin='BER', destination='FRA', registration='D-AIZD', atd=self.now-300)
+        await self.watch(server_polling=True, relay_alerts=True,
+                         stand_positions=[dict(name='A12',latitude=52.36507,longitude=13.5053)])
+        row = self.comat.db.execute('SELECT id,watch FROM comat_devices').fetchone()
+        flights = json.loads(row['watch'])
+        flights[0]['_departure_finalized'] = True  # State left by 1.2.14.
+        self.comat.db.execute('UPDATE comat_devices SET watch=? WHERE id=?',(json.dumps(flights),row['id']))
+        self.comat.db.commit()
+        inbound = dict(id='206', number='LH206', registration='D-AIZD', destination='BER', ata=self.now-800)
+        self.comat.provider.lookup.return_value = {'_inbound':inbound}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1)
+        await self.watch(server_polling=True, relay_alerts=True)
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count, 1, 'no minute-by-minute recovery')
+        inbound = dict(inbound, aibt=self.now-600, aibt_position=dict(latitude=52.36507,longitude=13.5053,timestamp=self.now-600))
+        self.comat.provider.lookup.return_value = {'_inbound':inbound}
+        await self.comat.tick(self.now+902)
+        self.assertEqual(self.comat.provider.lookup.await_count, 2)
+        state = await (await self.client.get('/comatalarm/v1/state',headers=self.headers)).json()
+        self.assertEqual(state['flights'][0]['stand'],'A12')
+        self.assertNotIn('aibt',state['flights'][0])
+        self.assertTrue(state['flights'][0]['_departure_finalized'])
+        await self.comat.tick(self.now+1803)
+        self.assertEqual(self.comat.provider.lookup.await_count, 2)
+
+    async def test_postdeparture_recovery_is_bounded_and_stops_after_24h(self):
+        self.flight.update(number='LH207', origin='BER', destination='FRA', registration='D-AIZD', atd=self.now-300)
+        await self.watch(server_polling=True)
+        self.comat.provider.lookup.return_value = {'_inbound':{}}
+        for offset in (1, 902, 1803, 2704, 3605):
+            await self.comat.tick(self.now+offset)
+        self.assertEqual(self.comat.provider.lookup.await_count,4)
+        row = self.comat.db.execute('SELECT id,watch FROM comat_devices').fetchone()
+        flights = json.loads(row['watch'])
+        flights[0]['_departure_repair_attempts'] = 0
+        flights[0]['atd'] = self.now-86400
+        self.comat.db.execute('UPDATE comat_devices SET watch=? WHERE id=?',(json.dumps(flights),row['id']))
+        self.comat.db.commit()
+        await self.comat.tick(self.now+4506)
+        self.assertEqual(self.comat.provider.lookup.await_count,4)
+
     async def test_departure_previous_arrival_shared_persisted_without_false_arrival(self):
         self.flight.update(number='LH207', origin='BER', destination='FRA', registration='D-AIZD')
         await self.watch(foreground=True, server_polling=True, relay_alerts=True,

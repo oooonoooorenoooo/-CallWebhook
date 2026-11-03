@@ -1,3 +1,10 @@
+## 1.2.17
+
+- ComatAlarm: Gate-Angaben aus den bereits laufenden FlightStats- und FlightAware-Abfragen wieder an die Apps übertragen. Bei einer BER-Sperrfrist stehen diese Angaben als Grundlage der Standplatzprognose bereit.
+- Die Gate-Quelle bleibt erhalten; aktuelle BER-Angaben haben Vorrang vor FlightStats und FlightAware. Fehlende Gate-Werte überschreiben keine gültige Alternative.
+- Ältere Gerätedaten können ein vom Pi ermitteltes Gate nicht mehr beim erneuten Anmelden der Flugüberwachung löschen. Alle Geräte nutzen weiterhin dieselbe Abfrage.
+- Regressionstests für BER 403, Quellenreihenfolge, Ankunft/Abflug und geräteübergreifende Speicherung ergänzt.
+
 ## 1.2.16
 
 - Korrigiert die Zeitparameter für FR24 und FlightAware: UTC auf ganze Sekunden im jeweiligen Anbieterformat, ohne lokale Zeitzonenoffsets und Nachkommastellen. Gilt für die gemeinsame Statusprüfung sowie Flug-, Vorflug- und Weiterflug-Abfragen.
@@ -94,3 +101,4 @@
 - ComatAlarm beendet automatische Ankunftsabfragen nach 25 Minuten ohne Parkereignis. Es wird keine Parkzeit oder Parkposition erfunden.
 - Bei bekanntem gelandeten Flug wird das FR24-Parkereignis direkt abgefragt; die zusätzliche Zusammenfassung entfällt.
 - FR24-Minutenbudget und Retry-After-Sperren für FR24 und BER begrenzen weitere Versuche nach 403/429.
+

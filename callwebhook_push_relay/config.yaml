@@ -1,5 +1,5 @@
 name: CallWebhook Push-Dienst
-version: "1.2.16"
+version: "1.2.17"
 slug: callwebhook_push_relay
 description: Gemeinsamer Push-Dienst für CallWebhook, HATTS und ComatAlarm
 url: https://github.com/oooonoooorenoooo/-CallWebhook
@@ -32,5 +32,6 @@ schema:
   asc_key_id: str?
   asc_private_key: password?
   comatalarm_firebase_service_account: password?
+
 
 

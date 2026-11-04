@@ -9,7 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 MAX_AGE = 730 * 86400
@@ -33,6 +33,17 @@ def number(value):
 
 def coordinate(row):
     return isinstance(row, dict) and number(row.get('latitude')) and number(row.get('longitude')) and 52.3 < row['latitude'] < 52.45 and 13.4 < row['longitude'] < 13.65
+
+
+def timestamp(value):
+    if number(value): return value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+        except ValueError:
+            pass
+    return None
 
 
 def bucket(when):
@@ -204,7 +215,7 @@ class StandModel:
         state['source_checked_at'] = checked
         # Only samples already fetched by the flight worker, no extra requests.
         live = flight.get('_live') or {}
-        point = dict(latitude=live.get('lat'), longitude=live.get('lon'), timestamp=live.get('timestamp'))
+        point = dict(latitude=live.get('lat'), longitude=live.get('lon'), timestamp=timestamp(live.get('timestamp')))
         ata, aibt = flight.get('ata'), flight.get('aibt')
         if ata and coordinate(point) and number(point['timestamp']) and ata <= point['timestamp'] <= (aibt or now)+60:
             if not any(p['timestamp']==point['timestamp'] for p in state['points']):

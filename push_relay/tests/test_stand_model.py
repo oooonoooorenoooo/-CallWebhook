@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch, Mock
 
 from push_relay.stand_model import StandModel, bucket
@@ -62,7 +63,7 @@ class ModelTests(unittest.TestCase):
     def test_confirmation_only_and_reference_features(self):
         self.seed()
         flight=dict(id='phone-1',number='LH206',reference=self.now,origin='FRA',destination='BER',fr24ID='real',gate='C1',ata=self.now-80,_checked_at=self.now,
-            _live=dict(lat=52.368,lon=13.512,timestamp=self.now-60,type='A320'))
+            _live=dict(lat=52.368,lon=13.512,timestamp=datetime.fromtimestamp(self.now-60, timezone.utc).isoformat(),type='A320'))
         before=self.model.apply(flight,self.now,match_stand)
         self.assertEqual(before['candidates'][0]['stand'],'B05')
         self.assertEqual(len(self.model.data['observations']),1, 'forecast is not training evidence')

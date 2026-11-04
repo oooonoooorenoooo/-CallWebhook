@@ -63,6 +63,25 @@ class FirebaseAccessStore:
         except Exception:
             raise AccessDenied("Anmeldung konnte nicht bestätigt werden. Bitte erneut anmelden.") from None
 
+    def device_uid(self, token):
+        """Authenticate the existing device identity, without another Apple check."""
+        self.ready()
+        from firebase_admin import auth
+        try:
+            return auth.verify_id_token(token, app=self.app, check_revoked=True)["uid"]
+        except Exception:
+            raise AccessDenied("Firebase-Geräteanmeldung konnte nicht bestätigt werden.") from None
+
+    def device_access(self, uid):
+        self.ready()
+        from firebase_admin import firestore
+        db = firestore.client(app=self.app)
+        device = db.collection("sync_devices").document(uid).get().to_dict() or {}
+        if device.get("uid") != uid or device.get("approved") is not True or device.get("blocked") is True:
+            raise AccessDenied("Firebase-Gerät ist nicht freigegeben.")
+        administrator = db.collection("sync_meta").document("master").get().to_dict() or {}
+        return {"uid": uid, "administrator": uid == (administrator.get("uid") or "tmsSpw6bYbdVf6WMtgCjUozXZ252")}
+
     def grant(self, uid, account_uid, subject, email):
         from firebase_admin import firestore
         from google.cloud.firestore import transactional
@@ -129,3 +148,4 @@ class AppleAccess:
         except Exception:
             # Never log identity tokens, service credentials or private user data.
             return failure("Gerätefreigabe konnte nicht sicher bestätigt werden.", 503)
+

@@ -6,7 +6,8 @@ import asyncio
 import base64
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .testflight import TestFlight, AppleError, failure
-from .apple_access import AppleAccess
+from .apple_access import AppleAccess, AccessDenied
+from .stand_model import StandModel
 import hashlib
 import hmac
 import json
@@ -628,6 +629,8 @@ class ComatAlarm:
         self.last_successful_lookup = {}
         self.testflight = TestFlight(self.db)
         self.apple_access = AppleAccess(self.relay, self.testflight)
+        self.stand_model = StandModel(self.db, protect_index, unprotect_index)
+        self.stand_access_cache = {}
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
                 id TEXT PRIMARY KEY, credential TEXT NOT NULL, token TEXT NOT NULL,
@@ -651,6 +654,60 @@ class ComatAlarm:
 
         if "stand_index" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
             self.db.execute("ALTER TABLE comat_devices ADD COLUMN stand_index TEXT NOT NULL DEFAULT ''")
+
+        if "firebase_uid" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
+            self.db.execute("ALTER TABLE comat_devices ADD COLUMN firebase_uid TEXT NOT NULL DEFAULT ''")
+
+    async def stand_access(self, uid):
+        if not uid:
+            return None
+        cached = self.stand_access_cache.get(uid)
+        now = time.time()
+        if cached and now-cached[0] < 60:
+            return cached[1]
+        try:
+            access = await asyncio.wait_for(asyncio.to_thread(self.apple_access.store.device_access, uid), 3)
+        except Exception:
+            access = None  # Fail closed; never erase saved data on a network error.
+        self.stand_access_cache[uid] = (now, access)
+        return access
+
+    async def bind_stand_access(self, device, body):
+        uid = device['firebase_uid']
+        token = body.get('firebase_token')
+        if token is not None:
+            if not isinstance(token, str) or not 1 <= len(token) <= 16000:
+                raise ValueError('Invalid Firebase device token')
+            try:
+                verified = await asyncio.wait_for(asyncio.to_thread(self.apple_access.store.device_uid, token), 3)
+            except Exception:
+                raise web.HTTPForbidden(text='Firebase device authentication failed') from None
+            if uid and uid != verified:
+                raise web.HTTPForbidden(text='Relay credential belongs to another Firebase device')
+            uid = verified
+        access = await self.stand_access(uid)
+        if (uid or token) and not access:
+            raise web.HTTPForbidden(text='Firebase device approval required')
+        if access and uid != device['firebase_uid']:
+            with self.db:
+                self.db.execute('UPDATE comat_devices SET firebase_uid=? WHERE id=?', (uid, device['id']))
+        return access
+
+    def stand_metadata(self, access):
+        result = {'stand_model_supported': True, 'stand_model_authorized': bool(access)}
+        if access:
+            result['stand_model'] = self.stand_model.metadata()
+            result['stand_model_administrator'] = access['administrator']
+        return result
+
+    def central_predictions(self, flights, access, now):
+        if access and self.stand_model.ready:
+            for flight in flights:
+                flight['_stand_prediction'] = self.stand_model.apply(flight, now, match_stand)
+        else:
+            for flight in flights:
+                flight.pop('_stand_prediction', None)
+        return flights
 
     def master(self, request):
         self.device(request)
@@ -729,6 +786,12 @@ class ComatAlarm:
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("Invalid watch")
+        access = await self.bind_stand_access(device, body)
+        if body.get('stand_sync') is True:
+            if not access or not access['administrator']:
+                raise web.HTTPForbidden(text='Administrator required for model import')
+            receipt = self.stand_model.upload(body.get('stand_import'), access['uid'], time.time())
+            return web.json_response(dict(self.stand_metadata(access), stand_receipt=receipt))
         flights, preferences = body.get("flights"), body.get("preferences")
         relay_alerts = body.get("relay_alerts", False)
         if not isinstance(relay_alerts, bool):
@@ -807,6 +870,7 @@ class ComatAlarm:
                 if not isinstance(position, dict) or not isinstance(position.get("name"), str) or not re.fullmatch(r"[A-Z0-9-]{1,16}", position["name"]) or not valid_coordinate(position.get("latitude"), position.get("longitude")):
                     raise ValueError("Invalid stand position")
             encrypted_index = protect_index(index)
+        clean = self.central_predictions(clean, access, now)
         with self.db:
             self.db.execute("UPDATE comat_devices SET server_polling=? WHERE id=?", (int(server_polling), device["id"]))
             self.db.execute("UPDATE comat_devices SET stand_index=?,api_foreground_until=? WHERE id=?", (encrypted_index, now+90 if body["foreground"] and api_foreground else 0, device["id"]))
@@ -820,11 +884,14 @@ class ComatAlarm:
         await self.deliver(device["id"], now)
         if status_request:
             self.api_status.request_refresh(api_token)
-        return web.json_response({"api_status": self.api_status.snapshot(), "watching": len(clean), "background_ready": bool(api_token), "expires": now+86400, "relay_alerts": relay_alerts})
+        return web.json_response(dict(self.stand_metadata(access), api_status=self.api_status.snapshot(), watching=len(clean), background_ready=bool(api_token), expires=now+86400, relay_alerts=relay_alerts, flights=clean))
 
     async def state(self, request):
         row = self.device(request)
-        return web.json_response({"server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": json.loads(row["watch"]), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
+        access = await self.stand_access(row['firebase_uid'])
+        if row['firebase_uid'] and not access:
+            raise web.HTTPForbidden(text='Firebase device approval required')
+        return web.json_response({**self.stand_metadata(access), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -885,6 +952,10 @@ class ComatAlarm:
     async def _tick(self, now):
         self.provider.credentials = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
         for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND (server_polling=1 OR foreground_until<=?)", (now,now)).fetchall():
+            access = await self.stand_access(device['firebase_uid'])
+            if device['firebase_uid'] and not access:
+                continue
+            positions = self.stand_model.positions() if access and self.stand_model.ready else unprotect_index(device['stand_index'])
             prefs = json.loads(device["preferences"])
             flights = json.loads(device["watch"])
             if now-device["last_poll"] >= 60:
@@ -896,7 +967,7 @@ class ComatAlarm:
                         if previous_parking_ready(flight):
                             # A newly installed local index can now match saved
                             # evidence without spending another FR24 request.
-                            flight["stand"] = match_stand(flight["_inbound"]["aibt_position"], unprotect_index(device["stand_index"])) or flight.get("stand")
+                            flight["stand"] = match_stand(flight["_inbound"]["aibt_position"], positions) or flight.get("stand")
                             flight["_departure_finalized"] = True
                             continue
                         # Reopen legacy finalizations that had no predecessor
@@ -920,12 +991,12 @@ class ComatAlarm:
                             changes["_repair_attempted_at"] = now
                             changes["_repair_attempts"] = flight.get("_repair_attempts", 0) + 1
                         if changes.get("aibt_position"):
-                            stand = match_stand(changes["aibt_position"], unprotect_index(device["stand_index"]))
+                            stand = match_stand(changes["aibt_position"], positions)
                             if stand:
                                 changes["stand"] = stand
                         if "_inbound" in changes:
                             point = (changes["_inbound"] or {}).get("aibt_position")
-                            changes["stand"] = match_stand(point, unprotect_index(device["stand_index"])) if point else None
+                            changes["stand"] = match_stand(point, positions) if point else None
                         updated = dict(flight, **changes)
                         if departure_from_ber(updated) and updated.get("atd"):
                             changes["_departure_finalized"] = previous_parking_ready(updated)
@@ -933,6 +1004,9 @@ class ComatAlarm:
                                 changes["_departure_repair_at"] = now
                                 if not lookup_error:
                                     changes["_departure_repair_attempts"] = flight.get("_departure_repair_attempts", 0)+1
+                        if access and self.stand_model.ready:
+                            changes['_stand_prediction'] = self.stand_model.apply(updated, now, match_stand)
+                            updated.update(changes)
                         pending.extend(self.events(device["id"], flight, updated, prefs, now))
                         flight.update(changes)
                     except Exception:
@@ -962,6 +1036,10 @@ class ComatAlarm:
                 identity = updated["number"] + ":" + day + ":" + event
                 event_id = hashlib.sha256(identity.encode()).hexdigest()
                 state = {k:updated[k] for k in ("id","atd","ata","aibt","stand") if updated.get(k)}
+                if '_stand_prediction' in updated:
+                    prediction = updated['_stand_prediction'] or {}
+                    state['prediction'] = prediction.get('text', '')
+                    state['prediction_at'] = prediction.get('issued_at', now)
                 if departure_from_ber(updated):
                     state["departure_from_ber"] = True
                     if updated.get("_inbound", {}).get("aibt"):
@@ -976,6 +1054,8 @@ class ComatAlarm:
                 current = self.db.execute("SELECT * FROM comat_devices WHERE id=?", (device_id,)).fetchone()
                 if not current:
                     break
+                if current['firebase_uid'] and not await self.stand_access(current['firebase_uid']):
+                    continue
                 payload = json.loads(item["payload"])
                 prefs = json.loads(current["preferences"])
                 present = any(f["id"] == payload["flight_id"] for f in json.loads(current["watch"]))

@@ -1,3 +1,10 @@
+## 1.2.22
+
+- BER-Flugabfrage und gemeinsame API-Statusprüfung verwenden wieder die vollständigen Anfrage-Header der App, mit eigener ComatAlarm-Pi-Kennung. Behebt die reproduzierte CloudFront-403-Antwort auf die bisherigen Standard-Anfragen.
+- Flugnummern werden im BER-Format mit Leerzeichen übergeben, beispielsweise `LH 194`; Datum und Tagesgrenzen richten sich nach der Berliner Zeitzone.
+- Gemeinsame Sperrfristen, Retry-After und zentrale Flugabfragen bleiben erhalten. Bei weiteren BER-Fehlern nennt das Protokoll zusätzlich, ob CloudFront erkennbar ist, ohne Antwortinhalte oder Zugangsdaten zu protokollieren.
+- Kein neues ComatAlarm-App-Build und keine erneute Einrichtung erforderlich.
+
 ## 1.2.21
 - Ein vollständig aus der Administrator-App übernommenes BER-Standplatzpaket hat Vorrang. Der zusätzliche Firebase-Paketimport wird automatisch deaktiviert, auch nach Neustarts und Wiederherstellung der verschlüsselten Sicherung.
 - Bereits laufende Firebase-Downloads können eine inzwischen abgeschlossene App-Übernahme nicht überschreiben oder anschließend eine irreführende Entschlüsselungswarnung auslösen.

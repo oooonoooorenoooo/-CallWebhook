@@ -1,5 +1,24 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: BER-Abfragen auf dem Pi (ab 1.2.22)
+
+Die Flugabfrage und die gemeinsame API-Statusprüfung senden dieselben
+BER-Anfrageangaben wie die App: JSON-Antwortformat, den Verweis auf die
+BER-Flugübersicht und eine ausdrücklich als Pi gekennzeichnete
+ComatAlarm-Kennung. Flugnummern werden als `LH 194` übergeben. Ohne diese
+Header ließ sich HTTP 403 von CloudFront reproduzieren; mit ihnen lieferte
+dieselbe Abfrage HTTP 200 mit JSON-Daten.
+
+Nach dem Add-on-Update den Push-Dienst neu starten und in ComatAlarm unter
+**API-Status → Prüfen** das gemeinsame Ergebnis abrufen. Die Abfragen bleiben
+zentral auf dem Pi; eine neue App-Version oder erneute Einrichtung ist nicht
+nötig. Bestehende Standplätze, Lerndaten und Gerätefreigaben bleiben erhalten.
+
+Falls BER weiterhin ablehnt, enthält die Protokollzeile neben HTTP-Status,
+Antworttyp und Sperrdauer auch `gateway=CloudFront` oder `gateway=unknown`.
+Anbieter-Sperrfristen und `Retry-After` werden weiterhin eingehalten. Eine
+verbleibende Zugriffsablehnung bleibt als Fehler sichtbar.
+
 ## ComatAlarm: Übernahme aus der Administrator-App (ab 1.2.21)
 
 Sobald die Administrator-App das Standplatzpaket vollständig übertragen hat,

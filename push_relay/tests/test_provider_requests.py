@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from push_relay.comatalarm import FlightProvider, SharedAPIStatus
+from push_relay.comatalarm import FlightProvider, SharedAPIStatus, ber_request
 
 
 def epoch(value):
@@ -34,7 +34,7 @@ class Session:
 
         class Response:
             status = code
-            headers = {"Content-Type": "text/html; charset=utf-8", "Retry-After": "1200"}
+            headers = {"Content-Type": "text/html; charset=utf-8", "Retry-After": "1200", "X-Cache": "Error from cloudfront"}
 
             async def __aenter__(self):
                 return self
@@ -60,6 +60,45 @@ class ProviderRequestTests(unittest.IsolatedAsyncioTestCase):
         self.provider = FlightProvider()
         self.provider.credentials = {"FLIGHTAWARE_API_KEY": "fa-secret"}
         self.status = SharedAPIStatus(self.db, self.provider)
+
+    async def test_ber_health_and_flight_requests_keep_the_app_contract(self):
+        class BERContractSession(Session):
+            def request(self, method, url, **kwargs):
+                if 'ber.berlin-airport.de' in url:
+                    headers = kwargs.get('headers') or {}
+                    accepted = (headers.get('Accept') == 'application/json'
+                                and headers.get('User-Agent') == 'ComatAlarm/1.0 Pi'
+                                and headers.get('Referer') == 'https://ber.berlin-airport.de/de/fliegen/abfluege-ankuenfte.html'
+                                and kwargs['params']['search'] == 'LH 194')
+                    self.codes['BER'] = 200 if accepted else 403
+                return super().request(method, url, **kwargs)
+        now, session = epoch('2026-11-04T00:30:00+01:00'), BERContractSession()
+        flight = dict(number='LH194', reference=now, origin='FRA', destination='BER', _central=True)
+        with patch('push_relay.comatalarm.ClientSession', return_value=session):
+            result = await self.status.probe('', self.provider.credentials, now)
+            self.assertEqual(result['BER'], 'OK', 'A status check must use the complete BER request')
+            await self.provider.lookup(flight, '', now+1)
+        calls = [(url, kw) for name, url, kw in session.calls if name == 'BER']
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], calls[1][0])
+        for key in ('params', 'headers', 'allow_redirects'):
+            self.assertEqual(calls[0][1][key], calls[1][1][key])
+        self.assertNotIn('ber', self.provider.cooldown)
+        self.assertFalse(calls[0][1]['allow_redirects'])
+
+    def test_ber_query_uses_spaced_flight_numbers_and_ber_calendar_days(self):
+        for number, expected in [('LH194', 'LH 194'), ('ew 207', 'EW 207'), ('U2186', 'U2 186'),
+                                 ('2L123', '2L 123'), ('EJU5059', 'EJU 5059')]:
+            with self.subTest(number=number):
+                params, _ = ber_request(number, epoch('2026-11-03T23:30:00Z'), True)
+                self.assertEqual(params['search'], expected)
+                self.assertEqual(params['arrivalDeparture'], 'D')
+                self.assertEqual(params['dateFrom'], '2026-11-04T00:00:00')
+                self.assertEqual(params['dateUntil'], '2026-11-05')
+        params, _ = ber_request('LH194', epoch('2026-03-28T23:30:00Z'))
+        self.assertEqual(params['arrivalDeparture'], 'A')
+        self.assertEqual(params['dateFrom'], '2026-03-29T00:00:00')
+        self.assertEqual(params['dateUntil'], '2026-03-30')
 
     async def test_health_dates_are_utc_seconds_in_winter_summer_and_at_midnight(self):
         for value in ("2026-11-03T22:03:00.456+01:00", "2026-07-03T22:03:00.456+02:00",
@@ -115,6 +154,7 @@ class ProviderRequestTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["BER"], "OK")
         output = " ".join(logs.output)
         self.assertIn("provider=BER HTTP=403 response=HTML pause_seconds=1200", output)
+        self.assertIn("gateway=CloudFront", output)
         self.assertNotIn("secret", output)
         self.assertNotIn("LH", output)
 

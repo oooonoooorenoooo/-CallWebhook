@@ -28,6 +28,25 @@ BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
 FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number")
 
+BER_FLIGHTS_URL = "https://ber.berlin-airport.de/api.flights.json"
+
+
+def ber_request(number, reference, departing=False):
+    """Same BER request contract as the app, with an honest Pi identifier.
+
+    Use this for both shared health checks and actual flight lookups so a
+    malformed health request cannot place all BER flight queries in backoff.
+    """
+    day = datetime.fromtimestamp(reference, ZoneInfo("Europe/Berlin")).date()
+    normalized = re.sub(r"\s", "", number).upper()
+    parts = re.fullmatch(r"([A-Z0-9]{2}|[A-Z]{3})([0-9]{1,5})", normalized)
+    search = " ".join(parts.groups()) if parts else normalized
+    params = {"arrivalDeparture": "D" if departing else "A", "dateFrom": day.isoformat() + "T00:00:00",
+              "dateUntil": (day + timedelta(days=1)).isoformat(), "search": search, "lang": "de", "page": "1", "terminal": ""}
+    headers = {"Accept": "application/json", "User-Agent": "ComatAlarm/1.0 Pi",
+               "Referer": "https://ber.berlin-airport.de/de/fliegen/abfluege-ankuenfte.html"}
+    return params, headers
+
 
 
 def same_occurrence(a, b):
@@ -184,8 +203,14 @@ def provider_http_status(name, response, cooldown, key, now):
         cooldown[key] = max(cooldown.get(key, 0), now + retry_delay(response, now))
     content_type = str(getattr(response, "headers", {}).get("Content-Type", "")).lower()
     kind = "JSON" if "json" in content_type else "HTML" if "html" in content_type else "other"
-    logging.warning("ComatAlarm provider=%s HTTP=%s response=%s pause_seconds=%s",
-                    name, response.status, kind, max(0, int(cooldown.get(key, now)-now)))
+    # Fixed labels only: never log arbitrary headers, cookies or error bodies.
+    edge = ""
+    if name == "BER":
+        headers = getattr(response, "headers", {})
+        gateway = "CloudFront" if "cloudfront" in (str(headers.get("X-Cache", "")) + str(headers.get("Via", ""))).lower() else "unknown"
+        edge = " gateway=" + gateway
+    logging.warning("ComatAlarm provider=%s HTTP=%s response=%s pause_seconds=%s%s",
+                    name, response.status, kind, max(0, int(cooldown.get(key, now)-now)), edge)
     reason = {400: "Anfrageparameter abgelehnt", 401: "Zugangsdaten abgelehnt",
               402: "Tarif oder Guthaben prüfen", 403: "Anbieter verweigert Zugriff",
               429: "Abfragelimit erreicht"}.get(response.status)
@@ -402,12 +427,11 @@ class FlightProvider:
                 provider_error = "FR24: Token, Tarif oder Verbindung prüfen"
             # Prefer BER gate evidence; other schedule sources can fill gaps.
             from .flight_schedule import passenger_gate
-            date = datetime.fromtimestamp(flight["reference"], ZoneInfo("Europe/Berlin")).date()
-            params = {"arrivalDeparture": "D" if flight.get("origin") == "BER" else "A", "dateFrom": date.isoformat() + "T00:00:00", "dateUntil": (date + timedelta(days=1)).isoformat(), "search": flight["number"], "lang": "de", "page": "1", "terminal": ""}
+            params, headers = ber_request(flight["number"], flight["reference"], flight.get("origin") == "BER")
             try:
                 if self.cooldown.get("ber", 0) > now:
                     raise RuntimeError("BER: Abfrage pausiert")
-                async with session.get("https://ber.berlin-airport.de/api.flights.json", params=params, allow_redirects=False) as response:
+                async with session.get(BER_FLIGHTS_URL, params=params, headers=headers, allow_redirects=False) as response:
                     provider_http_status("BER", response, self.cooldown, "ber", now)
                     if response.status == 200:
                         body = await response.json()
@@ -591,8 +615,9 @@ class SharedAPIStatus:
                 return await get("OpenSky", "https://opensky-network.org/api/states/all",
                     {"lamin":"52.30","lomin":"13.38","lamax":"52.44","lomax":"13.62"}, headers)
 
+            ber_params, ber_headers = ber_request("LH194", now)
             responses = await asyncio.gather(fr24(), flightstats(), flightaware(),
-                get("BER", "https://ber.berlin-airport.de/api.flights.json", {"arrivalDeparture":"A","dateFrom":day.date().isoformat()+"T00:00:00","dateUntil":(day.date()+timedelta(days=1)).isoformat(),"search":"LH194","lang":"de","page":"1","terminal":""}),
+                get("BER", BER_FLIGHTS_URL, ber_params, ber_headers),
                 get("ADSB.lol", "https://api.adsb.lol/v2/point/52.3667/13.5033/10"), opensky())
             result = {}
             for name,payload in zip(self.names,responses):

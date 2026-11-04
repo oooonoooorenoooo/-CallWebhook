@@ -1,3 +1,8 @@
+## 1.2.19
+
+- Zeitstempel der vorhandenen FR24-Positionsantworten werden auch im ISO-8601-Format für Rollweg- und Referenzmerkmale verarbeitet. Damit arbeitet das zentrale Standplatzlernen mit beiden vom bisherigen Client unterstützten Zeitformaten.
+- Enthält die zentrale Standplatzverwaltung und Lernmodell-Übernahme aus 1.2.18.
+
 ## 1.2.18
 
 - Der Pi speichert das vollständige BER-Standplatzpaket mit Referenzpunkten und das Standplatz-Lernmodell verschlüsselt und dauerhaft in /data. Eine zusätzliche verschlüsselte Sicherung bleibt nach Neustarts und abgelaufenen Geräteanmeldungen erhalten.

@@ -1,3 +1,9 @@
+## 1.2.21
+- Ein vollständig aus der Administrator-App übernommenes BER-Standplatzpaket hat Vorrang. Der zusätzliche Firebase-Paketimport wird automatisch deaktiviert, auch nach Neustarts und Wiederherstellung der verschlüsselten Sicherung.
+- Bereits laufende Firebase-Downloads können eine inzwischen abgeschlossene App-Übernahme nicht überschreiben oder anschließend eine irreführende Entschlüsselungswarnung auslösen.
+- Leere, entfernte und ausschließlich aus Leerzeichen bestehende Passphrase-Einstellungen deaktivieren den direkten Import und entfernen die bisherige private Passwortdatei. Bereits übernommene Standplätze und Lerndaten bleiben erhalten.
+- Kein neues ComatAlarm-App-Build erforderlich; die Übernahme mit Build 1241 bleibt kompatibel.
+
 ## 1.2.20
 
 - ComatAlarm: Das BER-Standplatzpaket kann direkt über das vorhandene Firebase-Dienstkonto geladen werden, unabhängig von einer geöffneten Administrator-App. Neue optionale Passwort-Option `comatalarm_ber_passphrase`.

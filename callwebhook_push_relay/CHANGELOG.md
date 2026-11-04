@@ -1,3 +1,12 @@
+## 1.2.18
+
+- Der Pi speichert das vollständige BER-Standplatzpaket mit Referenzpunkten und das Standplatz-Lernmodell verschlüsselt und dauerhaft in /data. Eine zusätzliche verschlüsselte Sicherung bleibt nach Neustarts und abgelaufenen Geräteanmeldungen erhalten.
+- Die aktualisierte Administrator-App überträgt vorhandene bestätigte Lerndaten automatisch in wiederaufnehmbaren Teilen. Doppelte Ankünfte werden zusammengeführt; ein erneuter Import erhöht die Gewichtung nicht.
+- Standplatzprognosen entstehen zentral aus den bereits abgefragten Gate- und Positionsdaten. Keine zusätzlichen Flugdaten-Abfragen und kein offenes iPhone für Berechnung oder Lernen erforderlich. Prognosen werden an freigegebene Geräte sowie mit den bestehenden Flugereignis-Pushes an Widgets übertragen.
+- Zugriff über die serverseitig freigegebene Firebase-Geräte-ID; keine erneute Apple-, E-Mail- oder Private-Relay-Prüfung. Nur der Administrator darf Paket und bestehende Lerndaten importieren.
+- App-Update erforderlich. Nach Installation des Add-ons die aktualisierte Administrator-App geöffnet lassen, bis unter Hintergrund-Push das Pi-Standplatzpaket und die übernommenen Ankünfte angezeigt werden. Die bestehende Home-Assistant-Komponente bleibt kompatibel.
+- Neue Regressionstests für Übertragung, Neustart/Sicherung, gemeinsame Prognose, Lern-Deduplizierung und Geräteberechtigungen.
+
 ## 1.2.17
 
 - ComatAlarm: Gate-Angaben aus den bereits laufenden FlightStats- und FlightAware-Abfragen wieder an die Apps übertragen. Bei einer BER-Sperrfrist stehen diese Angaben als Grundlage der Standplatzprognose bereit.

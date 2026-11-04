@@ -26,7 +26,11 @@ if ! grep -Fq '("POST", "comatalarm/v1/apple/approve")' "$TARGET/__init__.py"; t
   echo "ComatAlarm Apple approval route missing after download." >&2
   exit 1
 fi
-echo "CallWebhook backend files installed successfully."
+if ! grep -Fq 'class ComatAlarmMonitorView' "$TARGET/__init__.py"; then
+  echo "ComatAlarm dashboard endpoint missing after download." >&2
+  exit 1
+fi
+echo "CallWebhook backend 19 with ComatAlarm dashboard installed successfully."
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
   echo "Requesting Home Assistant restart..."
   if curl -fsS -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H "Content-Type: application/json" http://supervisor/core/restart >/dev/null; then
@@ -37,4 +41,5 @@ if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
 else
   echo "Home Assistant must now be restarted manually to load CallWebhook."
 fi
+
 

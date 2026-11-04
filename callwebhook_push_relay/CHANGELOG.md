@@ -1,3 +1,12 @@
+## 1.2.24
+
+- Neuer schreibgeschützter ComatAlarm-Monitor für das Home-Assistant-Dashboard: gemeinsamer API-Status, alle übergebenen Flüge, Messzeit/Datenalter, Flugplan, Position, Pakete, Vor-/Folgeflug und Standplatzprognose.
+- Pi-Zyklusbeginn und -abschluss sowie letzter Datenabruf jeder App werden getrennt angezeigt. Der Monitor löst keine Anbieterabfragen aus und verändert keine Überwachungsregistrierung.
+- Persistentes Diagnosejournal: Ereigniserkennung, APNs-Annahme/Fehlschlag und sichere Fehler aus dem Protokoll mit Uhrzeit. Bis zu 1000 Einträge über Neustarts, neueste 150 im Dashboard. Historische Logs vor dem Update werden nicht importiert. APNs-Annahme ist keine Zustellbestätigung.
+- Nur Home-Assistant-Administratoren können die neue HA-Ansicht lesen. Der bestehende Einrichtungsschlüssel bleibt auf dem Server; keine Tokens, E-Mail-Adressen, Firebase-IDs oder Rohprotokolle im Browser.
+- Einmalig CallWebhook Bootstrap 1.2.7 starten (installiert Backend 19 / Integration 1.2.15 und startet HA neu). Danach das ergänzte Dashboard laden. Kein ComatAlarm-App-Update erforderlich.
+- Diese Version macht die laufende Überwachung sichtbar; sie behauptet keine Behebung der noch ungeklärten verspäteten Hintergrund-Pushes.
+
 ## 1.2.23
 
 - Hintergrunddiagnose: Der Pi protokolliert alle fünf Minuten seinen Überwachungszyklus, gültige/abgelaufene Registrierungen und gespeicherte Abfrageergebnisse. Fehler des Zyklus werden nicht mehr still verschluckt; protokolliert wird nur der Fehlertyp, ohne Zugangsdaten oder Antwortinhalte.

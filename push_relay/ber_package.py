@@ -113,9 +113,20 @@ class BERPackageImporter:
         self.failures = 0
         self.lock = asyncio.Lock()
 
+    def use_administrator_package(self):
+        # Only a fully committed administrator upload records imports.package.
+        # That receipt lives in the encrypted model/backup across restarts.
+        if self.model.ready and self.model.data.get('imports', {}).get('package'):
+            self.status = 'BER-Standplatzpaket aus Administrator-App bereit; Firebase-Paketimport deaktiviert'
+            self.failures = 0
+            return True
+        return False
+
     async def check(self, now=None):
         async with self.lock:
             now = time.monotonic() if now is None else now
+            if self.use_administrator_package():
+                return
             if now < self.next_check:
                 return
             filename = os.environ.get('COMATALARM_BER_PASSPHRASE_FILE', '')
@@ -126,11 +137,22 @@ class BERPackageImporter:
             try:
                 if not os.environ.get('COMATALARM_FIREBASE_CREDENTIALS') or len(os.environ.get('COMATALARM_SETUP_KEY', '')) < 32:
                     raise ImportFailure('Direkter BER-Import: Firebase-Dienstkonto und ComatAlarm-Einrichtungsschlüssel erforderlich.')
-                secret = Path(filename).read_text()
+                try:
+                    secret = Path(filename).read_text()
+                except FileNotFoundError:
+                    secret = ''
+                if not secret.strip():
+                    self.status = 'Direkter BER-Import nicht eingerichtet'
+                    self.next_check = now + 60
+                    return
                 if not 1 <= len(secret) <= 4096:
                     raise ImportFailure('BER-Paket-Passphrase fehlt oder ist ungültig.')
                 known = self.model.data.get('firebase_package_source') if self.model.ready else None
                 result = await asyncio.to_thread(fetch_package, self.store, secret, known)
+                # The app may finish an upload while Firebase IO is in flight.
+                # Its committed package must not be overwritten by that result.
+                if self.use_administrator_package():
+                    return
                 if result is not None:
                     source, positions = result
                     self.model.install_package(positions, source)
@@ -141,6 +163,8 @@ class BERPackageImporter:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if self.use_administrator_package():
+                    return
                 message = str(error) if isinstance(error, ImportFailure) else 'BER-Import fehlgeschlagen: Firebase-Zugriff oder Paket prüfen.'
                 if self.model.ready:
                     message += ' Gespeicherter Standplatzbestand bleibt verfügbar.'

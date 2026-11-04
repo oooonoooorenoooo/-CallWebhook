@@ -188,6 +188,77 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('SECRET', repr(logs.output))
         self.assertIn('bleibt verfügbar', self.importer.status)
 
+    def upload_admin_package(self, model=None, rows=None):
+        model = model or self.model
+        rows = rows or parse_document(pages())
+        return model.upload(dict(airport='BER', kind='package', digest='a'*64,
+                                 rows=rows, offset=0, total=len(rows)), 'admin', time.time())
+
+    async def test_admin_package_disables_firebase_after_restart_and_backup_restore(self):
+        self.upload_admin_package()
+        now = time.time()
+        self.model.learn(dict(id='real',stand='B05',paxGate='C1',exit='',corridor='',runway='',timeBucket=0,airline='LH',aircraft='A320',observedAt=now), now)
+        self.model.save()
+        self.secret_file.write_text('OLD-WRONG-SECRET')
+        prior = copy.deepcopy(self.model.data)
+        for use_backup in (False, True):
+            with self.subTest(backup=use_backup):
+                if use_backup:
+                    self.db.execute('DELETE FROM comat_stand_models'); self.db.commit()
+                restored = StandModel(self.db, protect_index, unprotect_index)
+                importer = BERPackageImporter(restored, self.store)
+                with patch('push_relay.ber_package.fetch_package') as fetch, self.assertNoLogs(level='WARNING'):
+                    await importer.check(now=1)
+                    await importer.check(now=22000)
+                fetch.assert_not_called()
+                self.assertIn('Administrator-App bereit', importer.status)
+                self.assertEqual(restored.data, prior)
+
+    async def test_completed_admin_upload_wins_over_inflight_firebase_result_or_error(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                self.db.execute('DELETE FROM comat_stand_models'); self.db.commit()
+                if self.model.backup: self.model.backup.unlink(missing_ok=True)
+                self.model = StandModel(self.db, protect_index, unprotect_index)
+                importer = BERPackageImporter(self.model, self.store)
+                started, finish = asyncio.Event(), asyncio.Event()
+                async def pending_fetch(*args):
+                    started.set()
+                    await finish.wait()
+                    if fail: raise ImportFailure('BER-Paket konnte nicht entschlüsselt werden.')
+                    return 'firebase-late', parse_document(pages())
+                with patch('push_relay.ber_package.asyncio.to_thread', side_effect=pending_fetch), self.assertNoLogs(level='WARNING'):
+                    task = asyncio.create_task(importer.check(now=1))
+                    await started.wait()
+                    self.upload_admin_package(rows=[dict(name='C04',latitude=52.362,longitude=13.502,kind='stand')])
+                    prior = copy.deepcopy(self.model.data)
+                    finish.set()
+                    await task
+                self.assertEqual(self.model.data, prior)
+                self.assertIn('Administrator-App bereit', importer.status)
+                self.assertEqual(importer.failures, 0)
+
+    async def test_partial_admin_upload_does_not_disable_direct_import(self):
+        rows = parse_document(pages())
+        self.model.upload(dict(airport='BER', kind='package', digest='a'*64,
+                              rows=rows[:1], offset=0, total=len(rows)), 'admin', time.time())
+        with patch('push_relay.ber_package.fetch_package', return_value=('firebase', rows)) as fetch:
+            await self.importer.check(now=1)
+        fetch.assert_called_once()
+        self.assertTrue(self.model.ready)
+        self.assertNotIn('Administrator-App', self.importer.status)
+
+    async def test_removed_or_blank_passphrase_file_never_attempts_decryption(self):
+        for value in ('', ' \t\n', None):
+            with self.subTest(value=value):
+                if value is None: self.secret_file.unlink(missing_ok=True)
+                else: self.secret_file.write_text(value)
+                importer = BERPackageImporter(self.model, self.store)
+                with patch('push_relay.ber_package.fetch_package') as fetch, self.assertNoLogs(level='WARNING'):
+                    await importer.check(now=1)
+                fetch.assert_not_called()
+                self.assertIn('nicht eingerichtet', importer.status)
+
     async def test_missing_chunk_and_failed_persistence_do_not_replace_model(self):
         await self.importer.check(now=1)
         prior = copy.deepcopy(self.model.data)
@@ -235,7 +306,15 @@ class AddonOptionTests(unittest.TestCase):
             self.assertEqual(path.read_text(), ' exact secret ')
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertNotIn(' exact secret ', repr(env))
-            options['comatalarm_ber_passphrase'] = ''
+            for empty in ('', ' \t\n', None):
+                with self.subTest(empty=empty):
+                    path.write_text('old secret')
+                    options['comatalarm_ber_passphrase'] = empty
+                    env = module.configure(options, Path(temp))
+                    self.assertEqual(env['COMATALARM_BER_PASSPHRASE_FILE'], '')
+                    self.assertFalse(path.exists())
+            path.write_text('old secret')
+            del options['comatalarm_ber_passphrase']
             env = module.configure(options, Path(temp))
             self.assertEqual(env['COMATALARM_BER_PASSPHRASE_FILE'], '')
             self.assertFalse(path.exists())

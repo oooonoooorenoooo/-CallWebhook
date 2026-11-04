@@ -1,12 +1,26 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: Übernahme aus der Administrator-App (ab 1.2.21)
+
+Sobald die Administrator-App das Standplatzpaket vollständig übertragen hat,
+verwendet der Pi diesen gespeicherten Bestand. Der zusätzliche Firebase-Download
+mit Paket-Passphrase wird dann automatisch deaktiviert, auch nach Neustarts und
+beim Wiederherstellen der verschlüsselten Sicherung. Eine eventuell verbliebene
+Passphrase löst keine weiteren Entschlüsselungsversuche aus. Bereits gespeicherte
+Standplätze, Referenzpunkte und gelernte Ankünfte bleiben erhalten.
+
+In ComatAlarm zeigt **Einstellungen → Hintergrund-Push** den bestätigten Bestand:
+**„Pi: Standplatzpaket bereit · … bestätigte Ankünfte gelernt“**. Dafür ist keine
+erneute Veröffentlichung, Passwort-Eingabe oder neue Gerätefreigabe nötig.
+Unvollständige App-Übertragungen schalten den Firebase-Import noch nicht ab.
+
 ## ComatAlarm: BER-Paket direkt aus Firebase (ab 1.2.20)
 
 Der Pi kann das bereits in Firebase veröffentlichte Standplatzpaket ohne
 Übertragung durch die Administrator-App laden. Dafür ist kein neuer App-Build
 nötig. Bestehende Push-, Apple- und Firebase-Einstellungen bleiben erhalten.
 
-1. **CallWebhook Push-Dienst auf 1.2.20 aktualisieren.**
+1. **CallWebhook Push-Dienst auf 1.2.21 oder neuer aktualisieren.**
 2. Unter **Konfiguration** das Passwortfeld **`comatalarm_ber_passphrase`**
    mit der vorhandenen **BER-Paket-Passphrase** ausfüllen. Gemeint ist das
    Passwort des verschlüsselten BER-Pakets beziehungsweise Schlüssel-Backups,
@@ -29,6 +43,8 @@ Versuch nach fünf Minuten, mit wachsendem Abstand bis maximal 30 Minuten. Ein
 Neustart stößt eine neue Prüfung an. Die bisherigen Standplätze und Lerndaten
 bleiben bei falschem Passwort, unvollständigen Paketen und Verbindungsfehlern
 erhalten. Flugabfrage und Push-Versand laufen während des Imports weiter.
+Dieser direkte Import arbeitet nur, solange noch kein vollständig übertragenes
+Standplatzpaket aus der Administrator-App vorliegt; die App-Übernahme hat Vorrang.
 
 Die entschlüsselte PDF und der age-Schlüssel werden nicht als Dateien abgelegt.
 Standplätze, Referenzpunkte und Lerndaten liegen verschlüsselt in `/data`, mit

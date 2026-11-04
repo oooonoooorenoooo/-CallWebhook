@@ -42,11 +42,13 @@ def configure(options, data_dir):
     # Keep the exact passphrase (spaces may be meaningful), outside command
     # arguments and the child process environment. Empty disables future import.
     passphrase = options.get("comatalarm_ber_passphrase", "")
+    if passphrase is None:
+        passphrase = ""
     if not isinstance(passphrase, str) or len(passphrase) > 4096 or "\x00" in passphrase:
         raise ValueError("BER-Paket-Passphrase ist ungültig")
     passphrase_path = data_dir / "comatalarm-ber-passphrase"
     values["COMATALARM_BER_PASSPHRASE_FILE"] = ""
-    if passphrase:
+    if passphrase.strip():
         fd = os.open(passphrase_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "w") as file:
             file.write(passphrase)

@@ -662,6 +662,8 @@ class ComatAlarm:
         self.ber_importer = BERPackageImporter(self.stand_model, self.apple_access.store)
         self.stand_access_cache = {}
         self.last_monitor_report = 0
+        from .monitor import Monitor
+        self.monitor = Monitor(self)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
                 id TEXT PRIMARY KEY, credential TEXT NOT NULL, token TEXT NOT NULL,
@@ -925,6 +927,8 @@ class ComatAlarm:
         access = await self.stand_access(row['firebase_uid'])
         if row['firebase_uid'] and not access:
             raise web.HTTPForbidden(text='Firebase device approval required')
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO comat_monitor_reads VALUES(?,?)",(row["id"],time.time()))
         return web.json_response({**self.stand_metadata(access), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
 
     async def revoke(self, request):
@@ -981,7 +985,9 @@ class ComatAlarm:
 
     async def tick(self, now=None):
         async with self.poll_lock:
+            self.monitor.cycle_started = time.time() if now is None else now
             await self._tick(time.time() if now is None else now)
+            self.monitor.cycle_finished = time.time() if now is None else now
 
     async def _tick(self, now):
         report = now-self.last_monitor_report >= 300
@@ -1032,6 +1038,8 @@ class ComatAlarm:
                         changes = await self.shared_lookup(flight, device["api_token"], now, central=bool(device["server_polling"]))
                         lookup_error = changes.pop("_error", "")
                         error = lookup_error or error
+                        if lookup_error:
+                            self.monitor.record("error", "Anbieterabfrage fehlgeschlagen oder pausiert", flight["number"], device["id"], now)
                         if repairing:
                             changes["_repair_attempted_at"] = now
                             changes["_repair_attempts"] = flight.get("_repair_attempts", 0) + 1
@@ -1083,7 +1091,9 @@ class ComatAlarm:
             MONITOR_LOG.info("ComatAlarm event_observed epoch=%d event=%s event_age_seconds=%d allowed=%s",
                              int(now), flag, max(0, int(now-observed)) if observed else -1,
                              bool(self.enabled(prefs, now) and prefs.get(flag, True)))
-            if self.enabled(prefs, now) and prefs.get(flag, True):
+            allowed = self.enabled(prefs, now) and prefs.get(flag, True)
+            self.monitor.record("event", flag + (" erkannt; Push vorgemerkt" if allowed else " erkannt; Alarmregel deaktiviert"), updated["number"], device_id, now)
+            if allowed:
                 # Independent of a phone's local record ID or corrected FR24 ID.
                 day = datetime.fromtimestamp(updated["reference"], ZoneInfo("Europe/Berlin")).date().isoformat()
                 identity = updated["number"] + ":" + day + ":" + event
@@ -1113,6 +1123,7 @@ class ComatAlarm:
                 prefs = json.loads(current["preferences"])
                 present = any(f["id"] == payload["flight_id"] for f in json.loads(current["watch"]))
                 if not present or not self.enabled(prefs, now) or not prefs.get(payload["flag"], True) or (current["foreground_until"] > now and not prefs.get("relay_alerts", False)):
+                    self.monitor.record("push_skipped", payload["flag"] + ": durch Flug-/Alarmregel verworfen", device=device_id, now=now)
                     with self.db:
                         self.db.execute("DELETE FROM comat_outbox WHERE device=? AND event=?", (device_id,item["event"]))
                     continue
@@ -1121,6 +1132,8 @@ class ComatAlarm:
                     accepted = bool(delivered) or bool(self.sender and await self.sender(current["token"],current["environment"],payload))
                 except Exception:
                     accepted = False
+                number = next((f["number"] for f in json.loads(current["watch"]) if f["id"] == payload["flight_id"]), "")
+                self.monitor.record("push_accepted" if accepted else "push_failed", payload["flag"] + (": bereits an Apple übergeben" if delivered else ": von Apple angenommen" if accepted else ": von Apple nicht angenommen; erneuter Versuch"), number, device_id, now)
                 with self.db:
                     if accepted:
                         if not delivered:
@@ -1131,6 +1144,7 @@ class ComatAlarm:
                         self.db.execute("UPDATE comat_devices SET error=? WHERE id=?",("Apple hat die Push-Meldung nicht angenommen; APNs-Konfiguration prüfen",device_id))
 
     def routes(self, app):
+        app.router.add_get("/comatalarm/v1/monitor", self.monitor.get)
         app.router.add_post("/comatalarm/v1/apple/approve", self.apple_access.approve)
         for method, path, handler in (("POST","register",self.register),("POST","watch",self.watch),("GET","state",self.state),("DELETE","registration",self.revoke),("POST","test",self.test),("GET","testflight/groups",self.test_groups),("POST","testflight/testers",self.add_tester)):
             app.router.add_route(method,"/comatalarm/v1/"+path,handler)
@@ -1154,6 +1168,8 @@ class ComatAlarm:
                     pass  # Do not log recipient addresses or credentials.
                 await asyncio.sleep(60)
         async def context(app):
+            logging.getLogger().addHandler(self.monitor.handler)
+            self.monitor.record("service", "Push-Dienst gestartet")
             tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker()), asyncio.create_task(self.ber_importer.run())]
             yield
             if self.api_status.task is not None:
@@ -1161,6 +1177,7 @@ class ComatAlarm:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            logging.getLogger().removeHandler(self.monitor.handler)
         app.cleanup_ctx.append(context)
 
 

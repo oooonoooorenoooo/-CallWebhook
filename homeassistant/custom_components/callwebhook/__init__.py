@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 18
+BACKEND_API_VERSION = 19
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1106,6 +1106,40 @@ class CallWebhookPushRelayHostView(HomeAssistantView):
             "local_ready": local_ready, "public_ready": public_ready,
             "message": "Push-Dienst öffentlich erreichbar" if local_ready and public_ready
                        else "Push-Dienst noch nicht öffentlich erreichbar. Add-on und Nabu-Casa-Fernzugriff prüfen."})
+
+
+class ComatAlarmMonitorView(HomeAssistantView):
+    """HA administrator only; operator key never reaches the browser."""
+    url = "/api/callwebhook/comatalarm/monitor"
+    name = "api:callwebhook:comatalarm:monitor"
+    requires_auth = True
+
+    async def get(self, request):
+        user = request.get("hass_user")
+        if user is None or not user.is_admin:
+            raise web.HTTPForbidden()
+        hass = request.app["hass"]
+        target = await push_relay_target(hass)
+        if not target:
+            return web.json_response({"error":"Push-Dienst nicht gestartet"}, status=503)
+        try:
+            # target has already been resolved against this repository's add-on.
+            slug = urlparse(target).hostname.replace("-", "_")
+            info = await hass.async_add_executor_job(supervisor_request, "GET", "/addons/" + slug + "/info")
+            key = info.get("options",{}).get("comatalarm_setup_key","")
+            if not isinstance(key,str) or not 32 <= len(key) <= 256:
+                return web.json_response({"error":"ComatAlarm-Einrichtungsschlüssel fehlt im Add-on"},status=503)
+            key = key.strip()
+            async with ClientSession(timeout=ClientTimeout(total=8)) as session:
+                async with session.get(target + "/comatalarm/v1/monitor", headers={"X-ComatAlarm-Setup-Key":key}, allow_redirects=False) as response:
+                    if response.status != 200:
+                        return web.json_response({"error":"Monitor nicht verfügbar; Push-Dienst auf 1.2.24 oder neuer aktualisieren"},status=502)
+                    body = await response.read()
+                    if len(body)>2_000_000:
+                        raise ValueError("Monitor response too large")
+                    return web.Response(body=body,content_type="application/json",headers={"Cache-Control":"no-store"})
+        except Exception:
+            return web.json_response({"error":"Pi-Monitor nicht erreichbar"},status=502)
 
 
 class CallWebhookPushRelayProxyView(HomeAssistantView):
@@ -2413,6 +2447,7 @@ async def async_setup(
     hass.http.register_view(CallWebhookPushRelaySetupView)
     hass.http.register_view(CallWebhookPushRelayHostView)
     hass.http.register_view(CallWebhookPushRelayProxyView)
+    hass.http.register_view(ComatAlarmMonitorView)
     hass.http.register_view(CallWebhookMailboxSetupView)
     hass.http.register_view(CallWebhookFritzCredentialsView)
 
@@ -2452,5 +2487,6 @@ async def async_setup(
     )
 
     return True
+
 
 

@@ -364,6 +364,56 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flags.count('alarmParking'),2)
         self.assertGreater(self.comat.provider.lookup.await_count,100)
 
+    async def test_monitor_requires_operator_and_does_not_query_providers(self):
+        self.flight.update(number='LH186', origin='FRA', destination='BER', packets='3/2')
+        await self.watch(server_polling=True)
+        await self.add_peer(dict(self.flight,id='peer-flight'),server_polling=True)
+        for headers in ({}, self.headers, {'X-ComatAlarm-Setup-Key':'wrong'}):
+            response = await self.client.get('/comatalarm/v1/monitor',headers=headers)
+            self.assertEqual(response.status,401)
+        response = await self.client.get('/comatalarm/v1/monitor',headers={'X-ComatAlarm-Setup-Key':'s'*64})
+        self.assertEqual(response.status,200)
+        body = await response.json()
+        self.assertEqual(len(body['flights']),1)
+        self.assertEqual(len(body['flights'][0]['subscribers']),2)
+        self.assertEqual(body['flights'][0]['packets'],{'in':3,'out':2})
+        self.comat.provider.lookup.assert_not_called()
+        self.comat.api_status.probe.assert_not_called()
+        for secret in ('private-api-token', 's'*64, 'a'*64, self.id, self.headers['Authorization'][7:]):
+            self.assertNotIn(secret,json.dumps(body))
+
+    async def test_monitor_push_failure_success_and_app_read_are_distinct(self):
+        await self.watch(server_polling=True,relay_alerts=True)
+        self.comat.provider.lookup.return_value = {'atd':self.now-10,'_live':{'lat':52.0,'lon':12.0,'alt':30000,'gspeed':400,'timestamp':self.now-300,'private':'do-not-export'}}
+        self.comat.sender.return_value = False
+        await self.comat.tick(self.now+1)
+        body = self.comat.monitor.snapshot(self.now+1)
+        self.assertTrue(body['flights'][0]['position_stale'])
+        self.assertEqual(body['pushes']['pending'],1)
+        self.assertIsNone(body['devices'][0]['last_app_read'])
+        self.assertTrue(any(x['kind']=='push_failed' for x in body['events']))
+        self.assertNotIn('do-not-export',json.dumps(body))
+        self.comat.sender.return_value = True
+        await self.comat.deliver(self.id,self.now+20)
+        await self.client.get('/comatalarm/v1/state',headers=self.headers)
+        body = self.comat.monitor.snapshot(self.now+21)
+        self.assertEqual(body['pushes']['accepted'],1)
+        self.assertEqual(body['pushes']['pending'],0)
+        self.assertIsNotNone(body['devices'][0]['last_app_read'])
+        self.assertTrue(any(x['kind']=='push_accepted' for x in body['events']))
+        self.assertEqual(self.comat.monitor.cycle_finished,self.now+1)
+
+    async def test_monitor_logs_are_allowlisted_and_retained_after_restart(self):
+        import logging
+        handler = self.comat.monitor.handler
+        handler.handle(logging.LogRecord('root',logging.WARNING,'',0,'unknown secret %s',('secret-value',),None))
+        handler.handle(logging.LogRecord('root',logging.WARNING,'',0,'ComatAlarm provider=%s HTTP=%s response=%s pause_seconds=%s%s',('BER',403,'HTML',60,' gateway=CloudFront'),None))
+        from push_relay.monitor import Monitor
+        restored = Monitor(self.comat)
+        events = restored.snapshot()['events']
+        self.assertTrue(any('BER: HTTP 403' in x['message'] for x in events))
+        self.assertNotIn('secret-value',json.dumps(events))
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, COMATALARM_SETUP_KEY='s'*64)

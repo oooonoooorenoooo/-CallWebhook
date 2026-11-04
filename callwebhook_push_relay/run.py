@@ -39,6 +39,21 @@ def configure(options, data_dir):
     if comat_key and (len(comat_key) < 32 or len(comat_key) > 256):
         raise ValueError("comatalarm_setup_key muss 32 bis 256 Zeichen haben")
     values["COMATALARM_SETUP_KEY"] = comat_key
+    # Keep the exact passphrase (spaces may be meaningful), outside command
+    # arguments and the child process environment. Empty disables future import.
+    passphrase = options.get("comatalarm_ber_passphrase", "")
+    if not isinstance(passphrase, str) or len(passphrase) > 4096 or "\x00" in passphrase:
+        raise ValueError("BER-Paket-Passphrase ist ungültig")
+    passphrase_path = data_dir / "comatalarm-ber-passphrase"
+    values["COMATALARM_BER_PASSPHRASE_FILE"] = ""
+    if passphrase:
+        fd = os.open(passphrase_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as file:
+            file.write(passphrase)
+        os.chmod(passphrase_path, 0o600)
+        values["COMATALARM_BER_PASSPHRASE_FILE"] = str(passphrase_path)
+    else:
+        passphrase_path.unlink(missing_ok=True)
     for field in ("apns_team_id", "apns_key_id"):
         value = options.get(field, "").strip()
         if not re.fullmatch(r"[A-Z0-9]{10}", value):

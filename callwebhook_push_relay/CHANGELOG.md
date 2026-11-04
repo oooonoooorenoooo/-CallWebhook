@@ -1,3 +1,11 @@
+## 1.2.20
+
+- ComatAlarm: Das BER-Standplatzpaket kann direkt über das vorhandene Firebase-Dienstkonto geladen werden, unabhängig von einer geöffneten Administrator-App. Neue optionale Passwort-Option `comatalarm_ber_passphrase`.
+- Unterstützt das bestehende verschlüsselte PDF mit passwortgeschütztem age-Schlüssel-Backup sowie direkt passwortverschlüsselte PDFs. Prüft Paketgröße, Datenblöcke, Prüfsummen und die bekannten Standplatztabellen; Referenzpunkte bleiben getrennt von tatsächlichen Parkpositionen.
+- Import im Hintergrund beim Start, anschließend Prüfung alle sechs Stunden. Unveränderte Pakete werden nicht erneut übertragen oder entschlüsselt. Fehler führen zu begrenzten Wiederholungen und überschreiben weder Standplätze noch Lerndaten.
+- Speicherung weiterhin verschlüsselt und dauerhaft im privaten Add-on-Verzeichnis. Keine Klartext-PDF, keine neuen öffentlichen Endpunkte und keine geänderten Gerätefreigaben.
+- Für den direkten Paketimport ist kein App-Update erforderlich. Die Übernahme bisheriger iPhone-Lerndaten und die zentrale Prognoseanzeige benötigen weiterhin die aktualisierte ComatAlarm-App.
+
 ## 1.2.19
 
 - Zeitstempel der vorhandenen FR24-Positionsantworten werden auch im ISO-8601-Format für Rollweg- und Referenzmerkmale verarbeitet. Damit arbeitet das zentrale Standplatzlernen mit beiden vom bisherigen Client unterstützten Zeitformaten.

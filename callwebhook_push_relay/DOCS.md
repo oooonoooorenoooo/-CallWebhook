@@ -1,5 +1,49 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: BER-Paket direkt aus Firebase (ab 1.2.20)
+
+Der Pi kann das bereits in Firebase veröffentlichte Standplatzpaket ohne
+Übertragung durch die Administrator-App laden. Dafür ist kein neuer App-Build
+nötig. Bestehende Push-, Apple- und Firebase-Einstellungen bleiben erhalten.
+
+1. **CallWebhook Push-Dienst auf 1.2.20 aktualisieren.**
+2. Unter **Konfiguration** das Passwortfeld **`comatalarm_ber_passphrase`**
+   mit der vorhandenen **BER-Paket-Passphrase** ausfüllen. Gemeint ist das
+   Passwort des verschlüsselten BER-Pakets beziehungsweise Schlüssel-Backups,
+   nicht das Apple-Passwort und nicht `comatalarm_setup_key`.
+3. **Speichern und den Push-Dienst neu starten.** Das bereits eingerichtete
+   `comatalarm_firebase_service_account` wird für den Download verwendet.
+4. Im **Protokoll** erscheint bei Erfolg:
+   **„BER-Standplatzpaket aus Firebase geladen und verschlüsselt gespeichert“**,
+   gefolgt von der Anzahl der Standplätze und Referenzpunkte.
+
+Die Passphrase nur in diesem Passwortfeld hinterlegen. Der Dienst liest die
+Dokumente `ber_package/document` und `ber_package/identity` samt Datenblöcken.
+Das vorhandene Dienstkonto benötigt dafür Firestore-Lesezugriff; eine neue
+Apple-Anmeldung, Testerprüfung oder Freigabe durch ein geöffnetes iPhone ist
+für diesen Betreiber-Import nicht erforderlich. Er erweitert keine Geräterechte.
+
+Beim Start wird geprüft, danach alle sechs Stunden. Unveränderte Pakete werden
+nicht erneut heruntergeladen oder entschlüsselt. Bei Fehlern folgt ein neuer
+Versuch nach fünf Minuten, mit wachsendem Abstand bis maximal 30 Minuten. Ein
+Neustart stößt eine neue Prüfung an. Die bisherigen Standplätze und Lerndaten
+bleiben bei falschem Passwort, unvollständigen Paketen und Verbindungsfehlern
+erhalten. Flugabfrage und Push-Versand laufen während des Imports weiter.
+
+Die entschlüsselte PDF und der age-Schlüssel werden nicht als Dateien abgelegt.
+Standplätze, Referenzpunkte und Lerndaten liegen verschlüsselt in `/data`, mit
+zusätzlicher verschlüsselter Sicherungsdatei. Die Passphrase liegt in der privaten
+Add-on-Konfiguration und einer nur für den Dienst lesbaren Datei in `/data`.
+Add-on-Backups enthalten diese vertraulichen Daten. Wird das Passwortfeld geleert,
+endet der direkte Download; bereits importierte Standplätze und Lerndaten bleiben.
+
+**Lernmodell:** Dieser Download enthält die Standplatzgeometrie, nicht die bisher
+auf dem iPhone gespeicherten Beobachtungen. Deren einmalige Übernahme und die
+Anzeige der zentralen Prognosen benötigen weiterhin die dafür aktualisierte
+ComatAlarm-App. Nach der Übernahme arbeitet das Pi-Modell eigenständig.
+
+## Grundeinrichtung für CallWebhook
+
 Dieses Add-on gehört **nur auf den Home Assistant des CallWebhook-Betreibers**.
 Wer die App später herunterlädt, installiert dieses Add-on nicht und bekommt
 keinen Apple-Schlüssel. Für den Raspberry Pi 5 wird `aarch64` unterstützt.

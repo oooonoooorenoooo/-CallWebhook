@@ -4,7 +4,9 @@ No network access. Only protected FR24 AIBT/GPS confirmations are learned;
 administrator imports preserve the existing app's observations and weighting.
 """
 import hashlib
+import copy
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -91,11 +93,37 @@ class StandModel:
             self.db.execute('INSERT OR REPLACE INTO comat_stand_models VALUES(?,?)', ('BER', payload))
         self.dirty = False
         if self.backup:
-            temporary = self.backup.with_suffix('.stands-backup.tmp')
-            fd = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, 'w') as output:
-                output.write(payload); output.flush(); os.fsync(output.fileno())
-            os.replace(temporary, self.backup)
+            try:
+                temporary = self.backup.with_suffix('.stands-backup.tmp')
+                fd = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, 'w') as output:
+                    output.write(payload); output.flush(); os.fsync(output.fileno())
+                os.replace(temporary, self.backup)
+            except OSError:
+                # The encrypted SQLite transaction is already committed.
+                logging.warning('ComatAlarm: Standmodell gespeichert; zusätzliche Sicherungsdatei konnte nicht geschrieben werden.')
+
+    def install_package(self, rows, source):
+        """Local operator import only, after authenticated Firebase download.
+
+        Validate the whole geometry before replacing it; preserve learned
+        observations, and restore the old in-memory model if persistence fails.
+        """
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 2000:
+            raise ValueError('Invalid package size')
+        positions = [self.position(row) for row in rows]
+        if not any(row['kind'] == 'stand' for row in positions):
+            raise ValueError('No stand positions')
+        digest = hashlib.sha256(json.dumps(positions, sort_keys=True).encode()).hexdigest()
+        previous, dirty = self.data, self.dirty
+        self.data = copy.deepcopy(previous)
+        self.data.update(positions=positions, package_digest=digest, firebase_package_source=source)
+        self.dirty = True
+        try:
+            self.save()
+        except Exception:
+            self.data, self.dirty = previous, dirty
+            raise
 
     def upload(self, payload, uid, now):
         """Resumable bounded chunks. Only the verified administrator calls this."""

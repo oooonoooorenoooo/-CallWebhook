@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .testflight import TestFlight, AppleError, failure
 from .apple_access import AppleAccess, AccessDenied
 from .stand_model import StandModel
+from .ber_package import BERPackageImporter
 import hashlib
 import hmac
 import json
@@ -630,6 +631,7 @@ class ComatAlarm:
         self.testflight = TestFlight(self.db)
         self.apple_access = AppleAccess(self.relay, self.testflight)
         self.stand_model = StandModel(self.db, protect_index, unprotect_index)
+        self.ber_importer = BERPackageImporter(self.stand_model, self.apple_access.store)
         self.stand_access_cache = {}
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
@@ -698,6 +700,8 @@ class ComatAlarm:
         if access:
             result['stand_model'] = self.stand_model.metadata()
             result['stand_model_administrator'] = access['administrator']
+            if access['administrator']:
+                result['stand_package_import_status'] = self.ber_importer.status
         return result
 
     def central_predictions(self, flights, access, now):
@@ -1098,7 +1102,7 @@ class ComatAlarm:
                     pass  # Do not log recipient addresses or credentials.
                 await asyncio.sleep(60)
         async def context(app):
-            tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker())]
+            tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker()), asyncio.create_task(self.ber_importer.run())]
             yield
             if self.api_status.task is not None:
                 tasks.append(self.api_status.task)

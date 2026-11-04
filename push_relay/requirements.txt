@@ -5,3 +5,6 @@ pyOpenSSL==26.2.0
 cbor2==5.9.0
 
 firebase-admin>=6.5,<8
+pyrage==1.4.0
+pypdf==6.21.4
+

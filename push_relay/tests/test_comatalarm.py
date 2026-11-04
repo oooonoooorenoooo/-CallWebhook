@@ -338,6 +338,32 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("api_token", payload["flight_state"])
             self.assertNotIn("aibt_position", payload["flight_state"])
 
+    async def test_all_apps_closed_for_hours_still_poll_and_deliver_events(self):
+        self.flight.update(number='LH186',origin='FRA',destination='BER')
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
+        await self.add_peer(dict(self.flight,id='peer-186'),foreground=True,server_polling=True,relay_alerts=True)
+        self.comat.sender.reset_mock()
+        self.comat.stand_access = AsyncMock(return_value={'uid':'approved-device','administrator':False})
+        self.comat.db.execute("UPDATE comat_devices SET firebase_uid='approved-device'")
+        self.comat.db.commit()
+        # No state/watch calls and no background handoff after this point.
+        # The phones can be suspended or killed without sending another request.
+        for elapsed in range(1, 4*3600, 61):
+            evidence = {'atd':self.now+3600} if elapsed >= 3600 else {}
+            if elapsed >= 7200:
+                evidence.update(ata=self.now+7200)
+            if elapsed >= 7500:
+                evidence.update(aibt=self.now+7500)
+            self.comat.provider.lookup.return_value=evidence
+            await self.comat.tick(self.now+elapsed)
+            if 7200 <= elapsed < 7261:
+                self.assertEqual(sum(c.args[2]['flag']=='alarmLanded' for c in self.comat.sender.call_args_list),2)
+        flags=[c.args[2]['flag'] for c in self.comat.sender.call_args_list]
+        self.assertEqual(flags.count('alarmTakeoff'),2)
+        self.assertEqual(flags.count('alarmLanded'),2)
+        self.assertEqual(flags.count('alarmParking'),2)
+        self.assertGreater(self.comat.provider.lookup.await_count,100)
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, COMATALARM_SETUP_KEY='s'*64)

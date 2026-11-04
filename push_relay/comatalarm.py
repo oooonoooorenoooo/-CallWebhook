@@ -28,6 +28,9 @@ BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
 FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number")
 
+MONITOR_LOG = logging.getLogger("ComatAlarm.monitor")
+MONITOR_LOG.setLevel(logging.INFO)
+
 BER_FLIGHTS_URL = "https://ber.berlin-airport.de/api.flights.json"
 
 
@@ -658,6 +661,7 @@ class ComatAlarm:
         self.stand_model = StandModel(self.db, protect_index, unprotect_index)
         self.ber_importer = BERPackageImporter(self.stand_model, self.apple_access.store)
         self.stand_access_cache = {}
+        self.last_monitor_report = 0
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS comat_devices (
                 id TEXT PRIMARY KEY, credential TEXT NOT NULL, token TEXT NOT NULL,
@@ -694,7 +698,8 @@ class ComatAlarm:
             return cached[1]
         try:
             access = await asyncio.wait_for(asyncio.to_thread(self.apple_access.store.device_access, uid), 3)
-        except Exception:
+        except Exception as error:
+            logging.warning("ComatAlarm approval_check_failed kind=%s", type(error).__name__)
             access = None  # Fail closed; never erase saved data on a network error.
         self.stand_access_cache[uid] = (now, access)
         return access
@@ -979,10 +984,21 @@ class ComatAlarm:
             await self._tick(time.time() if now is None else now)
 
     async def _tick(self, now):
+        report = now-self.last_monitor_report >= 300
+        if report:
+            self.last_monitor_report = now
+            rows = self.db.execute("SELECT watch,expires,server_polling FROM comat_devices").fetchall()
+            MONITOR_LOG.info("ComatAlarm monitor_cycle epoch=%d registrations=%d eligible=%d expired=%d central=%d",
+                            int(now), len(rows), sum(r['expires'] > now for r in rows),
+                            sum(r['expires'] <= now for r in rows), sum(r['expires'] > now and r['server_polling'] for r in rows))
         self.provider.credentials = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
         for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND (server_polling=1 OR foreground_until<=?)", (now,now)).fetchall():
             access = await self.stand_access(device['firebase_uid'])
             if device['firebase_uid'] and not access:
+                with self.db:
+                    self.db.execute("UPDATE comat_devices SET error=? WHERE id=?", ("Pi-Abfrage pausiert: Firebase-Gerätefreigabe konnte nicht bestätigt werden", device['id']))
+                if report:
+                    logging.warning("ComatAlarm monitor_skip reason=device_approval")
                 continue
             positions = self.stand_model.positions() if access and self.stand_model.ready else unprotect_index(device['stand_index'])
             prefs = json.loads(device["preferences"])
@@ -1038,7 +1054,8 @@ class ComatAlarm:
                             updated.update(changes)
                         pending.extend(self.events(device["id"], flight, updated, prefs, now))
                         flight.update(changes)
-                    except Exception:
+                    except Exception as exception:
+                        logging.warning("ComatAlarm flight_poll_failed kind=%s", type(exception).__name__)
                         error = "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"
                 # Compare-and-swap the entire snapshot after all network I/O. Removed
                 # flights, changed preferences and foreground takeovers win the race.
@@ -1046,6 +1063,9 @@ class ComatAlarm:
                     changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND (server_polling=1 OR foreground_until<=?) AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
                     if changed:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
+                if report:
+                    MONITOR_LOG.info("ComatAlarm monitor_result epoch=%d flights=%d committed=%s provider_error=%s events=%d",
+                                    int(now), len(flights), bool(changed), bool(error), len(pending) if changed else 0)
         for device in self.db.execute("SELECT id FROM comat_devices WHERE expires>?", (now,)).fetchall():
             await self.deliver(device["id"], now)
         active = self.db.execute("SELECT api_token FROM comat_devices WHERE expires>? AND api_token!='' ORDER BY expires DESC LIMIT 1", (now,)).fetchone()
@@ -1059,6 +1079,10 @@ class ComatAlarm:
     def events(self, device_id, old, updated, prefs, now):
         pending = []
         for event, flag, title, body in transitions(old, updated):
+            observed = stamp(updated.get(event))
+            MONITOR_LOG.info("ComatAlarm event_observed epoch=%d event=%s event_age_seconds=%d allowed=%s",
+                             int(now), flag, max(0, int(now-observed)) if observed else -1,
+                             bool(self.enabled(prefs, now) and prefs.get(flag, True)))
             if self.enabled(prefs, now) and prefs.get(flag, True):
                 # Independent of a phone's local record ID or corrected FR24 ID.
                 day = datetime.fromtimestamp(updated["reference"], ZoneInfo("Europe/Berlin")).date().isoformat()
@@ -1099,6 +1123,8 @@ class ComatAlarm:
                     accepted = False
                 with self.db:
                     if accepted:
+                        if not delivered:
+                            MONITOR_LOG.info("ComatAlarm push_accepted epoch=%d event=%s delay_seconds=%d", int(now), payload['flag'], max(0,int(now-item['created'])))
                         self.db.execute("INSERT OR IGNORE INTO comat_delivered VALUES(?,?,?,?)", (current["token"], current["environment"], item["event"], now))
                         self.db.execute("UPDATE comat_outbox SET sent=1 WHERE device=? AND event=?",(device_id,item["event"]))
                     else:
@@ -1114,8 +1140,9 @@ class ComatAlarm:
                     await self.tick()
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    pass  # Retry; never log tokens or private flight snapshots.
+                except Exception as error:
+                    # No exception text/traceback: provider errors may contain secrets.
+                    logging.warning("ComatAlarm monitor_cycle_failed kind=%s; retry_in_seconds=15", type(error).__name__)
                 await asyncio.sleep(15)
         async def tester_worker():
             while True:

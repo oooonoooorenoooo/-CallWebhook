@@ -1,3 +1,11 @@
+## 1.2.23
+
+- Hintergrunddiagnose: Der Pi protokolliert alle fünf Minuten seinen Überwachungszyklus, gültige/abgelaufene Registrierungen und gespeicherte Abfrageergebnisse. Fehler des Zyklus werden nicht mehr still verschluckt; protokolliert wird nur der Fehlertyp, ohne Zugangsdaten oder Antwortinhalte.
+- Fehlgeschlagene Firebase-Gerätefreigabeprüfungen werden als Ursache einer Abfragepause gespeichert und sichtbar protokolliert. Freigaben werden weiterhin geprüft; keine Umgehung bei Netzwerkfehlern.
+- Erkannte Flugereignisse nennen ihr Alter und die Alarmfreigabe; erfolgreiche Übergaben an APNs nennen den Versandzeitpunkt. Damit lassen sich verspätete Erkennung und verspätete Zustellung unterscheiden. APNs-Annahme ist keine Zustellbestätigung des Telefons.
+- Regressionstest: zwei Geräte, vier Stunden ohne erneuten App-Kontakt, zentrale Abfragen und jeweils einmalige Abflug-, Lande- und Standmeldungen.
+- Diese Version ergänzt die Fehlerdiagnose; die Ursache eines konkreten verspäteten Pushs muss anhand des Pi-Protokolls bestätigt werden.
+
 ## 1.2.22
 
 - BER-Flugabfrage und gemeinsame API-Statusprüfung verwenden wieder die vollständigen Anfrage-Header der App, mit eigener ComatAlarm-Pi-Kennung. Behebt die reproduzierte CloudFront-403-Antwort auf die bisherigen Standard-Anfragen.

@@ -30,7 +30,7 @@ if ! grep -Fq 'class ComatAlarmMonitorView' "$TARGET/__init__.py"; then
   echo "ComatAlarm dashboard endpoint missing after download." >&2
   exit 1
 fi
-echo "CallWebhook backend 19 with ComatAlarm dashboard installed successfully."
+echo "CallWebhook backend 20 with ComatAlarm monthly history installed successfully."
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
   echo "Requesting Home Assistant restart..."
   if curl -fsS -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H "Content-Type: application/json" http://supervisor/core/restart >/dev/null; then

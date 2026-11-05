@@ -1,3 +1,11 @@
+## 1.2.25
+
+- Dashboard lädt Antworten sofort sichtbar, ohne Reiterwechsel; Zeitüberschreitung und Verbindungsfehler werden angezeigt und automatisch erneut versucht.
+- API-Status, wartende/aktive/abgeschlossene Flüge, einzelne Flugkacheln, Ereignisse, Fehler und Geräte sind standardmäßig eingeklappt. Geöffnete Bereiche bleiben bei Aktualisierung erhalten.
+- Neuer Monatsverlauf mit Tagesauswahl (Europe/Berlin). Der Pi speichert den letzten bekannten Flugstand unabhängig vom geöffneten Dashboard, vor Entfernung und Ablauf einer Überwachung; Neustarts erhalten den Verlauf. Beim Monatswechsel wird der alte Flugverlauf entfernt. Bereits gelöschte frühere Flüge können nicht rekonstruiert werden.
+- Tagesabrufe sind rein lokal, weiterhin nur für HA-Administratoren. Keine zusätzlichen Anbieterabfragen. Bestehendes Fehlerjournal bleibt auf 1000 Einträge begrenzt.
+- Für die Tagesauswahl Bootstrap 1.2.8 einmal starten (Backend 20 / Integration 1.2.16) und das aktualisierte Dashboard übernehmen. Kein App-Update.
+
 ## 1.2.24
 
 - Neuer schreibgeschützter ComatAlarm-Monitor für das Home-Assistant-Dashboard: gemeinsamer API-Status, alle übergebenen Flüge, Messzeit/Datenalter, Flugplan, Position, Pakete, Vor-/Folgeflug und Standplatzprognose.

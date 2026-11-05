@@ -171,16 +171,18 @@ def complete():
     if build["attributes"].get("expired"):
         raise RuntimeError("The existing Apple build is expired; a new build is required")
     ident = build["id"]
+    record(upload_confirmed=True, apple_processing_state="VALID", apple_build_id=ident)
     groups = all_data("/v1/betaGroups?" + urllib.parse.urlencode({"filter[app]": app, "limit": "200"}))
     internal = [g for g in groups if g["attributes"].get("isInternalGroup") is True]
-    linked = all_data(f"/v1/builds/{ident}/betaGroups?limit=200")
+    record(existing_internal_group_count=len(internal))
+    linked = all_data("/v1/betaGroups?" + urllib.parse.urlencode({"filter[app]": app, "filter[builds]": ident, "limit": "200"}))
     linked_ids = {g["id"] for g in linked}
     usable = [g for g in internal if g["id"] in linked_ids or g["attributes"].get("hasAccessToAllBuilds") is True]
     if not usable and len(internal) == 1:
         # Retain the existing internal audience; do not invite anyone or touch external groups.
         api(f"/v1/builds/{ident}/relationships/betaGroups",
             {"data": [{"type": "betaGroups", "id": internal[0]["id"]}]}, method="POST")
-        linked = all_data(f"/v1/builds/{ident}/betaGroups?limit=200")
+        linked = all_data("/v1/betaGroups?" + urllib.parse.urlencode({"filter[app]": app, "filter[builds]": ident, "limit": "200"}))
         linked_ids = {g["id"] for g in linked}
         usable = [g for g in internal if g["id"] in linked_ids]
     detail = api(f"/v1/builds/{ident}/buildBetaDetail")["data"]["attributes"]

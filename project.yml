@@ -3,8 +3,10 @@ options:
   bundleIdPrefix: de.reno
 packages:
   LinphoneSDK:
-    url: https://gitlab.linphone.org/BC/public/linphone-sdk-swift-ios.git
-    branch: stable
+    # Official upstream mirror, pinned to the commit behind release 5.4.128.
+    # Avoid the unavailable GitLab server and floating stable updates.
+    url: https://github.com/BelledonneCommunications/linphone-sdk-swift-ios.git
+    revision: 084b29e207c3d7702a278ef8599b7b7d1907d20f
 targets:
   CallWebhook:
     type: application
@@ -51,7 +53,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.reno.CallWebhook.U98PKCA4W7
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: 2.0
-        CURRENT_PROJECT_VERSION: 17
+        CURRENT_PROJECT_VERSION: 18
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
         INFOPLIST_KEY_CFBundleDisplayName: CallWebhook

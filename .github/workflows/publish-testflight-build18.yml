@@ -1,0 +1,62 @@
+name: Publish approved CallWebhook 2.0 (18) to TestFlight
+run-name: TestFlight publication of existing signed build 18
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/macos-line3]
+    paths: [.github/workflows/publish-testflight-build18.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: callwebhook-testflight-build18
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'oooonoooorenoooo/-CallWebhook' && github.ref == 'refs/heads/codex/macos-line3'
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact successful signed artifact and production push entitlements
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/testflight_release.py verify
+      - name: Check whether this exact Apple build already exists
+        id: preflight
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: python3 scripts/testflight_release.py preflight
+      - name: Actually upload the approved distribution IPA to Apple
+        if: steps.preflight.outputs.upload_needed == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/private_keys"
+          KEY="$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s' "$ASC_PRIVATE_KEY" > "$KEY"
+          xcrun altool --upload-app -f "$RUNNER_TEMP/callwebhook-testflight-18/CallWebhook-TestFlight.ipa" -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" 2>&1 | tee "$RUNNER_TEMP/callwebhook-testflight-18/upload.log"
+          echo 'Apple upload command completed successfully.'
+      - name: Verify Apple processing and existing internal TestFlight access
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: python3 scripts/testflight_release.py complete
+      - name: Save publication result, not signing credentials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CallWebhook-TestFlight-build18-publication-result
+          path: ${{ runner.temp }}/callwebhook-testflight-18/result.json
+          if-no-files-found: error
+          retention-days: 7

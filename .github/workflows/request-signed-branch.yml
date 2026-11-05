@@ -1,0 +1,27 @@
+name: Request signed branch build
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/macos-line3]
+    paths: ['.github/workflows/request-signed-branch.yml']
+permissions:
+  contents: read
+  actions: write
+jobs:
+  request:
+    if: github.repository == 'oooonoooorenoooo/-CallWebhook' && github.ref == 'refs/heads/codex/macos-line3'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start the existing signing workflow on this exact branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BUILD_REF: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(gh api "repos/$REPOSITORY/git/ref/heads/$BUILD_REF" --jq '.object.sha')"
+          test "$HEAD_SHA" = "$EXPECTED_SHA"
+          gh api --method POST "repos/$REPOSITORY/actions/workflows/build-ios.yml/dispatches" -f "ref=$BUILD_REF"
+          printf 'Requested existing signed build for `%s` at `%s`.\n\n' "$BUILD_REF" "$EXPECTED_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'The signing workflow keeps its main-only TestFlight upload gate; this request does not merge or publish the branch.\n' >> "$GITHUB_STEP_SUMMARY"

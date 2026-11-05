@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 19
+BACKEND_API_VERSION = 20
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1118,6 +1118,9 @@ class ComatAlarmMonitorView(HomeAssistantView):
         user = request.get("hass_user")
         if user is None or not user.is_admin:
             raise web.HTTPForbidden()
+        day = request.query.get("day", "")
+        if day and (len(day)!=10 or not day.replace("-", "").isdigit() or day[4]!="-" or day[7]!="-"):
+            raise web.HTTPBadRequest(text="Ungültiger Verlaufstag")
         hass = request.app["hass"]
         target = await push_relay_target(hass)
         if not target:
@@ -1131,7 +1134,7 @@ class ComatAlarmMonitorView(HomeAssistantView):
                 return web.json_response({"error":"ComatAlarm-Einrichtungsschlüssel fehlt im Add-on"},status=503)
             key = key.strip()
             async with ClientSession(timeout=ClientTimeout(total=8)) as session:
-                async with session.get(target + "/comatalarm/v1/monitor", headers={"X-ComatAlarm-Setup-Key":key}, allow_redirects=False) as response:
+                async with session.get(target + "/comatalarm/v1/monitor", params={"day":day} if day else {}, headers={"X-ComatAlarm-Setup-Key":key}, allow_redirects=False) as response:
                     if response.status != 200:
                         return web.json_response({"error":"Monitor nicht verfügbar; Push-Dienst auf 1.2.24 oder neuer aktualisieren"},status=502)
                     body = await response.read()

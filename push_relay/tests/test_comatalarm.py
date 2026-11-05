@@ -364,6 +364,47 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flags.count('alarmParking'),2)
         self.assertGreater(self.comat.provider.lookup.await_count,100)
 
+    async def test_monitor_history_survives_removal_restart_and_filters_days(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from push_relay.monitor import Monitor
+        self.flight.update(number='LH186',origin='FRA',destination='BER')
+        await self.watch(server_polling=True)
+        self.comat.provider.lookup.return_value = {'atd':self.now-600,'aibt':self.now-10,'stand':'A12'}
+        await self.comat.tick(self.now+1)
+        day=datetime.fromtimestamp(self.flight['reference'],ZoneInfo('Europe/Berlin')).date()
+        # A phone removing the watched flight must not erase its last Pi state.
+        self.flight.update(number='LH188', id='replacement')
+        await self.watch(server_polling=True)
+        restored=Monitor(self.comat)
+        body=restored.snapshot(self.now+2,day=day.isoformat())
+        old=next(f for f in body['history']['flights'] if f['number']=='LH186')
+        self.assertEqual(old['stand'],'A12')
+        self.assertEqual(old['category'],'completed')
+        self.assertNotIn('LH186',[f['number'] for f in body['flights']])
+        self.assertIn(day.isoformat(),body['history']['available_days'])
+        self.assertEqual(restored.snapshot(self.now+2,day=(day-timedelta(days=1)).isoformat())['history']['flights'],[])
+        for secret in ('private-api-token',self.id,self.headers['Authorization'][7:]):
+            self.assertNotIn(secret,json.dumps(body))
+        # Month rollover drops the previous month's archive without provider I/O.
+        next_month=(day.replace(day=28)+timedelta(days=4)).replace(day=1)
+        restored.archive(datetime.combine(next_month,datetime.min.time(),tzinfo=ZoneInfo('Europe/Berlin')).timestamp())
+        self.assertEqual(self.comat.db.execute('SELECT count(*) FROM comat_monitor_history').fetchone()[0],0)
+
+    async def test_monitor_categories_use_flight_events_not_registration_status(self):
+        self.flight.update(number='LH186',origin='FRA',destination='BER')
+        await self.watch(server_polling=True)
+        self.assertEqual(self.comat.monitor.snapshot()['flights'][0]['category'],'waiting')
+        self.comat.provider.lookup.return_value={'atd':self.now-20}
+        await self.comat.tick(self.now+1)
+        self.assertEqual(self.comat.monitor.snapshot()['flights'][0]['category'],'active')
+        self.comat.db.execute("UPDATE comat_devices SET error='temporary outage'")
+        self.assertEqual(self.comat.monitor.snapshot()['flights'][0]['category'],'active')
+        headers={'X-ComatAlarm-Setup-Key':'s'*64}
+        for day in ('2026-99-99','2000-01-01','not-a-date'):
+            response=await self.client.get('/comatalarm/v1/monitor?day='+day,headers=headers)
+            self.assertEqual(response.status,400)
+
     async def test_monitor_requires_operator_and_does_not_query_providers(self):
         self.flight.update(number='LH186', origin='FRA', destination='BER', packets='3/2')
         await self.watch(server_polling=True)

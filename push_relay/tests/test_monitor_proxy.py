@@ -51,10 +51,12 @@ class MonitorProxyTests(unittest.IsolatedAsyncioTestCase):
         async def executor(fn,*args): return fn(*args)
         class Request(dict): pass
         req=Request(hass_user=SimpleNamespace(is_admin=True))
+        req.query={'day':'2026-11-05'}
         req.app={'hass':SimpleNamespace(async_add_executor_job=executor)}
         result=await view.get(req)
         self.assertEqual(result.status,200)
         self.assertNotIn('private-key',result.text)
         self.assertEqual(calls[0][0],'http://123abc-callwebhook-push-relay:8080/comatalarm/v1/monitor')
+        self.assertEqual(calls[0][1]['params'], {'day':'2026-11-05'})
         self.assertFalse(calls[0][1]['allow_redirects'])
         self.assertTrue(calls[0][1]['headers']['X-ComatAlarm-Setup-Key'].startswith('private-key'))

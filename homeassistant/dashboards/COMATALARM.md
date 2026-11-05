@@ -4,8 +4,8 @@ Der Reiter liest ausschließlich gespeicherte Zustände des Pi. Er stößt weder
 
 ## Einrichten
 
-1. CallWebhook Push-Dienst auf 1.2.24 aktualisieren.
-2. CallWebhook Bootstrap auf 1.2.7 aktualisieren und einmal starten. Er installiert das HA-Backend 19 (Integration 1.2.15) und fordert einen Home-Assistant-Neustart an. Bestehende Konfiguration und Schlüssel bleiben erhalten.
+1. CallWebhook Push-Dienst auf 1.2.25 aktualisieren.
+2. CallWebhook Bootstrap auf 1.2.8 aktualisieren und einmal starten. Er installiert das HA-Backend 20 (Integration 1.2.16) und fordert einen Home-Assistant-Neustart an. Bestehende Konfiguration und Schlüssel bleiben erhalten.
 3. Die View aus `comatalarm.yaml` unter `views:` des vorhandenen Dashboards einfügen. Das vorhandene `custom:button-card` muss installiert sein. Für Reno wurde außerdem das vollständige bestehende Dashboard mit dem Reiter unmittelbar nach Home vorbereitet.
 4. Als Home-Assistant-Administrator öffnen. Die Ansicht aktualisiert alle 15 Sekunden. Es wird kein Schlüssel in YAML oder Browser gespeichert.
 
@@ -22,3 +22,13 @@ Der Reiter liest ausschließlich gespeicherte Zustände des Pi. Er stößt weder
 ## Zugriff
 
 Die HA-Route `/api/callwebhook/comatalarm/monitor` verlangt Anmeldung und Administratorrechte. Sie löst nur das eigene, bereits konfigurierte Add-on auf und verwendet den vorhandenen Einrichtungsschlüssel serverseitig. Der interne Monitor-Endpunkt ist nicht in der öffentlichen Relay-Proxy-Whitelist enthalten. Das Add-on erhält keine zusätzlichen Home-Assistant- oder Supervisor-Rechte.
+
+## Einklappen und Monatsverlauf
+
+Alle Bereiche und Flugdetails starten geschlossen; während automatischer Aktualisierungen bleiben die geöffneten Bereiche erhalten. Die Tagesauswahl verwendet Berliner Zeit und zeigt alle Tage des aktuellen Monats. Ein Punkt kennzeichnet gespeicherte Flüge.
+
+Der Pi archiviert automatisch den letzten bekannten Stand je Flugtag vor dem Entfernen oder Ablauf einer Überwachung und am Ende seiner Abfragezyklen. Die Übersicht muss dafür nicht geöffnet sein. Der aktuelle Monat bleibt über Neustarts erhalten; der vorherige Monat wird beim nächsten Archivierungslauf entfernt. Frühere, bereits gelöschte Flüge sind nicht rekonstruierbar. Das Tagesjournal zeigt nur noch vorhandene Einträge des begrenzten Diagnosejournals.
+
+Wartend bedeutet: kein bestätigter Abflug und keine aktuelle Luftposition. Aktiv umfasst abgeflogene oder gelandete, noch nicht am Stand bestätigte Ankünfte. Abgeschlossen bedeutet AIBT bei Ankünften, ATD bei Abflügen ab BER, Ende des vorhandenen Ankunfts-Nachlaufs ohne AIBT oder Annullierung/Umleitung. Technischer Überwachungsstatus (z. B. Reparatur eines Vorflugs) wird separat angezeigt und kann fortbestehen.
+
+Frontend-Regressionsprüfung: `node homeassistant/dashboards/test-monitor.cjs` (Python mit PyYAML erforderlich).

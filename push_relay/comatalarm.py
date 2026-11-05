@@ -907,6 +907,7 @@ class ComatAlarm:
                     raise ValueError("Invalid stand position")
             encrypted_index = protect_index(index)
         clean = self.central_predictions(clean, access, now)
+        self.monitor.archive(now)
         with self.db:
             self.db.execute("UPDATE comat_devices SET server_polling=? WHERE id=?", (int(server_polling), device["id"]))
             self.db.execute("UPDATE comat_devices SET stand_index=?,api_foreground_until=? WHERE id=?", (encrypted_index, now+90 if body["foreground"] and api_foreground else 0, device["id"]))
@@ -918,6 +919,7 @@ class ComatAlarm:
                     if old is not None:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", self.events(device["id"], old, row, prefs, now))
         await self.deliver(device["id"], now)
+        self.monitor.archive(now)
         if status_request:
             self.api_status.request_refresh(api_token)
         return web.json_response(dict(self.stand_metadata(access), api_status=self.api_status.snapshot(), watching=len(clean), background_ready=bool(api_token), expires=now+86400, relay_alerts=relay_alerts, flights=clean))
@@ -1079,6 +1081,7 @@ class ComatAlarm:
         active = self.db.execute("SELECT api_token FROM comat_devices WHERE expires>? AND api_token!='' ORDER BY expires DESC LIMIT 1", (now,)).fetchone()
         if active:
             await self.api_status.refresh(active["api_token"], now=now)
+        self.monitor.archive(now)
         with self.db:
             self.db.execute("DELETE FROM comat_outbox WHERE created<?",(now-2*86400,))
             self.db.execute("DELETE FROM comat_delivered WHERE sent_at<?", (now-2*86400,))

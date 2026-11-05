@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/macos-line3]
-    paths: [.github/workflows/publish-testflight-build18.yml]
+    paths: [.github/workflows/publish-testflight-build18.yml, scripts/testflight_release.py]
 permissions:
   contents: read
   actions: read

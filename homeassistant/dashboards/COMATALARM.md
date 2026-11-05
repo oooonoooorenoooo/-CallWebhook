@@ -1,11 +1,11 @@
 # ComatAlarm im Home-Assistant-Dashboard
 
-Der Reiter liest ausschließlich gespeicherte Zustände des Pi. Er stößt weder Flugabfragen noch Pushes an. Die ComatAlarm-App benötigt kein Update.
+Der Reiter zeigt gespeicherte Pi-Zustände. Die Ankunftstabelle lädt auf Anforderung eine gemeinsame BER-Tagesliste; daraus können Administratoren Flüge überwachen oder bestehende Flüge vom Pi entfernen. Die ComatAlarm-App benötigt kein Update.
 
 ## Einrichten
 
-1. CallWebhook Push-Dienst auf 1.2.25 aktualisieren.
-2. CallWebhook Bootstrap auf 1.2.8 aktualisieren und einmal starten. Er installiert das HA-Backend 20 (Integration 1.2.16) und fordert einen Home-Assistant-Neustart an. Bestehende Konfiguration und Schlüssel bleiben erhalten.
+1. CallWebhook Push-Dienst auf 1.2.26 aktualisieren.
+2. CallWebhook Bootstrap auf 1.2.9 aktualisieren und einmal starten. Er installiert das HA-Backend 21 (Integration 1.2.17) und fordert einen Home-Assistant-Neustart an. Bestehende Konfiguration und Schlüssel bleiben erhalten.
 3. Die View aus `comatalarm.yaml` unter `views:` des vorhandenen Dashboards einfügen. Das vorhandene `custom:button-card` muss installiert sein. Für Reno wurde außerdem das vollständige bestehende Dashboard mit dem Reiter unmittelbar nach Home vorbereitet.
 4. Als Home-Assistant-Administrator öffnen. Die Ansicht aktualisiert alle 15 Sekunden. Es wird kein Schlüssel in YAML oder Browser gespeichert.
 
@@ -29,8 +29,19 @@ Alle Bereiche und Flugdetails starten geschlossen; während automatischer Aktual
 
 Der Pi archiviert automatisch den letzten bekannten Stand je Flugtag vor dem Entfernen oder Ablauf einer Überwachung und am Ende seiner Abfragezyklen. Die Übersicht muss dafür nicht geöffnet sein. Der aktuelle Monat bleibt über Neustarts erhalten; der vorherige Monat wird beim nächsten Archivierungslauf entfernt. Frühere, bereits gelöschte Flüge sind nicht rekonstruierbar. Das Tagesjournal zeigt nur noch vorhandene Einträge des begrenzten Diagnosejournals.
 
-Wartend bedeutet: kein bestätigter Abflug und keine aktuelle Luftposition. Aktiv umfasst abgeflogene oder gelandete, noch nicht am Stand bestätigte Ankünfte. Abgeschlossen bedeutet AIBT bei Ankünften, ATD bei Abflügen ab BER, Ende des vorhandenen Ankunfts-Nachlaufs ohne AIBT oder Annullierung/Umleitung. Technischer Überwachungsstatus (z. B. Reparatur eines Vorflugs) wird separat angezeigt und kann fortbestehen.
+Wartend bedeutet: kein bestätigter Abflug und keine aktuelle Luftposition. Aktiv umfasst abgeflogene oder gelandete, noch nicht am Stand bestätigte Ankünfte. Abgeschlossen bedeutet AIBT bei Ankünften, ATD bei Abflügen ab BER, Ende des vorhandenen Ankunfts-Nachlaufs ohne AIBT oder Annullierung/Umleitung. Archivierte und abgeschlossene Kacheln heißen „Abgeschlossen · im Verlauf“. Sie enthalten nur Flugidentität, Flugplanzeiten, Parkposition/Gate, Pakete und gegebenenfalls Vor-/Folgeflug. Live-Telemetrie, Positionsalter und Registrierungs-/Gerätestatus entfallen. Push-Informationen stehen ausschließlich im Ereignisbereich. Noch laufende heutige Flüge werden nicht zusätzlich als abgeschlossen im Verlauf dargestellt.
 
 Frontend-Regressionsprüfung: `node homeassistant/dashboards/test-monitor.cjs` (Python mit PyYAML erforderlich).
 
-Interaktionen werden zusätzlich mit der echten `button-card` im Browser geprüft: `BUTTON_CARD_BUNDLE=/pfad/button-card.js CHROMIUM_PATH=/pfad/chromium node homeassistant/dashboards/test-monitor-browser.cjs` (Playwright und PyYAML erforderlich). Der Test umfasst Maus, Tastatur, Touch, verschachtelte Flugdetails, Zustandserhalt bei Aktualisierung und Tagesauswahl. Der Inhaltsbereich aktiviert eigene Pointer-Ereignisse und trennt seine Bedienelemente vom Action-Handler der umgebenden Karte, damit dieser das Aufklappen nicht verhindert. Für diese Korrektur genügt das Ersetzen der Dashboard-YAML; Push-Dienst und Bootstrap bleiben unverändert.
+Interaktionen werden zusätzlich mit der echten `button-card` im Browser geprüft: `BUTTON_CARD_BUNDLE=/pfad/button-card.js CHROMIUM_PATH=/pfad/chromium node homeassistant/dashboards/test-monitor-browser.cjs` (Playwright und PyYAML erforderlich). Der Test umfasst Maus, Tastatur, Touch, verschachtelte Flugdetails, Zustandserhalt bei Aktualisierung und Tagesauswahl. Der Inhaltsbereich aktiviert eigene Pointer-Ereignisse und trennt seine Bedienelemente vom Action-Handler der umgebenden Karte, damit dieser das Aufklappen nicht verhindert. Die Prüfung umfasst auch das Hinzufügen einer Überwachung, Bestätigen/Abbrechen des Löschens und bereinigte Archivkacheln.
+
+
+## Ankunftstabelle und Löschen
+
+Die Tabelle verwendet denselben BER-Ankunftsvertrag und dieselbe Airline-Auswahl wie die App, einschließlich Eurowings. Nach Airline eingeklappte Zeilen zeigen Flugnummer, Herkunft, Plan und erwartete Ankunft. Codeshares desselben ausführenden Flugs werden zusammengefasst. Gelandete, annullierte und bereits vergangene Ankünfte werden nicht neu hinzugefügt. Eine abgelaufene Tagesliste wird niemals als aktuelle Liste ausgegeben.
+
+Beim ersten Öffnen wird die Tagesliste einmal zentral geladen und über Neustarts gespeichert. „Tabelle aktualisieren“ erlaubt einen erneuten Abruf, frühestens nach fünf Minuten. Gleichzeitige Aufrufe teilen dieselbe Aufgabe; die gemeinsame BER-Anbietersperre wird respektiert. Fehler und der Zeitpunkt des letzten erfolgreichen Abrufs bleiben sichtbar. Es gibt keine zusätzlichen Historien-/Prognoseabfragen für alle Tabellenzeilen.
+
+„Überwachen“ benötigt mindestens eine freigegebene, gültige Geräteregistrierung mit eingerichteter zentraler Pi-Abfrage und API-Zugang. Der Flug wird in die Pi-Watchlisten dieser Geräte aufgenommen. Ihre Alarm- und Kalenderregeln gelten weiter; ihre Pi-Registrierung wird durch diese ausdrückliche Aktion um 24 Stunden verlängert. Ein erneuter App-Abgleich erhält den Pi-Eintrag samt bereits ermittelten Flugwerten. Die App muss für die Abfragen und den Versand nicht geöffnet bleiben. Diese Aktion erstellt keinen neuen lokalen Flugdatensatz in der iOS-App; ihre Anzeige-Synchronisierung wird hier nicht geändert.
+
+„Flug vom Pi löschen“ gibt es in jeder Flugkachel, auch im Verlauf. Nach Bestätigung werden alle Pi-Gerätekopien dieses Flugs, sein Archivdatensatz und noch nicht gesendete Meldungen entfernt. Ein persistenter Löschvermerk verhindert das Wiederanlegen durch eine alte App-Watchliste. Andere Flugtage bleiben erhalten. Aus einer aktuellen Ankunftstabelle kann der Administrator den Flug ausdrücklich erneut aufnehmen. Bereits an Apple übergebene Pushes und Einträge im separaten Diagnosejournal bleiben erhalten. Ein in der App gespeicherter Flug wird durch diese Pi-Aktion nicht aus deren lokalem Verlauf gelöscht.

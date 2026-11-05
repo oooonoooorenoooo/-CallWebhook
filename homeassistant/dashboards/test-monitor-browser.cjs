@@ -17,16 +17,22 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   await page.evaluate(()=>{window.cardHelpers={};});
   await page.addScriptTag({path:process.env.BUTTON_CARD_BUNDLE});
   await page.evaluate(config=>{
-   window.calls=[];
+   window.calls=[];window.posts=[];window.flightDeleted=false;window.arrivalTracked=false;
    const now=Date.now()/1000,today=new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin'}).format(new Date());
    const card=document.createElement('button-card');
    window.testCard=card;
    card.setConfig(config);
    card.hass={states:{},config:{unit_system:{length:'km'}},locale:{language:'de'},themes:{darkMode:true},user:{is_admin:true},
-    callApi:async(method,path)=>{
+    callApi:async(method,path,body)=>{
+     if(method==='POST'){
+      window.posts.push(body);
+      if(body.action==='delete')window.flightDeleted=true;
+      if(body.action==='track')window.arrivalTracked=true;
+      return {ok:true,message:'Aktion gespeichert'};
+     }
      window.calls.push(path);await new Promise(r=>setTimeout(r,30));
      const day=decodeURIComponent(path.split('day=')[1]);
-     return {generated_at:now,cycle_started:now,cycle_finished:now,api_status:{results:{FR24:'OK'}},pushes:{pending:0,accepted:1,expired:0},stand_model:{ready:true},devices:[],events:[],flights:[{number:'LH186',day:today,category:'active',origin:'FRA',destination:'BER',live:{},schedule:{},subscribers:[]}],history:{day,available_days:[today],flights:[],events:[]}};
+     return {generated_at:now,cycle_started:now,cycle_finished:now,api_status:{results:{FR24:'OK'}},pushes:{pending:0,accepted:1,expired:0},stand_model:{ready:true},devices:[],events:[],flights:window.flightDeleted?[]:[{key:'a'.repeat(64),number:'LH186',day:today,category:'active',origin:'FRA',destination:'BER',live:{},schedule:{},subscribers:[]}],arrivals:{day:today,fetched_at:now,flights:[{key:'b'.repeat(64),number:'EW207',airline:'Eurowings',origin:'CGN',origin_name:'Köln',reference:now+3600,schedule:{sta:now+3600},tracked:window.arrivalTracked,available:true}]},history:{day,available_days:[today],flights:[{key:'c'.repeat(64),number:'LH194',day,origin:'FRA',destination:'BER',registration:'D-AISP',category:'completed',stand:'B06',aibt:now-3600,live:{alt:100,gspeed:20},schedule:{},subscribers:[{device:'Gerät abc',status:'Registrierung abgelaufen'}]}],events:[]} };
     }};
    document.body.append(card);
   },config);
@@ -56,6 +62,28 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   await page.waitForFunction(day=>window.calls.some(p=>p.endsWith(day)),selected);
   await page.waitForTimeout(80);
   assert.equal(await dayButton.getAttribute('aria-pressed'),'true','day selection works');
+  const archive=page.locator('details[data-cm-key="history"] .flight');
+  await act(archive.locator(':scope > summary'));
+  assert.match(await archive.innerText(),/Abgeschlossen · im Verlauf/);
+  assert.match(await archive.innerText(),/B06/);
+  assert.doesNotMatch(await archive.innerText(),/Registrierung abgelaufen|Positionsdaten|Geschwindigkeit|Distanz|Bis ETA|letzter Zyklus|App-Datenabruf/);
+  const arrivals=page.locator('details[data-cm-key="arrivals"]');
+  await act(arrivals.locator(':scope > summary'));
+  const airline=page.locator('details[data-cm-key="airline:Eurowings"]');
+  await act(airline.locator(':scope > summary'));
+  await act(airline.locator('button[data-cm-action="track"]'));
+  await page.waitForFunction(()=>window.posts.some(x=>x.action==='track'&&x.key==='b'.repeat(64)));
+  await page.waitForFunction(()=>window.testCard.shadowRoot.querySelector('[data-cm-action="track"]').disabled);
+  assert.match(await airline.innerText(),/Wird überwacht/);
+  await act(flight.locator(':scope > summary'));
+  await act(flight.locator('button[data-cm-action="delete"]'));
+  assert.equal(await page.evaluate(()=>window.posts.filter(x=>x.action==='delete').length),0,'no delete before confirmation');
+  await act(flight.locator('button[data-cm-action="cancel"]'));
+  assert.equal(await flight.locator('button[data-cm-action="confirm-delete"]').count(),0);
+  await act(flight.locator('button[data-cm-action="delete"]'));
+  await act(flight.locator('button[data-cm-action="confirm-delete"]'));
+  await page.waitForFunction(()=>window.posts.some(x=>x.action==='delete'&&x.key==='a'.repeat(64)));
+  await page.waitForFunction(()=>!window.testCard.shadowRoot.querySelector('[data-cm-key="active"] .flight'));
   if(!mobile){
    const summary=active.locator(':scope > summary');await summary.focus();await page.keyboard.press('Enter');
    assert.equal(await active.evaluate(e=>e.open),false,'keyboard closes group');
@@ -63,7 +91,7 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   assert.deepEqual(errors,[]);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'no horizontal overflow');
   await page.screenshot({path:'/tmp/comat-interaction-'+(mobile?'touch':'desktop')+'.png',fullPage:true});
-  console.log('PASS real button-card: '+(mobile?'touch':'mouse + keyboard')+', nested details, refresh preservation and history days');
+  console.log('PASS real button-card: '+(mobile?'touch':'mouse + keyboard')+', nested details, history, clean archive, add monitoring and confirmed deletion');
   await page.close();
  }
  }finally{await browser.close();}

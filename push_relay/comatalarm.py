@@ -906,6 +906,11 @@ class ComatAlarm:
                 if not isinstance(position, dict) or not isinstance(position.get("name"), str) or not re.fullmatch(r"[A-Z0-9-]{1,16}", position["name"]) or not valid_coordinate(position.get("latitude"), position.get("longitude")):
                     raise ValueError("Invalid stand position")
             encrypted_index = protect_index(index)
+        # Apply Pi additions and removals after all authorization awaits. A stale
+        # phone handoff cannot resurrect a deleted occurrence or erase a Pi watch.
+        current = self.db.execute("SELECT watch FROM comat_devices WHERE id=?", (device["id"],)).fetchone()
+        if current is None: raise web.HTTPUnauthorized()
+        clean = self.monitor.operator.merge(clean, json.loads(current[0]), now)
         clean = self.central_predictions(clean, access, now)
         self.monitor.archive(now)
         with self.db:
@@ -1148,6 +1153,7 @@ class ComatAlarm:
 
     def routes(self, app):
         app.router.add_get("/comatalarm/v1/monitor", self.monitor.get)
+        app.router.add_post("/comatalarm/v1/monitor", self.monitor.post)
         app.router.add_post("/comatalarm/v1/apple/approve", self.apple_access.approve)
         for method, path, handler in (("POST","register",self.register),("POST","watch",self.watch),("GET","state",self.state),("DELETE","registration",self.revoke),("POST","test",self.test),("GET","testflight/groups",self.test_groups),("POST","testflight/testers",self.add_tester)):
             app.router.add_route(method,"/comatalarm/v1/"+path,handler)
@@ -1175,6 +1181,8 @@ class ComatAlarm:
             self.monitor.record("service", "Push-Dienst gestartet")
             tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker()), asyncio.create_task(self.ber_importer.run())]
             yield
+            if self.monitor.operator.task is not None:
+                tasks.append(self.monitor.operator.task)
             if self.api_status.task is not None:
                 tasks.append(self.api_status.task)
             for task in tasks:

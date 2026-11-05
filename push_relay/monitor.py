@@ -1,4 +1,4 @@
-"""Read-only operator diagnostics. No provider calls, credentials or raw logs."""
+"""Operator diagnostics. Credentials and raw logs never leave the service."""
 import hashlib
 import hmac
 import json
@@ -42,6 +42,8 @@ class Monitor:
                 identity TEXT PRIMARY KEY, day TEXT NOT NULL, saved_at REAL NOT NULL, payload TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS comat_monitor_history_day ON comat_monitor_history(day);
         ''')
+        from .monitor_actions import Operator
+        self.operator = Operator(self)
         self.handler = SafeLogHandler(self)
 
     def record(self, kind, message, flight='', device='', now=None):
@@ -51,11 +53,20 @@ class Monitor:
                 (time.time() if now is None else now, kind, flight[:32], device_label(device) if device else '', message[:400]))
             self.db.execute('DELETE FROM comat_monitor_events WHERE id NOT IN (SELECT id FROM comat_monitor_events ORDER BY id DESC LIMIT 1000)')
 
-    async def get(self, request):
+    def authorize(self, request):
         key = os.environ.get('COMATALARM_SETUP_KEY','')
         supplied = request.headers.get('X-ComatAlarm-Setup-Key','')
         if len(key) < 32 or not hmac.compare_digest(key, supplied):
             raise web.HTTPUnauthorized()
+
+    async def post(self, request):
+        self.authorize(request)
+        body = await request.json()
+        if not isinstance(body,dict): raise web.HTTPBadRequest()
+        return web.json_response(await self.operator.command(body),headers={'Cache-Control':'no-store'})
+
+    async def get(self, request):
+        self.authorize(request)
         day = request.query.get('day')
         today = datetime.now(ZoneInfo('Europe/Berlin')).date()
         if day is not None:
@@ -79,6 +90,10 @@ class Monitor:
                     if not f['day'].startswith(month):
                         continue
                     identity = json.dumps([f['number'],f['day'],f.get('origin',''),f.get('destination','')])
+                    f = dict(f)
+                    for field in ('position_age','position_stale','distance_km','subscribers','checked_at'):
+                        f.pop(field,None)
+                    if f.get('category')=='completed': f.pop('live',None)
                     payload = json.dumps(f, ensure_ascii=False)
                     self.db.execute('''INSERT INTO comat_monitor_history VALUES(?,?,?,?)
                         ON CONFLICT(identity) DO UPDATE SET saved_at=excluded.saved_at,payload=excluded.payload
@@ -87,6 +102,7 @@ class Monitor:
             logging.warning('ComatAlarm monitor_archive_failed')
 
     def snapshot(self, now=None, day=None, with_history=True):
+        from .monitor_actions import key_of
         from .comatalarm import departure_from_ber, previous_parking_ready, arrival_tracking_expired
         now = time.time() if now is None else now
         devices, groups = [], {}
@@ -139,15 +155,18 @@ class Monitor:
                     result['distance_km'] = round(6371*2*math.asin(min(1,math.sqrt(max(0,h)))),1)
                 groups[key] = result
         flights = sorted(groups.values(),key=lambda f:(f['day'],f['number']))
-        for f in flights: f.pop('_score',None)
+        for f in flights:
+            f.pop('_score',None)
+            f['key'] = key_of(f)
         events = [dict(r) for r in self.db.execute('SELECT timestamp,kind,flight,device,message FROM comat_monitor_events ORDER BY id DESC LIMIT 150')]
         outbox = self.db.execute('SELECT SUM(sent=0 AND created>?),SUM(sent=1),SUM(sent=0 AND created<=?) FROM comat_outbox',(now-900,now-900)).fetchone()
         meta = self.comat.stand_model.metadata()
-        result = dict(schema=2, generated_at=now, started_at=self.started, cycle_started=self.cycle_started, cycle_finished=self.cycle_finished,
+        result = dict(schema=3, generated_at=now, started_at=self.started, cycle_started=self.cycle_started, cycle_finished=self.cycle_finished,
             api_status=self.comat.api_status.snapshot(), flights=flights, devices=devices, events=events,
             pushes=dict(pending=outbox[0] or 0, accepted=outbox[1] or 0, expired=outbox[2] or 0),
             stand_model=select(meta,('ready','observations','revision')), package_status=self.comat.ber_importer.status)
         if with_history:
+            result['arrivals'] = self.operator.board(flights,now)
             today = datetime.fromtimestamp(now,ZoneInfo('Europe/Berlin')).date()
             selected = date.fromisoformat(day) if day else today
             start = datetime.combine(selected,datetime.min.time(),tzinfo=ZoneInfo('Europe/Berlin')).timestamp()
@@ -157,6 +176,12 @@ class Monitor:
             merged = {(f['number'],f.get('origin',''),f.get('destination','')):f for f in archived}
             for f in flights:
                 if f['day']==selected.isoformat(): merged[(f['number'],f.get('origin',''),f.get('destination',''))]=f
+            merged = {k:dict(f) for k,f in merged.items() if f.get('category')=='completed' or f.get('day','')<today.isoformat()}
+            for f in merged.values():
+                f['key'] = key_of(f)
+                f['category'] = 'completed'
+                for field in ('live','position_age','position_stale','distance_km','subscribers','checked_at'):
+                    f.pop(field,None)
             available = {r[0] for r in self.db.execute('SELECT DISTINCT day FROM comat_monitor_history WHERE substr(day,1,7)=?',(today.strftime('%Y-%m'),))}
             available.update(f['day'] for f in flights if f['day'].startswith(today.strftime('%Y-%m')))
             result['history'] = dict(day=selected.isoformat(),month=today.strftime('%Y-%m'),available_days=sorted(available),

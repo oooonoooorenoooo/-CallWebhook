@@ -29,10 +29,13 @@ class MonitorProxyTests(unittest.IsolatedAsyncioTestCase):
         for user in (None,SimpleNamespace(is_admin=False)):
             with self.assertRaises(web.HTTPForbidden):
                 await view.get({'hass_user':user})
+            with self.assertRaises(web.HTTPForbidden):
+                await view.post({'hass_user':user})
         namespace['push_relay_target'].assert_not_called()
         tree = ast.parse(SOURCE.read_text())
         routes = next(n.value for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='RELAY_PUBLIC_ROUTES' for t in n.targets))
         self.assertNotIn(('GET','comatalarm/v1/monitor'),ast.literal_eval(routes))
+        self.assertNotIn(('POST','comatalarm/v1/monitor'),ast.literal_eval(routes))
 
     async def test_admin_uses_server_side_key_without_leaking_it(self):
         namespace,view = self.load()
@@ -42,6 +45,8 @@ class MonitorProxyTests(unittest.IsolatedAsyncioTestCase):
             read=AsyncMock(return_value=b'{"flights":[]}')
         class Session(Context):
             def __init__(self,**kw): pass
+            def post(self,url,**kw):
+                calls.append((url,kw)); return Response()
             def get(self,url,**kw):
                 calls.append((url,kw)); return Response()
         def supervisor(method,path):
@@ -60,3 +65,11 @@ class MonitorProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][1]['params'], {'day':'2026-11-05'})
         self.assertFalse(calls[0][1]['allow_redirects'])
         self.assertTrue(calls[0][1]['headers']['X-ComatAlarm-Setup-Key'].startswith('private-key'))
+
+        req.json=AsyncMock(return_value={'action':'delete','key':'a'*64,'unexpected':'untrusted'})
+        result=await view.post(req)
+        self.assertEqual(result.status,200)
+        self.assertEqual(calls[-1][1]['json'], {'action':'delete','key':'a'*64})
+        self.assertNotIn('private-key',result.text)
+        req.json=AsyncMock(return_value={'action':'delete','key':'../bad'})
+        with self.assertRaises(web.HTTPBadRequest): await view.post(req)

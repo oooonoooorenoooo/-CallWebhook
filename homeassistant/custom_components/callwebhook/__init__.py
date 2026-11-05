@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 20
+BACKEND_API_VERSION = 21
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1115,9 +1115,23 @@ class ComatAlarmMonitorView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request):
+        return await self.forward(request)
+
+    async def post(self, request):
+        return await self.forward(request, command=True)
+
+    async def forward(self, request, command=False):
         user = request.get("hass_user")
         if user is None or not user.is_admin:
             raise web.HTTPForbidden()
+        payload = None
+        if command:
+            payload = await request.json()
+            if not isinstance(payload,dict) or payload.get("action") not in ("delete","track","arrivals","refresh_arrivals"):
+                raise web.HTTPBadRequest(text="Ungültiger Monitor-Befehl")
+            if payload["action"] in ("delete","track") and (not isinstance(payload.get("key"),str) or len(payload["key"])!=64 or any(c not in "0123456789abcdef" for c in payload["key"])):
+                raise web.HTTPBadRequest(text="Ungültiger Flugschlüssel")
+            payload = {k:payload[k] for k in ("action","key") if k in payload}
         day = request.query.get("day", "")
         if day and (len(day)!=10 or not day.replace("-", "").isdigit() or day[4]!="-" or day[7]!="-"):
             raise web.HTTPBadRequest(text="Ungültiger Verlaufstag")
@@ -1133,10 +1147,14 @@ class ComatAlarmMonitorView(HomeAssistantView):
             if not isinstance(key,str) or not 32 <= len(key) <= 256:
                 return web.json_response({"error":"ComatAlarm-Einrichtungsschlüssel fehlt im Add-on"},status=503)
             key = key.strip()
-            async with ClientSession(timeout=ClientTimeout(total=8)) as session:
-                async with session.get(target + "/comatalarm/v1/monitor", params={"day":day} if day else {}, headers={"X-ComatAlarm-Setup-Key":key}, allow_redirects=False) as response:
+            async with ClientSession(timeout=ClientTimeout(total=20 if command else 8)) as session:
+                options = dict(headers={"X-ComatAlarm-Setup-Key":key}, allow_redirects=False)
+                call = session.post(target + "/comatalarm/v1/monitor", json=payload, **options) if command else session.get(target + "/comatalarm/v1/monitor", params={"day":day} if day else {}, **options)
+                async with call as response:
+                    if command and response.status == 409:
+                        return web.json_response({"error":"Aktion nicht möglich: Ankunftstabelle aktualisieren und freigegebene Pi-Geräteregistrierung prüfen"},status=409)
                     if response.status != 200:
-                        return web.json_response({"error":"Monitor nicht verfügbar; Push-Dienst auf 1.2.24 oder neuer aktualisieren"},status=502)
+                        return web.json_response({"error":"Monitor nicht verfügbar; Push-Dienst auf 1.2.26 oder neuer aktualisieren"},status=502)
                     body = await response.read()
                     if len(body)>2_000_000:
                         raise ValueError("Monitor response too large")

@@ -229,3 +229,8 @@ Im Google-Cloud-Projekt `comat-ber-alarm` ein eigenes Dienstkonto mit `roles/fir
 Das Dienstkonto kann Firestore-Daten lesen und schreiben. Der Server prüft vor jeder Freigabe eine bestätigte Apple-E-Mail, die angenommene App-Store-Connect-Mitgliedschaft, den Zugriff auf ComatAlarm, eine interne TestFlight-Gruppe und eine mögliche Gerätesperre. Private Relay-Adressen werden nicht freigegeben. Bestehende Apple-Zugangsdaten brauchen Lesezugriff auf Benutzer, Apps und Testgruppen.
 
 Erst nach erfolgreichem Test in der neuen Master-App die strengen BER-Zugriffsregeln aktivieren. Die neue Anmeldung und automatische Freigabe sind durch das Add-on-Update allein noch nicht aktiv. Ohne Dienstkonto bleibt nur die neue Freigabe-Route gesperrt; bisherige Push-Funktionen benötigen diesen Schlüssel nicht.
+
+
+### ComatAlarm-Dashboard ab 1.2.26
+
+Bereinigter Verlauf, Fluglöschung und BER-Ankunftstabelle mit direkter Pi-Überwachung: Bootstrap 1.2.9 einmal starten und die aktuelle Dashboard-YAML übernehmen. Details in `homeassistant/dashboards/COMATALARM.md`. Bestehende Zugangsdaten werden verwendet; keine neue Schlüsseleinrichtung.

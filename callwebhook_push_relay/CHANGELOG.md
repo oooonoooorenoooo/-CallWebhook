@@ -1,3 +1,11 @@
+## 1.2.26
+
+- Verlaufskacheln: „Abgeschlossen · im Verlauf“, ohne Live-Bewegungswerte, Positionsalter, Registrierungsablauf oder Geräte-/Push-Details. Flugplan, Stand, Gate, Pakete und Vor-/Folgeflug bleiben sichtbar.
+- Administratoren können Flüge auf dem Pi löschen, einschließlich festhängender Überwachungen. Alle Gerätekopien und noch offene Pushes werden entfernt. Ein persistenter Vermerk verhindert das Wiederanlegen durch veraltete App-Übergaben; andere Flugtage bleiben erhalten.
+- BER-Ankunftstabelle mit Airline-Gruppen einschließlich Eurowings und „Überwachen“. Gemeinsamer Tagescache, manueller Refresh frühestens nach fünf Minuten, Pagination, Fehleranzeige und bestehende BER-Anbietersperre.
+- Neue Überwachungen nutzen die eingerichteten Pi-Zugänge und Alarmregeln der freigegebenen, verbundenen Geräte. Sie überstehen App-Abgleiche und laufen bis zu 24 Stunden ohne geöffnete App.
+- Flugaktionen nur über HA-Administratorkonto und internen Monitor; keine Freigabe im öffentlichen Proxy. Bootstrap 1.2.9 einmal starten (Backend 21 / Integration 1.2.17), danach aktualisierte Dashboard-YAML übernehmen. Kein TestFlight-/App-Update.
+
 ## 1.2.25
 
 - Dashboard lädt Antworten sofort sichtbar, ohne Reiterwechsel; Zeitüberschreitung und Verbindungsfehler werden angezeigt und automatisch erneut versucht.

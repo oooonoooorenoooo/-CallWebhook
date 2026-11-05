@@ -26,6 +26,7 @@ cards:
       - width: 100%
       - white-space: normal
       - text-align: left
+      - pointer-events: auto
   custom_fields:
     content: |-
       [[[
@@ -44,11 +45,26 @@ cards:
          const el=event.target;
          if(el.isConnected && el.matches?.('details[data-cm-key]')) card._comatOpen[el.dataset.cmKey]=el.open;
        },true);
+       // Keep the parent button-card action handler from cancelling native touch
+       // clicks or keyboard activation. Do not prevent scrolling/default actions.
+       const control=event=>event.target.closest?.('.cm summary, .cm button[data-cm-day]');
+       for(const type of ['touchstart','touchend','touchcancel','mousedown','keydown']){
+         card.shadowRoot.addEventListener(type,event=>{if(control(event))event.stopPropagation();},true);
+       }
        card.shadowRoot.addEventListener('click',event=>{
-         const button=event.target.closest?.('button[data-cm-day]');
-         if(!button)return;
+         const target=control(event);
+         if(!target)return;
          event.stopPropagation();
-         card._comatDay=button.dataset.cmDay;card._comatFetchAt=0;redraw();
+         const details=target.tagName==='SUMMARY'?target.parentElement:null;
+         if(details?.matches('details[data-cm-key]')){
+           // Explicit toggle also works when the parent card cancels default actions.
+           event.preventDefault();
+           details.open=!details.open;
+           card._comatOpen[details.dataset.cmKey]=details.open;
+           return;
+         }
+         if(!target.dataset.cmDay)return;
+         card._comatDay=target.dataset.cmDay;card._comatFetchAt=0;redraw();
        },true);
       }
       if (!card._comatBusy && (!card._comatFetchAt || now-card._comatFetchAt>14500)) {

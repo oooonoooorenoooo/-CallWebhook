@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: de.reno
 packages:
   LinphoneSDK:
-    url: https://gitlab.linphone.org/BC/public/linphone-sdk-swift-ios.git
+    url: https://github.com/BelledonneCommunications/linphone-sdk-swift-ios.git
     branch: stable
 targets:
   CallWebhook:

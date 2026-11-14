@@ -818,11 +818,14 @@ class ComatAlarm:
 
     async def watch(self, request):
         device = self.device(request)
-        self.relay.limit("comat-watch:" + device["id"], 12, 60)
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("Invalid watch")
+        arrival_sync = body.get('arrivals_sync') is True
+        self.relay.limit(('comat-arrivals:' if arrival_sync else 'comat-watch:') + device['id'], 30 if arrival_sync else 12, 60)
         access = await self.bind_stand_access(device, body)
+        if arrival_sync:
+            return web.json_response(self.monitor.operator.arrival_sync.read(device, body))
         if body.get('stand_sync') is True:
             if not access or not access['administrator']:
                 raise web.HTTPForbidden(text='Administrator required for model import')
@@ -936,7 +939,7 @@ class ComatAlarm:
             raise web.HTTPForbidden(text='Firebase device approval required')
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO comat_monitor_reads VALUES(?,?)",(row["id"],time.time()))
-        return web.json_response({**self.stand_metadata(access), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
+        return web.json_response({**self.stand_metadata(access), "arrivals": self.monitor.operator.arrival_sync.metadata(), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -1179,7 +1182,8 @@ class ComatAlarm:
         async def context(app):
             logging.getLogger().addHandler(self.monitor.handler)
             self.monitor.record("service", "Push-Dienst gestartet")
-            tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker()), asyncio.create_task(self.ber_importer.run())]
+            tasks = [asyncio.create_task(worker()), asyncio.create_task(tester_worker()), asyncio.create_task(self.ber_importer.run()),
+                     asyncio.create_task(self.monitor.operator.arrival_sync.run())]
             yield
             if self.monitor.operator.task is not None:
                 tasks.append(self.monitor.operator.task)

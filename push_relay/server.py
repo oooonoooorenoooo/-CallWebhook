@@ -231,6 +231,13 @@ def application(relay):
     return app
 
 
+def arrival_notification(token, payload):
+    return NotificationRequest(device_token=token, push_type=PushType.BACKGROUND, priority=5,
+        time_to_live=payload['ttl'], collapse_key='comatalarm-arrivals',
+        message={'aps': {'content-available': 1}, 'arrivals_revision': payload['arrivals_revision'],
+                 'arrivals_day': payload['arrivals_day']})
+
+
 def main():
     os.umask(0o077)
     team_id, key_id = os.environ["APNS_TEAM_ID"], os.environ["APNS_KEY_ID"]
@@ -275,6 +282,11 @@ def main():
             clients[cache_key] = APNs(key=key, key_id=key_id, team_id=team_id,
                 topic=COMATALARM_BUNDLE_ID, use_sandbox=environment == "development",
                 max_connections=2, max_connection_attempts=1)
+        if payload.get('sync_kind') == 'arrivals':
+            result = await asyncio.wait_for(clients[cache_key].send_notification(arrival_notification(token, payload)), timeout=4)
+            if not result.is_successful:
+                logging.warning('APNs rejected a ComatAlarm arrival sync: %s', result.status)
+            return result.is_successful
         result = await asyncio.wait_for(clients[cache_key].send_notification(NotificationRequest(
             device_token=token, push_type=PushType.ALERT, priority=10, time_to_live=300,
             collapse_key=payload["event_id"],
@@ -298,4 +310,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

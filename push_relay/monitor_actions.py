@@ -73,6 +73,8 @@ class Operator:
             CREATE TABLE IF NOT EXISTS comat_arrivals (id INTEGER PRIMARY KEY, day TEXT NOT NULL,
                 fetched REAL NOT NULL, attempted REAL NOT NULL, payload TEXT NOT NULL, error TEXT NOT NULL);
         ''')
+        from .arrivals_sync import ArrivalSync
+        self.arrival_sync = ArrivalSync(self)
 
     def removed(self, f):
         from .comatalarm import same_occurrence
@@ -107,8 +109,8 @@ class Operator:
                     loading=self.task is not None and not self.task.done(),
                     error=row['error'] if current else '', flights=[f for f in items if f['available'] or f['tracked']])
 
-    def request_arrivals(self, force=False):
-        now = time.time()
+    def request_arrivals(self, force=False, now=None):
+        now = time.time() if now is None else now
         row = self.db.execute('SELECT * FROM comat_arrivals WHERE id=1').fetchone()
         if self.task and not self.task.done(): return
         if row and row['day']==day_of(now) and (now-row['attempted']<300 or (row['fetched'] and not force)):
@@ -166,6 +168,7 @@ class Operator:
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO comat_arrivals VALUES(1,?,?,?,?,?)',(day_of(now),fetched,now,payload,error))
         if error: self.monitor.record('error',error)
+        else: self.monitor.record('service', 'Ankunftstabelle ' + day_of(now) + ' aktualisiert · ' + str(len(json.loads(payload))) + ' Flüge')
 
     async def command(self, body):
         action, key = body.get('action'), body.get('key')

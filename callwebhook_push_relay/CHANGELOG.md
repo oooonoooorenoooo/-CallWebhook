@@ -1,3 +1,11 @@
+## 1.2.28
+
+- AIBT beendet den zentralen Koordinatenabruf nicht mehr vorzeitig. Fehlende AIBT-Koordinaten werden ohne App-Kennzeichen automatisch nachgeladen.
+- Wiederherstellung jüngerer AIBT-Ereignisse bis 24 Stunden: sechs Datenversuche, mindestens fünf Minuten Abstand. Anbieterfehler verbrauchen keinen Datenversuch; Sperrfristen bleiben wirksam.
+- Wenn die historische Momentaufnahme fehlt, wird zusätzlich die Spur der exakten FR24-Flug-ID geprüft. Nur zeitnahe, stationäre BER-Punkte werden übernommen; keine beliebige Live- oder Rollposition.
+- Historische Momentaufnahme nicht mehr auf einen einzelnen Treffer begrenzt. Die FR24-Flug-ID bleibt zwingend geprüft.
+- AIBT-Abrufstatus im Ereignisprotokoll, keine erneute AIBT-Alarmierung durch die Reparatur. Folgeflugüberwachung bleibt unabhängig von der Koordinaten-Wartefrist.
+
 ## 1.2.27
 
 - BER-Ankunftstabelle täglich um 05:00 Uhr Europe/Berlin zentral laden, mit Sommer-/Winterzeit und Nachholen nach einem Neustart.

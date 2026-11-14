@@ -2,7 +2,7 @@ FROM python:3.12-slim
 WORKDIR /app
 # Supervisor builds each add-on from its own directory. Fetch only the reviewed
 # relay source files from this immutable revision, not a changing main branch.
-ARG RELAY_REVISION=e298ca92f6bc973fe6fc1a8cbcf10f9a686849e4
+ARG RELAY_REVISION=5a16c04500737eea2f9a0210720592013e53afee
 RUN mkdir push_relay
 RUN python -c 'import os, pathlib, urllib.request; base="https://raw.githubusercontent.com/oooonoooorenoooo/-CallWebhook/"+os.environ["RELAY_REVISION"]+"/push_relay/"; files=("__init__.py","server.py","comatalarm.py","monitor.py","monitor_actions.py","arrivals_sync.py","flight_schedule.py","stand_model.py","ber_package.py","ber_document.py","testflight.py","attestation.py","apple_access.py","apple-app-attest-root.pem","requirements.txt"); [(pathlib.Path("push_relay")/name).write_bytes(urllib.request.urlopen(base+name,timeout=60).read()) for name in files]'
 RUN pip install --no-cache-dir -r push_relay/requirements.txt

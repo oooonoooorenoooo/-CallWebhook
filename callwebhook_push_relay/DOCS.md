@@ -258,3 +258,25 @@ an APNs wird unter Ereignisse & Push-Versand protokolliert; er bestätigt die An
 bei Apple, nicht die Ausführung auf dem iPhone. Apple kann stille Pushes verzögern oder
 verwerfen (insbesondere nach manuellem Beenden der App). Beim nächsten Öffnen gleicht
 die App deshalb zusätzlich ihre Revision mit dem Pi ab.
+
+
+### AIBT-Koordinaten nachladen (ab 1.2.28)
+
+Ein bestätigter AIBT-Zeitpunkt beendet den Koordinatenabruf nicht mehr. Der Pi
+übernimmt zunächst die Koordinate aus dem FR24-Gate-Arrival-Ereignis. Falls dort
+noch keine verwertbare BER-Koordinate vorliegt, prüft er die historische
+Momentaufnahme und anschließend bei Bedarf die Spur der exakten FR24-Flug-ID.
+Spurpunkte müssen innerhalb von 60 Sekunden um AIBT, nach ATA und vor einem
+gegebenenfalls bekannten Folgeabflug liegen, in BER sein und höchstens 5 km/h
+Bodengeschwindigkeit haben. Fremde Flug-IDs und beliebige aktuelle Positionen
+werden nicht als Standplatzbeleg verwendet.
+
+Für im Pi gespeicherte, noch registrierte Flüge mit AIBT jünger als 24 Stunden
+läuft die Wiederherstellung ohne Öffnen der App. Bis zu sechs erfolgreiche
+Datenabfragen ohne Treffer, mindestens fünf Minuten auseinander; Anbieterfehler
+und Tarif-/Minutensperren werden mit Wartefrist behandelt und zählen nicht als
+fehlende Daten. Alte Wiederherstellungszähler blockieren diese Korrektur nicht.
+AIBT-Abrufstatus und erfolgreiche Übernahme erscheinen im Ereignisprotokoll.
+Die zusätzliche Spurabfrage fällt nur bei fehlender verwertbarer Momentaufnahme
+an und verbraucht FR24-Credits. Das bestehende App-Build kann die nachgeladenen
+Koordinaten über den bisherigen Pi-Abgleich übernehmen.

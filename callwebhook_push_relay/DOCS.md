@@ -234,3 +234,27 @@ Erst nach erfolgreichem Test in der neuen Master-App die strengen BER-Zugriffsre
 ### ComatAlarm-Dashboard ab 1.2.26
 
 Bereinigter Verlauf, Fluglöschung und BER-Ankunftstabelle mit direkter Pi-Überwachung: Bootstrap 1.2.9 einmal starten und die aktuelle Dashboard-YAML übernehmen. Details in `homeassistant/dashboards/COMATALARM.md`. Bestehende Zugangsdaten werden verwendet; keine neue Schlüsseleinrichtung.
+
+
+### Ankunftstabelle täglich um 05:00 Uhr (ab 1.2.27)
+
+Der Pi lädt die BER-Tagesliste täglich um **05:00 Uhr Europe/Berlin**. Sommer- und
+Winterzeit werden berücksichtigt. Der eigene Arbeitszyklus benötigt weder ein
+geöffnetes Dashboard noch eine offene App oder aktive Flugüberwachungen. War der
+Pi um 05:00 Uhr aus, holt er die Liste nach dem Start nach. Bei BER-Fehlern wird
+frühestens nach fünf Minuten und erst nach Ablauf einer Anbieter-Sperrfrist erneut
+versucht. Eine bereits erfolgreich geladene Tagesliste bleibt erhalten.
+
+Die aktualisierte iOS-App übernimmt die Liste aus dem Pi-Cache und meldet sich dabei
+für tägliche Daten-Pushes an. Dazu einmal nach dem App-Update mit bestehender
+Pi-Verbindung öffnen. Es sind keine neuen Schlüssel oder zusätzlichen HA-Proxy-Routen
+nötig. Bestehende Flugüberwachungen und Alarmregeln bleiben unverändert.
+
+Der stille APNs-Push enthält Tag und Revision; anschließend holt die App die vollständige
+Liste über den vorhandenen, mit Geräteberechtigung geschützten HTTPS-Zugang. Dieser
+Download fragt BER nicht erneut ab. Die App ersetzt ihren dauerhaften Cache erst,
+wenn alle Seiten derselben Revision vollständig vorliegen. Ein erfolgreicher Versand
+an APNs wird unter Ereignisse & Push-Versand protokolliert; er bestätigt die Annahme
+bei Apple, nicht die Ausführung auf dem iPhone. Apple kann stille Pushes verzögern oder
+verwerfen (insbesondere nach manuellem Beenden der App). Beim nächsten Öffnen gleicht
+die App deshalb zusätzlich ihre Revision mit dem Pi ab.

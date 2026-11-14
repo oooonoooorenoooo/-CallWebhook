@@ -1,3 +1,11 @@
+## 1.2.27
+
+- BER-Ankunftstabelle täglich um 05:00 Uhr Europe/Berlin zentral laden, mit Sommer-/Winterzeit und Nachholen nach einem Neustart.
+- Eigener Arbeitszyklus unabhängig von geöffneten Apps, Dashboard und aktiven Flugüberwachungen; gespeicherte Versuche und BER-Sperrfristen verhindern Abfrageschleifen.
+- Neue iOS-App kann die vollständige Liste in begrenzten, revisionsgeprüften Seiten übernehmen und sich für stille Daten-Pushes anmelden.
+- Versandstatus und Wiederholungen bleiben nach Pi-Neustarts erhalten. Die 24-Stunden-Frist der Flugüberwachung beschränkt diese Daten-Synchronisierung nicht.
+- Daten-Pushes enthalten nur Tag und Version. Die Tabelle wird über die vorhandene authentifizierte HTTPS-Verbindung geladen. iOS kann Hintergrundzustellung verzögern; die App gleicht beim Öffnen ab.
+
 ## 1.2.26
 
 - Verlaufskacheln: „Abgeschlossen · im Verlauf“, ohne Live-Bewegungswerte, Positionsalter, Registrierungsablauf oder Geräte-/Push-Details. Flugplan, Stand, Gate, Pakete und Vor-/Folgeflug bleiben sichtbar.

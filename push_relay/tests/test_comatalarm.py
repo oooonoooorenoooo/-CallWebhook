@@ -153,23 +153,53 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         await self.comat.tick(self.now+62)
         self.assertEqual(self.comat.provider.lookup.await_count,1)
 
+    async def test_pi_recovers_coordinate_after_aibt_without_app_repost(self):
+        await self.watch(server_polling=True, relay_alerts=True,
+                         stand_positions=[dict(name='B06',latitude=52.36507,longitude=13.5053)])
+        self.comat.provider.lookup.return_value = {'ata':self.now-100,'aibt':self.now-60}
+        await self.comat.tick(self.now+1)
+        sent = self.comat.sender.await_count
+        self.comat.provider.lookup.return_value = {'aibt_position':dict(latitude=52.36507,longitude=13.5053,timestamp=self.now-60)}
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count,2)
+        state = await (await self.client.get('/comatalarm/v1/state',headers=self.headers)).json()
+        self.assertEqual(state['flights'][0]['stand'],'B06')
+        self.assertEqual(state['flights'][0]['aibt_position']['timestamp'],self.now-60)
+        self.assertEqual(self.comat.sender.await_count,sent, 'Recovery must not replay the AIBT alert')
+        await self.comat.tick(self.now+123)
+        self.assertEqual(self.comat.provider.lookup.await_count,2)
+
+    async def test_recovery_errors_back_off_without_spending_attempts(self):
+        self.flight.update(aibt=self.now-100,ata=self.now-200)
+        await self.watch(server_polling=True)
+        self.comat.provider.lookup.return_value = {'_error':'FR24: Minutenschutz aktiv'}
+        await self.comat.tick(self.now+1)
+        await self.comat.tick(self.now+62)
+        self.assertEqual(self.comat.provider.lookup.await_count,1)
+        row = self.comat.db.execute('SELECT watch FROM comat_devices').fetchone()
+        saved=json.loads(row['watch'])[0]
+        self.assertNotIn('_aibt_recovery_attempts',saved)
+        self.assertIn('pausiert',saved['_parking_lookup_status'])
+        await self.comat.tick(self.now+302)
+        self.assertEqual(self.comat.provider.lookup.await_count,2)
+
     async def test_invalid_server_ownership_is_rejected(self):
         self.assertEqual((await self.watch(server_polling='yes')).status,400)
 
     async def test_pi_parking_recovery_is_bounded_and_outbound_continues(self):
         self.flight.update(aibt=self.now-3600, ata=self.now-3800, reference=self.now-7200, repair_arrival=True)
         await self.watch(foreground=True, server_polling=True)
-        for offset in (1, 62, 902, 1803):
+        for offset in (1, 62, 302, 603, 904, 1205, 1506, 1807):
             await self.comat.tick(self.now+offset)
-        self.assertEqual(self.comat.provider.lookup.await_count,2)
+        self.assertEqual(self.comat.provider.lookup.await_count,6)
         # A completed inbound flight can still carry outgoing packages.
         self.flight.update(repair_arrival=False, track_outbound=True, outbound_number='LH187')
         await self.watch(foreground=True, server_polling=True)
         self.comat.provider.lookup.return_value = {'_outbound':{'number':'LH187','atd':self.now+1804,'destination':'FRA'}}
-        await self.comat.tick(self.now+1864)
-        self.assertEqual(self.comat.provider.lookup.await_count,3)
-        await self.comat.tick(self.now+1925)
-        self.assertEqual(self.comat.provider.lookup.await_count,3)
+        await self.comat.tick(self.now+1868)
+        self.assertEqual(self.comat.provider.lookup.await_count,7)
+        await self.comat.tick(self.now+1929)
+        self.assertEqual(self.comat.provider.lookup.await_count,7)
 
     async def test_background_handoff_preserves_token_and_polls_without_app(self):
         await self.watch(foreground=True, api_foreground=True, relay_alerts=True)

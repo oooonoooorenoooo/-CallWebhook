@@ -25,8 +25,8 @@ from zoneinfo import ZoneInfo
 from aiohttp import ClientSession, ClientTimeout, ClientError, web
 
 BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
-FLAGS = ("alarmTakeoff", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
-FIELDS = ("id", "number", "reference", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number")
+FLAGS = ("alarmTakeoff", "alarmPrelanding", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
+FIELDS = ("id", "number", "reference", "created_at", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number")
 
 MONITOR_LOG = logging.getLogger("ComatAlarm.monitor")
 MONITOR_LOG.setLevel(logging.INFO)
@@ -154,6 +154,9 @@ def package_instructions(packets):
 def transitions(old, new):
     number = new["number"]
     events = []
+    if new.get("_prelanding") and not old.get("_prelanding"):
+        events.append(("prelanding", "alarmPrelanding", "Landung in etwa 3 Minuten",
+                       f"{number} · Landung voraussichtlich in etwa 3 Minuten."))
     for field, flag, title, body in (
         ("atd", "alarmTakeoff", "Abgehoben", f"{number} ist abgehoben."),
         ("ata", "alarmLanded", "Gelandet", f"{number} ist gelandet."),
@@ -441,7 +444,7 @@ class FlightProvider:
                             lat, lon = live.get("lat"), live.get("lon")
                             if all(isinstance(v,(float,int)) and not isinstance(v,bool) and math.isfinite(v) for v in (lat,lon)) and -90<=lat<=90 and -180<=lon<=180:
                                 # Only retain fields consumed by FR24Client.sample; no credentials.
-                                result["_live"] = {k:v for k,v in live.items() if k in ("fr24_id","hex","lat","lon","alt","gspeed","track","vspeed","on_ground","timestamp","eta","sta","reg","orig_iata","dest_iata","type")}
+                                result["_live"] = {k:v for k,v in live.items() if k in ("fr24_id","hex","lat","lon","alt","gspeed","track","vspeed","on_ground","timestamp","eta","sta","reg","orig_iata","dest_iata","type","source")}
                                 for key, field in (("origin","orig_iata"),("destination","dest_iata"),("registration","reg")):
                                     if live.get(field): result[key] = live[field]
             except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
@@ -672,6 +675,9 @@ class ComatAlarm:
         self.api_status = SharedAPIStatus(self.db, self.provider)
         self.poll_lock = asyncio.Lock()
         self.delivery_lock = asyncio.Lock()
+        self.poll_wakeup = asyncio.Event()
+        self.shared_tokens = {}
+        self.shared_authorized = set()
         self.shared_results = []
         self.last_successful_lookup = {}
         self.testflight = TestFlight(self.db)
@@ -708,6 +714,66 @@ class ComatAlarm:
 
         if "firebase_uid" not in {row[1] for row in self.db.execute("PRAGMA table_info(comat_devices)")}:
             self.db.execute("ALTER TABLE comat_devices ADD COLUMN firebase_uid TEXT NOT NULL DEFAULT ''")
+        from .shared_monitoring import SharedMonitoring
+        self.shared_monitoring = SharedMonitoring(self)
+
+    async def refresh_shared_subscriptions(self, now):
+        """Authorization, renewal and group subscriptions run without any app."""
+        candidates = self.db.execute("SELECT id,firebase_uid FROM comat_devices WHERE server_polling=1 AND firebase_uid!=''").fetchall()
+        results = await asyncio.gather(*(self.stand_access(r['firebase_uid']) for r in candidates), return_exceptions=True)
+        approved = {r['id']: r['firebase_uid'] for r, access in zip(candidates, results)
+                    if access and not isinstance(access, BaseException)}
+        # Re-read after authorization I/O: a revoked or rebound grant cannot be
+        # brought back by the worker's earlier snapshot.
+        devices = [r for r in self.db.execute("SELECT * FROM comat_devices WHERE server_polling=1 AND firebase_uid!=''").fetchall()
+                   if approved.get(r['id']) == r['firebase_uid']]
+        self.shared_authorized = {r['id'] for r in devices}
+        donor = next((r['api_token'] for r in devices if r['api_token']), '')
+        self.shared_tokens = {r['id']: r['api_token'] or donor for r in devices}
+        with self.db:
+            for r in devices:
+                if r['expires'] < now+12*3600:
+                    self.db.execute('UPDATE comat_devices SET expires=? WHERE id=?', (now+86400, r['id']))
+        self.shared_monitoring.fanout(devices, now)
+
+    def validated_removals(self, value, prior, now):
+        """Resolve ID-only tombstones only against the authenticated device."""
+        if value is None:
+            return []
+        if not isinstance(value, list) or len(value) > 200:
+            raise ValueError('Invalid removed flights')
+        result = []
+        for removal in value:
+            if not isinstance(removal, dict):
+                raise ValueError('Invalid removed flight')
+            deleted_at = removal.get('deleted_at')
+            if (not isinstance(deleted_at, (int, float)) or isinstance(deleted_at, bool)
+                    or not math.isfinite(deleted_at) or not 1_000_000_000 < deleted_at <= now+60):
+                raise ValueError('Invalid deletion time')
+            if deleted_at < now-7*86400:
+                continue
+            identifier = removal.get('id')
+            if identifier is not None and (not isinstance(identifier, str) or not 1 <= len(identifier) <= 160):
+                raise ValueError('Invalid removed flight ID')
+            if 'number' in removal or 'reference' in removal:
+                number, reference = removal.get('number'), removal.get('reference')
+                if (not isinstance(number, str) or not re.fullmatch(r'[A-Z0-9]{2,3}[0-9]{1,5}', number)
+                        or not isinstance(reference, (int, float)) or isinstance(reference, bool)
+                        or not math.isfinite(reference) or reference <= 1_000_000_000):
+                    raise ValueError('Invalid removed occurrence')
+                if abs(reference-deleted_at) > 7*86400:
+                    continue
+                row = {k: removal[k] for k in ('id', 'number', 'reference', 'fr24ID', 'origin', 'destination') if k in removal}
+                for key in ('fr24ID', 'origin', 'destination'):
+                    if key in row and (not isinstance(row[key], str) or len(row[key]) > 64):
+                        raise ValueError('Invalid removed occurrence')
+            else:
+                row = next((dict(f) for f in prior if identifier and f['id'].upper() == identifier.upper()), None)
+                if row is None:
+                    continue
+            row['deleted_at'] = deleted_at
+            result.append(row)
+        return result
 
     async def stand_access(self, uid):
         if not uid:
@@ -840,8 +906,17 @@ class ComatAlarm:
         if not isinstance(body, dict):
             raise ValueError("Invalid watch")
         arrival_sync = body.get('arrivals_sync') is True
-        self.relay.limit(('comat-arrivals:' if arrival_sync else 'comat-watch:') + device['id'], 30 if arrival_sync else 12, 60)
+        # Flight changes and the resumable stand-model upload share this route.
+        # Coalesced handoffs must fit beside uploads without delaying a new watch;
+        # paid provider polling remains separately bounded by the worker budget.
+        self.relay.limit(('comat-arrivals:' if arrival_sync else 'comat-watch:') + device['id'], 30 if arrival_sync else 24, 60)
         access = await self.bind_stand_access(device, body)
+        # Authorization may await Firebase while the worker stores a newer
+        # milestone. Re-authenticate and merge from the current snapshot, never
+        # from the row captured before that await. Revoked credentials fail here.
+        device = self.device(request)
+        if access and device['firebase_uid'] != access['uid']:
+            raise web.HTTPForbidden(text='Firebase device identity changed during handoff')
         if arrival_sync:
             return web.json_response(self.monitor.operator.arrival_sync.read(device, body))
         if body.get('stand_sync') is True:
@@ -861,6 +936,7 @@ class ComatAlarm:
         self.api_status.configure(body.get("api_credentials"))
         now = time.time()
         prior = {f["id"]: f for f in json.loads(device["watch"])}
+        removals = self.validated_removals(body.get('removed_flights'), list(prior.values()), now)
         clean = []
         for f in flights:
             if not isinstance(f, dict) or not isinstance(f.get("id"), str) or not 1 <= len(f["id"]) <= 160 or not isinstance(f.get("number"), str) or not re.fullmatch(r"[A-Z0-9]{2,3}[0-9]{1,5}", f["number"]):
@@ -869,6 +945,10 @@ class ComatAlarm:
             if not isinstance(reference, (float, int)) or isinstance(reference, bool) or not math.isfinite(reference) or abs(reference - now) > 48 * 3600:
                 raise ValueError("Invalid reference")
             row = {k: f[k] for k in FIELDS if k in f}
+            created_at = row.get('created_at')
+            if created_at is not None and (not isinstance(created_at, (float, int)) or isinstance(created_at, bool)
+                    or not math.isfinite(created_at) or not 1_000_000_000 < created_at <= now+60):
+                raise ValueError('Invalid creation time')
             for field in ("atd", "ata", "aibt"):
                 if field in row and (stamp(row[field]) is None or not reference - 86400 <= row[field] <= now + 60):
                     raise ValueError("Invalid event time")
@@ -879,7 +959,9 @@ class ComatAlarm:
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")
             old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), {})
-            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_aibt_recovery_at", "_aibt_recovery_attempts", "_parking_lookup_status", "_outbound"):
+            if old and self.shared_monitoring.removed(old):
+                old = {}
+            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_aibt_recovery_at", "_aibt_recovery_attempts", "_parking_lookup_status", "_outbound", "_shared_subscription", "_landing_alert", "_prelanding"):
                 if old.get(key):
                     row[key] = old[key]
             for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized", "_departure_repair_at", "_departure_repair_attempts"):
@@ -901,9 +983,15 @@ class ComatAlarm:
             if not isinstance(windows, list) or len(windows) > 100:
                 raise ValueError("Invalid calendar windows")
             for window in windows:
-                if not isinstance(window, list) or len(window) != 2 or not all(isinstance(v, (int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in window) or not now-86400 <= window[0] < window[1] <= now+2*86400:
+                if not isinstance(window, list) or len(window) != 2 or not all(isinstance(v, (int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in window) or not now-86400 <= window[0] < window[1] <= now+14*86400+60:
                     raise ValueError("Invalid calendar window")
             prefs["active_windows"] = windows
+            valid_until = preferences.get('calendar_valid_until')
+            if valid_until is not None:
+                if (not isinstance(valid_until, (int, float)) or isinstance(valid_until, bool)
+                        or not math.isfinite(valid_until) or not now <= valid_until <= now+14*86400+60):
+                    raise ValueError('Invalid calendar validity')
+                prefs['calendar_valid_until'] = valid_until
         server_polling = body.get("server_polling", False)
         if not isinstance(server_polling, bool):
             raise ValueError("Invalid polling ownership")
@@ -918,6 +1006,18 @@ class ComatAlarm:
         # and registration revocation retain their existing semantics.
         if not api_token and not body["foreground"]:
             api_token = device["api_token"]
+        push_token, push_environment = body.get('push_token'), body.get('push_environment')
+        refresh_push = push_token is not None or push_environment is not None
+        if refresh_push:
+            if not access:
+                raise web.HTTPForbidden(text='Firebase device approval required for token refresh')
+            if (not isinstance(push_token, str) or not re.fullmatch(r'[0-9a-f]{32,512}', push_token)
+                    or push_environment not in (('production', 'development') if self.relay.allow_development else ('production',))):
+                raise ValueError('Invalid push token refresh')
+            duplicate = self.db.execute('SELECT firebase_uid FROM comat_devices WHERE token=? AND environment=? AND id<>?',
+                                        (push_token, push_environment, device['id'])).fetchall()
+            if any(r['firebase_uid'] != access['uid'] for r in duplicate):
+                raise web.HTTPConflict(text='Apple token belongs to another device identity')
         index = body.get("stand_positions")
         encrypted_index = device["stand_index"]
         if index:
@@ -931,13 +1031,30 @@ class ComatAlarm:
         # phone handoff cannot resurrect a deleted occurrence or erase a Pi watch.
         current = self.db.execute("SELECT watch FROM comat_devices WHERE id=?", (device["id"],)).fetchone()
         if current is None: raise web.HTTPUnauthorized()
+        if access and server_polling:
+            self.shared_monitoring.remove(removals, now)
+            current = self.db.execute("SELECT watch FROM comat_devices WHERE id=?", (device["id"],)).fetchone()
+            if current is None: raise web.HTTPUnauthorized()
+            clean = self.shared_monitoring.retain(clean, json.loads(current[0]), now)
         clean = self.monitor.operator.merge(clean, json.loads(current[0]), now)
+        if access and server_polling:
+            clean = [f for f in clean if not self.shared_monitoring.removed(f)]
         clean = self.central_predictions(clean, access, now)
         self.monitor.archive(now)
         with self.db:
+            if refresh_push:
+                duplicates = self.db.execute('SELECT id FROM comat_devices WHERE token=? AND environment=? AND id<>?',
+                                             (push_token, push_environment, device['id'])).fetchall()
+                for duplicate in duplicates:
+                    self.db.execute('DELETE FROM comat_outbox WHERE device=?', (duplicate['id'],))
+                    self.db.execute('DELETE FROM comat_devices WHERE id=?', (duplicate['id'],))
+                self.db.execute('UPDATE comat_devices SET token=?,environment=? WHERE id=?',
+                                (push_token, push_environment, device['id']))
             self.db.execute("UPDATE comat_devices SET server_polling=? WHERE id=?", (int(server_polling), device["id"]))
             self.db.execute("UPDATE comat_devices SET stand_index=?,api_foreground_until=? WHERE id=?", (encrypted_index, now+90 if body["foreground"] and api_foreground else 0, device["id"]))
             self.db.execute("UPDATE comat_devices SET watch=?,preferences=?,api_token=?,foreground_until=?,expires=? WHERE id=?", (json.dumps(clean),json.dumps(prefs),api_token,now+90 if body["foreground"] else 0,now+86400,device["id"]))
+            if any(not any(same_occurrence(f, p) for p in prior.values()) for f in clean):
+                self.db.execute('UPDATE comat_devices SET last_poll=0 WHERE id=?', (device['id'],))
             if relay_alerts:
                 for row in clean:
                     old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), None)
@@ -946,9 +1063,13 @@ class ComatAlarm:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", self.events(device["id"], old, row, prefs, now))
         await self.deliver(device["id"], now)
         self.monitor.archive(now)
+        self.poll_wakeup.set()
         if status_request:
             self.api_status.request_refresh(api_token)
-        return web.json_response(dict(self.stand_metadata(access), api_status=self.api_status.snapshot(), watching=len(clean), background_ready=bool(api_token), expires=now+86400, relay_alerts=relay_alerts, flights=clean))
+        return web.json_response(dict(self.stand_metadata(access), shared_watch_supported=True, token_refresh_supported=True,
+                                     token_refreshed=refresh_push, api_status=self.api_status.snapshot(), watching=len(clean),
+                                     background_ready=bool(api_token or (self.shared_tokens.get(device['id']) if access else '')),
+                                     expires=now+86400, relay_alerts=relay_alerts, flights=clean))
 
     async def state(self, request):
         row = self.device(request)
@@ -957,7 +1078,7 @@ class ComatAlarm:
             raise web.HTTPForbidden(text='Firebase device approval required')
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO comat_monitor_reads VALUES(?,?)",(row["id"],time.time()))
-        return web.json_response({**self.stand_metadata(access), "arrivals": self.monitor.operator.arrival_sync.metadata(), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"]), "expires": row["expires"]})
+        return web.json_response({**self.stand_metadata(access), "shared_watch_supported": True, "token_refresh_supported": True, "arrivals": self.monitor.operator.arrival_sync.metadata(), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"] or (self.shared_tokens.get(row['id']) if access else '')), "expires": row["expires"]})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -977,7 +1098,8 @@ class ComatAlarm:
 
     @staticmethod
     def enabled(prefs, now):
-        return prefs.get("enabled", True) and ("active_windows" not in prefs or any(start <= now < end for start, end in prefs["active_windows"]))
+        return (prefs.get("enabled", True) and prefs.get('calendar_valid_until', now+1) > now
+                and ("active_windows" not in prefs or any(start <= now < end for start, end in prefs["active_windows"])))
 
     @staticmethod
     def polling_key(flight, token):
@@ -1018,6 +1140,7 @@ class ComatAlarm:
             self.monitor.cycle_finished = time.time() if now is None else now
 
     async def _tick(self, now):
+        await self.refresh_shared_subscriptions(now)
         report = now-self.last_monitor_report >= 300
         if report:
             self.last_monitor_report = now
@@ -1026,98 +1149,22 @@ class ComatAlarm:
                             int(now), len(rows), sum(r['expires'] > now for r in rows),
                             sum(r['expires'] <= now for r in rows), sum(r['expires'] > now and r['server_polling'] for r in rows))
         self.provider.credentials = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
+        delivered_devices = set()
         for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND (server_polling=1 OR foreground_until<=?)", (now,now)).fetchall():
-            access = await self.stand_access(device['firebase_uid'])
-            if device['firebase_uid'] and not access:
-                with self.db:
-                    self.db.execute("UPDATE comat_devices SET error=? WHERE id=?", ("Pi-Abfrage pausiert: Firebase-Gerätefreigabe konnte nicht bestätigt werden", device['id']))
-                if report:
-                    logging.warning("ComatAlarm monitor_skip reason=device_approval")
-                continue
-            positions = self.stand_model.positions() if access and self.stand_model.ready else unprotect_index(device['stand_index'])
-            prefs = json.loads(device["preferences"])
-            flights = json.loads(device["watch"])
-            if now-device["last_poll"] >= 60:
-                error, pending = "", []
-                ordered = sorted(flights, key=lambda f: self.last_successful_lookup.get(self.polling_key(f, device["api_token"]), 0))
-                for flight in ordered:
-                    departed = departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now
-                    if departed:
-                        if previous_parking_ready(flight):
-                            # A newly installed local index can now match saved
-                            # evidence without spending another FR24 request.
-                            flight["stand"] = match_stand(flight["_inbound"]["aibt_position"], positions) or flight.get("stand")
-                            flight["_departure_finalized"] = True
-                            continue
-                        # Reopen legacy finalizations that had no predecessor
-                        # evidence. At most four attempts, 15 minutes apart, 24h.
-                        if now-flight["atd"] >= 86400 or flight.get("_departure_repair_attempts", 0) >= 4:
-                            flight["_departure_finalized"] = True
-                            continue
-                        if now-flight.get("_departure_repair_at", 0) < 900:
-                            continue
-                    repairing = bool(device["server_polling"] and not departure_from_ber(flight) and flight.get("aibt") and not flight.get("aibt_position"))
-                    outbound = bool(device["server_polling"] and flight.get("track_outbound") and not flight.get("_outbound", {}).get("atd"))
-                    if arrival_tracking_expired(flight, now) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
-                        continue
-                    recovery_due = repairing and now-flight["aibt"] <= 86400 and flight.get("_aibt_recovery_attempts", 0) < 6 and now-flight.get("_aibt_recovery_at", 0) >= 300
-                    if repairing and not recovery_due and not outbound:
-                        continue
-                    try:
-                        query = dict(flight, _skip_parking_recovery=True) if repairing and not recovery_due else flight
-                        changes = await self.shared_lookup(query, device["api_token"], now, central=bool(device["server_polling"]))
-                        lookup_error = changes.pop("_error", "")
-                        error = lookup_error or error
-                        if lookup_error:
-                            self.monitor.record("error", "Anbieterabfrage fehlgeschlagen oder pausiert", flight["number"], device["id"], now)
-                        if recovery_due:
-                            changes["_aibt_recovery_at"] = now
-                            # Provider failures / minute budgets do not spend the
-                            # finite data-recovery budget, but still back off.
-                            if not lookup_error:
-                                changes["_aibt_recovery_attempts"] = flight.get("_aibt_recovery_attempts", 0) + 1
-                        if changes.get("aibt_position"):
-                            stand = match_stand(changes["aibt_position"], positions)
-                            if stand:
-                                changes["stand"] = stand
-                        if "_inbound" in changes:
-                            point = (changes["_inbound"] or {}).get("aibt_position")
-                            changes["stand"] = match_stand(point, positions) if point else None
-                        updated = dict(flight, **changes)
-                        if not departure_from_ber(updated) and updated.get("aibt"):
-                            status = ("AIBT-Koordinate übernommen" if updated.get("aibt_position") else
-                                      "AIBT bestätigt · Koordinatenabruf pausiert: " + lookup_error if lookup_error else
-                                      "AIBT bestätigt · Koordinaten noch nicht übernommen; Pi prüft erneut")
-                            if not updated.get("aibt_position") and updated.get("_aibt_recovery_attempts", 0) >= 6:
-                                status = "AIBT bestätigt · Koordinatenabruf nach sechs Versuchen ohne Treffer"
-                            changes["_parking_lookup_status"] = status
-                            if status != flight.get("_parking_lookup_status"):
-                                self.monitor.record("parking", status, flight["number"], device["id"], now)
-                        if departure_from_ber(updated) and updated.get("atd"):
-                            changes["_departure_finalized"] = previous_parking_ready(updated)
-                            if not changes["_departure_finalized"]:
-                                changes["_departure_repair_at"] = now
-                                if not lookup_error:
-                                    changes["_departure_repair_attempts"] = flight.get("_departure_repair_attempts", 0)+1
-                        if access and self.stand_model.ready:
-                            changes['_stand_prediction'] = self.stand_model.apply(updated, now, match_stand)
-                            updated.update(changes)
-                        pending.extend(self.events(device["id"], flight, updated, prefs, now))
-                        flight.update(changes)
-                    except Exception as exception:
-                        logging.warning("ComatAlarm flight_poll_failed kind=%s", type(exception).__name__)
-                        error = "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"
-                # Compare-and-swap the entire snapshot after all network I/O. Removed
-                # flights, changed preferences and foreground takeovers win the race.
-                with self.db:
-                    changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND (server_polling=1 OR foreground_until<=?) AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
-                    if changed:
-                        self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
-                if report:
-                    MONITOR_LOG.info("ComatAlarm monitor_result epoch=%d flights=%d committed=%s provider_error=%s events=%d",
-                                    int(now), len(flights), bool(changed), bool(error), len(pending) if changed else 0)
+            try:
+                await self.poll_device(device, now, report)
+                # Deliver an already recognized event before waiting for unrelated
+                # flights/devices and their potentially slow provider requests.
+                await self.deliver(device["id"], now)
+                delivered_devices.add(device['id'])
+            except asyncio.CancelledError:
+                raise
+            except Exception as exception:
+                logging.warning("ComatAlarm device_poll_failed kind=%s", type(exception).__name__)
+                self.monitor.record("error", "Geräteüberwachung wird erneut versucht", device=device["id"], now=now)
         for device in self.db.execute("SELECT id FROM comat_devices WHERE expires>?", (now,)).fetchall():
-            await self.deliver(device["id"], now)
+            if device['id'] not in delivered_devices:
+                await self.deliver(device["id"], now)
         active = self.db.execute("SELECT api_token FROM comat_devices WHERE expires>? AND api_token!='' ORDER BY expires DESC LIMIT 1", (now,)).fetchone()
         if active:
             await self.api_status.refresh(active["api_token"], now=now)
@@ -1125,7 +1172,120 @@ class ComatAlarm:
         with self.db:
             self.db.execute("DELETE FROM comat_outbox WHERE created<?",(now-2*86400,))
             self.db.execute("DELETE FROM comat_delivered WHERE sent_at<?", (now-2*86400,))
-            self.db.execute("UPDATE comat_devices SET api_token='',watch='[]' WHERE expires<=?",(now,))
+            # Bound, centrally monitored devices survive app inactivity and
+            # temporary authorization outages. Revocation still stops all work.
+            self.db.execute("UPDATE comat_devices SET api_token='',watch='[]' WHERE expires<=? AND NOT (server_polling=1 AND firebase_uid!='')",(now,))
+
+    async def poll_device(self, device, now, report=False):
+        from .landing_alert import update_landing_alert
+        access = await self.stand_access(device['firebase_uid'])
+        if device['firebase_uid'] and not access:
+            with self.db:
+                self.db.execute("UPDATE comat_devices SET error=? WHERE id=?", ("Pi-Abfrage pausiert: Firebase-Gerätefreigabe konnte nicht bestätigt werden", device['id']))
+            if report:
+                logging.warning("ComatAlarm monitor_skip reason=device_approval")
+            return
+        positions = self.stand_model.positions() if access and self.stand_model.ready else unprotect_index(device['stand_index'])
+        prefs = json.loads(device["preferences"])
+        flights = [f for f in json.loads(device["watch"]) if self.shared_monitoring.current(f, now)]
+        api_token = self.shared_tokens.get(device["id"], device["api_token"])
+        calendar_error = "Kalenderdaten veraltet – App zur Aktualisierung öffnen" if prefs.get("calendar_valid_until", now+1) <= now else ""
+        if now-device["last_poll"] >= 60:
+            error, pending = calendar_error, []
+            ordered = sorted(flights, key=lambda f: self.last_successful_lookup.get(self.polling_key(f, api_token), 0))
+            for flight in ordered:
+                departed = departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now
+                if departed:
+                    if previous_parking_ready(flight):
+                        # A newly installed local index can now match saved
+                        # evidence without spending another FR24 request.
+                        flight["stand"] = match_stand(flight["_inbound"]["aibt_position"], positions) or flight.get("stand")
+                        flight["_departure_finalized"] = True
+                        continue
+                    # Reopen legacy finalizations that had no predecessor
+                    # evidence. At most four attempts, 15 minutes apart, 24h.
+                    if now-flight["atd"] >= 86400 or flight.get("_departure_repair_attempts", 0) >= 4:
+                        flight["_departure_finalized"] = True
+                        continue
+                    if now-flight.get("_departure_repair_at", 0) < 900:
+                        continue
+                repairing = bool(device["server_polling"] and not departure_from_ber(flight) and flight.get("aibt") and not flight.get("aibt_position"))
+                outbound = bool(device["server_polling"] and flight.get("track_outbound") and not flight.get("_outbound", {}).get("atd"))
+                if arrival_tracking_expired(flight, now) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
+                    continue
+                recovery_due = repairing and now-flight["aibt"] <= 86400 and flight.get("_aibt_recovery_attempts", 0) < 6 and now-flight.get("_aibt_recovery_at", 0) >= 300
+                if repairing and not recovery_due and not outbound:
+                    continue
+                try:
+                    query = dict(flight, _skip_parking_recovery=True) if repairing and not recovery_due else flight
+                    changes = await self.shared_lookup(query, api_token, now, central=bool(device["server_polling"]))
+                    lookup_error = changes.pop("_error", "")
+                    error = lookup_error or error
+                    if lookup_error:
+                        self.monitor.record("error", "Anbieterabfrage fehlgeschlagen oder pausiert", flight["number"], device["id"], now)
+                    if recovery_due:
+                        changes["_aibt_recovery_at"] = now
+                        # Provider failures / minute budgets do not spend the
+                        # finite data-recovery budget, but still back off.
+                        if not lookup_error:
+                            changes["_aibt_recovery_attempts"] = flight.get("_aibt_recovery_attempts", 0) + 1
+                    if changes.get("aibt_position"):
+                        stand = match_stand(changes["aibt_position"], positions)
+                        if stand:
+                            changes["stand"] = stand
+                    if "_inbound" in changes:
+                        point = (changes["_inbound"] or {}).get("aibt_position")
+                        changes["stand"] = match_stand(point, positions) if point else None
+                    updated = dict(flight, **changes)
+                    if not departure_from_ber(updated) and updated.get("aibt"):
+                        status = ("AIBT-Koordinate übernommen" if updated.get("aibt_position") else
+                                  "AIBT bestätigt · Koordinatenabruf pausiert: " + lookup_error if lookup_error else
+                                  "AIBT bestätigt · Koordinaten noch nicht übernommen; Pi prüft erneut")
+                        if not updated.get("aibt_position") and updated.get("_aibt_recovery_attempts", 0) >= 6:
+                            status = "AIBT bestätigt · Koordinatenabruf nach sechs Versuchen ohne Treffer"
+                        changes["_parking_lookup_status"] = status
+                        if status != flight.get("_parking_lookup_status"):
+                            self.monitor.record("parking", status, flight["number"], device["id"], now)
+                    if departure_from_ber(updated) and updated.get("atd"):
+                        changes["_departure_finalized"] = previous_parking_ready(updated)
+                        if not changes["_departure_finalized"]:
+                            changes["_departure_repair_at"] = now
+                            if not lookup_error:
+                                changes["_departure_repair_attempts"] = flight.get("_departure_repair_attempts", 0)+1
+                    if access and self.stand_model.ready:
+                        changes['_stand_prediction'] = self.stand_model.apply(updated, now, match_stand)
+                        updated.update(changes)
+                    updated.update(changes)
+                    updated = update_landing_alert(flight, updated, now)
+                    pending.extend(self.events(device["id"], flight, updated, prefs, now))
+                    flight.clear(); flight.update(updated)
+                except Exception as exception:
+                    logging.warning("ComatAlarm flight_poll_failed kind=%s", type(exception).__name__)
+                    error = "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"
+            # Compare-and-swap the entire snapshot after all network I/O. Removed
+            # flights, changed preferences and foreground takeovers win the race.
+            with self.db:
+                changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND (server_polling=1 OR foreground_until<=?) AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
+                if changed:
+                    self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
+            if report:
+                MONITOR_LOG.info("ComatAlarm monitor_result epoch=%d flights=%d committed=%s provider_error=%s events=%d",
+                                int(now), len(flights), bool(changed), bool(error), len(pending) if changed else 0)
+        else:
+            # Evaluate the short final-approach window on every worker pass using
+            # the last fresh observation; this performs no extra provider call.
+            pending = []
+            for flight in flights:
+                updated = update_landing_alert(flight, flight, now)
+                pending.extend(self.events(device["id"], flight, updated, prefs, now))
+                flight.clear(); flight.update(updated)
+            encoded = json.dumps(flights)
+            if encoded != device["watch"] or calendar_error:
+                with self.db:
+                    changed = self.db.execute("UPDATE comat_devices SET watch=?,error=? WHERE id=? AND watch=? AND preferences=? AND expires>?",
+                        (encoded, calendar_error or device["error"], device["id"], device["watch"], device["preferences"], now)).rowcount
+                    if changed:
+                        self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
 
     def events(self, device_id, old, updated, prefs, now):
         pending = []
@@ -1150,7 +1310,11 @@ class ComatAlarm:
                     state["departure_from_ber"] = True
                     if updated.get("_inbound", {}).get("aibt"):
                         state["parking_aibt"] = updated["_inbound"]["aibt"]
-                payload = json.dumps({"title":title,"body":body,"flight_id":updated["id"],"event_id":event_id,"flag":flag,"flight_state":state})
+                data = {"title":title,"body":body,"flight_id":updated["id"],"event_id":event_id,"flag":flag,"flight_state":state}
+                if flag == 'alarmPrelanding':
+                    data['prelanding'] = dict(updated['_prelanding'])
+                    data['expires_at'] = updated['_prelanding']['expires_at']
+                payload = json.dumps(data)
                 pending.append((device_id, event_id, payload, now))
         return pending
 
@@ -1160,12 +1324,25 @@ class ComatAlarm:
                 current = self.db.execute("SELECT * FROM comat_devices WHERE id=?", (device_id,)).fetchone()
                 if not current:
                     break
+                identity = (current['credential'], current['firebase_uid'])
                 if current['firebase_uid'] and not await self.stand_access(current['firebase_uid']):
+                    continue
+                # An app may delete a flight, revoke its grant, change alarm
+                # preferences or rotate its APNs token while authorization waits.
+                current = self.db.execute('SELECT * FROM comat_devices WHERE id=?', (device_id,)).fetchone()
+                if not current:
+                    break
+                if (current['credential'], current['firebase_uid']) != identity:
+                    continue
+                if not self.db.execute('SELECT 1 FROM comat_outbox WHERE device=? AND event=? AND sent=0',
+                                       (device_id, item['event'])).fetchone():
                     continue
                 payload = json.loads(item["payload"])
                 prefs = json.loads(current["preferences"])
-                present = any(f["id"] == payload["flight_id"] for f in json.loads(current["watch"]))
-                if not present or not self.enabled(prefs, now) or not prefs.get(payload["flag"], True) or (current["foreground_until"] > now and not prefs.get("relay_alerts", False)):
+                flight = next((f for f in json.loads(current["watch"]) if f["id"] == payload["flight_id"]), None)
+                from .landing_alert import prelanding_is_current
+                outdated = payload['flag'] == 'alarmPrelanding' and not prelanding_is_current(flight or {}, payload.get('prelanding'), now)
+                if not flight or outdated or not self.enabled(prefs, now) or not prefs.get(payload["flag"], True) or (current["foreground_until"] > now and not prefs.get("relay_alerts", False)):
                     self.monitor.record("push_skipped", payload["flag"] + ": durch Flug-/Alarmregel verworfen", device=device_id, now=now)
                     with self.db:
                         self.db.execute("DELETE FROM comat_outbox WHERE device=? AND event=?", (device_id,item["event"]))
@@ -1194,6 +1371,7 @@ class ComatAlarm:
             app.router.add_route(method,"/comatalarm/v1/"+path,handler)
         async def worker():
             while True:
+                self.poll_wakeup.clear()
                 try:
                     await self.tick()
                 except asyncio.CancelledError:
@@ -1201,7 +1379,10 @@ class ComatAlarm:
                 except Exception as error:
                     # No exception text/traceback: provider errors may contain secrets.
                     logging.warning("ComatAlarm monitor_cycle_failed kind=%s; retry_in_seconds=15", type(error).__name__)
-                await asyncio.sleep(15)
+                try:
+                    await asyncio.wait_for(self.poll_wakeup.wait(), timeout=15)
+                except asyncio.TimeoutError:
+                    pass
         async def tester_worker():
             while True:
                 try:

@@ -277,6 +277,7 @@ def main():
         return result.is_successful
 
     async def send_comatalarm(token, environment, payload):
+        from .landing_alert import alert_ttl
         cache_key = "comatalarm-" + environment
         if cache_key not in clients:
             clients[cache_key] = APNs(key=key, key_id=key_id, team_id=team_id,
@@ -287,8 +288,11 @@ def main():
             if not result.is_successful:
                 logging.warning('APNs rejected a ComatAlarm arrival sync: %s', result.status)
             return result.is_successful
+        ttl = alert_ttl(payload, time.time())
+        if ttl is None:
+            return False
         result = await asyncio.wait_for(clients[cache_key].send_notification(NotificationRequest(
-            device_token=token, push_type=PushType.ALERT, priority=10, time_to_live=300,
+            device_token=token, push_type=PushType.ALERT, priority=10, time_to_live=ttl,
             collapse_key=payload["event_id"],
             message={"aps": {"alert": {"title": payload["title"], "body": payload["body"]},
                             "sound": "default", "thread-id": "comatalarm-flights",

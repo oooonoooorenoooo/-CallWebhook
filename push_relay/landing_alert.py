@@ -1,0 +1,214 @@
+"""A short-lived, live-data-only warning close to the predicted touchdown.
+
+An actual landing timestamp is only known after landing. This policy therefore
+requires two fresh, consistent observations of a plausible final approach. It
+never schedules an alarm from a timetable or fills a missing ETA with STA.
+State belongs to the flight occurrence and is persisted by the monitor.
+"""
+from datetime import datetime, timezone
+import math
+
+
+# Same destination reference points as ComatAirport.all in the iOS app. They
+# validate proximity/course, not runway assignment or a precise touchdown point.
+AIRPORTS = {
+    "BER": (52.364444, 13.509722), "FRA": (50.033333, 8.570556),
+    "MUC": (48.353783, 11.786086), "HAM": (53.630278, 9.991111),
+    "DUS": (51.289444, 6.766667), "CGN": (50.865833, 7.142778),
+    "STR": (48.689878, 9.221964), "NUE": (49.498731, 11.078900),
+    "HAJ": (52.461056, 9.685078), "LEJ": (51.423889, 12.236389),
+    "BRE": (53.047779, 8.786667), "DRS": (51.132833, 13.767161),
+    "ERF": (50.979811, 10.958114), "SCN": (49.214600, 7.109500),
+    "ZRH": (47.464722, 8.549167), "GVA": (46.238064, 6.108997),
+    "BSL": (47.600000, 7.533333), "VIE": (48.110278, 16.569722),
+    "GRZ": (46.991111, 15.439167), "INN": (47.260278, 11.343889),
+    "SZG": (47.793333, 13.004167), "LNZ": (48.238889, 14.187500),
+    "BRU": (50.901389, 4.484444), "AMS": (52.308056, 4.764167),
+    "LHR": (51.477500, -0.461389), "CDG": (49.012779, 2.550000),
+    "ORY": (48.723333, 2.379444), "CPH": (55.617917, 12.656111),
+    "PRG": (50.100833, 14.260000), "WAW": (52.165833, 20.967222),
+    "BUD": (47.436667, 19.255278), "FCO": (41.804444, 12.250833),
+    "MXP": (45.630278, 8.728056), "MAD": (40.472222, -3.560833),
+    "BCN": (41.296944, 2.078333), "LIS": (38.774167, -9.134167),
+    "ATH": (37.936389, 23.944444), "IST": (41.275278, 28.751944),
+    "HEL": (60.317222, 24.963333), "OSL": (60.193917, 11.100361),
+    "ARN": (59.651944, 17.918611),
+}
+
+# Aerodrome elevation above mean sea level, feet. Published by the dataset
+# maintainer at https://davidmegginson.github.io/ourairports-data/airports.csv
+# (2026-11-18; field definition: https://ourairports.com/help/data-dictionary.html).
+# FR24 barometric altitude is approximate; wide tolerances below are deliberate.
+ELEVATIONS_FT = {
+    "BER": 157, "FRA": 364, "MUC": 1487, "HAM": 53, "DUS": 147,
+    "CGN": 302, "STR": 1276, "NUE": 1046, "HAJ": 183, "LEJ": 465,
+    "BRE": 14, "DRS": 755, "ERF": 1036, "SCN": 1058, "ZRH": 1417,
+    "GVA": 1411, "BSL": 885, "VIE": 600, "GRZ": 1115, "INN": 1907,
+    "SZG": 1411, "LNZ": 980, "BRU": 175, "AMS": -11, "LHR": 83,
+    "CDG": 392, "ORY": 291, "CPH": 17, "PRG": 1247, "WAW": 362,
+    "BUD": 495, "FCO": 13, "MXP": 768, "MAD": 1998, "BCN": 12,
+    "LIS": 374, "ATH": 308, "IST": 325, "HEL": 179, "OSL": 681,
+    "ARN": 137,
+}
+
+MAX_SAMPLE_AGE = 45
+WARNING_LEAD = 180
+MIN_WARNING_LEAD = 150
+MAX_ETA_CHANGE = 45
+
+
+def _number(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _stamp(value):
+    number = _number(value)
+    if number is not None:
+        return number if number > 1_000_000_000 else None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+        except (ValueError, OverflowError):
+            pass
+    return None
+
+
+def _candidate(flight, now, max_age=MAX_SAMPLE_AGE):
+    if any(flight.get(k) for k in ("ata", "aibt", "cancelled", "diverted")):
+        return None
+    live = flight.get("_live")
+    if not isinstance(live, dict):
+        return None
+    destination = str(flight.get("destination") or "").upper()
+    airport = AIRPORTS.get(destination)
+    identifier = live.get("fr24_id")
+    if (not airport or not isinstance(identifier, str) or not identifier
+            or identifier.upper().startswith(("TEMP_", "NS_", "LANDED_"))
+            or flight.get("fr24ID") != identifier
+            or str(live.get("dest_iata") or "").upper() != destination):
+        return None
+    # Older FR24 responses may omit source. Explicit estimated/replayed tracks
+    # are never proof of a live final approach.
+    source = str(live.get("source") or "").upper()
+    if source and source not in ("ADS-B", "ADSB", "ADS_B", "MLAT"):
+        return None
+    if live.get("on_ground") not in (False, 0):
+        return None
+    observed, eta = _stamp(live.get("timestamp")), _stamp(live.get("eta"))
+    if (observed is None or eta is None or not -5 <= now-observed <= max_age
+            or not 0 < eta-now <= 600):
+        return None
+    lat, lon, altitude, speed, vertical, track = (
+        _number(live.get(k)) for k in ("lat", "lon", "alt", "gspeed", "vspeed", "track"))
+    if (any(v is None for v in (lat, lon, altitude, speed, vertical, track))
+            or not -90 <= lat <= 90 or not -180 <= lon <= 180
+            or not 250 <= altitude <= 6000 or not 80 <= speed <= 260
+            or not -2500 <= vertical <= -250 or not 0 <= track <= 360):
+        return None
+    origin_lat, origin_lon = math.radians(lat), math.radians(lon)
+    target_lat, target_lon = map(math.radians, airport)
+    delta_lon = target_lon-origin_lon
+    a = math.sin((target_lat-origin_lat)/2)**2 + math.cos(origin_lat)*math.cos(target_lat)*math.sin(delta_lon/2)**2
+    distance = 6371 * 2 * math.asin(math.sqrt(min(1, max(0, a))))
+    bearing = math.degrees(math.atan2(math.sin(delta_lon)*math.cos(target_lat),
+        math.cos(origin_lat)*math.sin(target_lat)-math.sin(origin_lat)*math.cos(target_lat)*math.cos(delta_lon))) % 360
+    course_error = abs((track-bearing+180) % 360-180)
+    direct_seconds = distance/(speed*1.852)*3600
+    if not 4 <= distance <= 30 or course_error > 40 or abs(direct_seconds-(eta-observed)) > 90:
+        return None
+    height = altitude-ELEVATIONS_FT[destination]
+    path_angle = math.degrees(math.atan2(height*0.3048, distance*1000))
+    descent_seconds = height/(-vertical)*60
+    # A low vertical speed at several thousand feet is not evidence of a
+    # three-minute final, even if the provider's ETA claims otherwise. Check
+    # relative height, geometric approach slope and time to lose that height.
+    if not 400 <= height <= 4500 or not 1.5 <= path_angle <= 5.5 or abs(descent_seconds-(eta-observed)) > 120:
+        return None
+    return {"fr24_id": identifier, "destination": destination, "observed_at": observed,
+            "eta": eta, "altitude_ft": altitude, "distance_km": distance}
+
+
+def update_landing_alert(previous, current, now):
+    """Return a flight snapshot with durable confidence and warning state.
+
+    Call on each monitor tick, including ticks without a paid provider request.
+    Reusing one sample never increases confidence, but a still-fresh confirmed
+    sample may cross the three-minute boundary during an ordinary 15s tick.
+    """
+    result = dict(current)
+    stored = current.get("_landing_alert", previous.get("_landing_alert", {}))
+    stored = dict(stored) if isinstance(stored, dict) else {}
+    marker = current.get("_prelanding", previous.get("_prelanding"))
+    result.pop("_prelanding", None)
+    candidate = _candidate(current, now)
+    identifier = current.get("fr24ID")
+    if stored.get("fr24_id") != identifier:
+        stored = {}
+    triggered = {k: stored[k] for k in ("fr24_id", "destination", "triggered_at") if k in stored}
+    if candidate is None:
+        # Normal provider polling is 60s, and received positions are already a
+        # few seconds old. Aging past the *delivery* freshness limit must not
+        # erase the previous observation before the next poll can confirm it.
+        # Retain confidence for at most one bounded observation gap, but never
+        # retain a warning or treat an aged position as current evidence.
+        aged = _candidate(current, now, max_age=90)
+        if (aged is not None and stored.get("observed_at") == aged["observed_at"]
+                and all(stored.get(k) == v for k, v in aged.items())):
+            result["_landing_alert"] = stored
+            return result
+        # A go-around, stale data, missing ETA or heading change cancels a pending
+        # warning. Keep the occurrence's trigger marker to prevent repeated alerts.
+        result["_landing_alert"] = triggered
+        return result
+    same_leg = (stored.get("fr24_id") == candidate["fr24_id"]
+                and stored.get("destination") == candidate["destination"])
+    old_observed = _number(stored.get("observed_at"))
+    count = 1
+    if same_leg and old_observed is not None:
+        gap = candidate["observed_at"]-old_observed
+        if gap == 0 and candidate == {k: stored.get(k) for k in candidate}:
+            count = stored.get("samples", 1)
+        elif (10 <= gap <= 90 and abs(candidate["eta"]-stored.get("eta", 0)) <= MAX_ETA_CHANGE
+                and candidate["distance_km"] < stored.get("distance_km", 0)-0.15
+                and candidate["altitude_ft"] < stored.get("altitude_ft", 0)):
+            count = min(3, stored.get("samples", 1)+1)
+    state = dict(candidate, samples=count)
+    if same_leg and "triggered_at" in triggered:
+        state["triggered_at"] = triggered["triggered_at"]
+    lead = candidate["eta"]-now
+    if "triggered_at" not in state and count >= 2 and MIN_WARNING_LEAD < lead <= WARNING_LEAD:
+        state["triggered_at"] = now
+        marker = {"fr24_id": candidate["fr24_id"], "eta": candidate["eta"],
+                  "observed_at": candidate["observed_at"], "triggered_at": now,
+                  "expires_at": min(now+30, candidate["eta"]-MIN_WARNING_LEAD)}
+    result["_landing_alert"] = state
+    if isinstance(marker, dict):
+        result["_prelanding"] = marker
+        if not prelanding_is_current(result, marker, now):
+            result.pop("_prelanding", None)
+    return result
+
+
+def prelanding_is_current(flight, marker, now):
+    """Recheck a queued warning immediately before each APNs delivery attempt."""
+    if not isinstance(marker, dict) or not isinstance(flight.get("_prelanding"), dict):
+        return False
+    expiry, predicted = _number(marker.get("expires_at")), _stamp(marker.get("eta"))
+    candidate = _candidate(flight, now)
+    return bool(candidate and expiry is not None and predicted is not None and now < expiry
+                and candidate["fr24_id"] == marker.get("fr24_id")
+                and MIN_WARNING_LEAD < candidate["eta"]-now <= WARNING_LEAD
+                and abs(candidate["eta"]-predicted) <= MAX_ETA_CHANGE)
+
+
+def alert_ttl(payload, now):
+    """Bound APNs storage too; an offline phone must not get an old warning."""
+    if payload.get("flag") != "alarmPrelanding":
+        return 300
+    expiry = _number(payload.get("expires_at"))
+    if expiry is None or expiry <= now:
+        return None
+    return max(1, min(30, math.floor(expiry-now)))

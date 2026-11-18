@@ -185,6 +185,7 @@ class Operator:
     def delete(self, key):
         flights = self.monitor.snapshot(with_history=False)['flights']
         flights += [json.loads(r[0]) for r in self.db.execute('SELECT payload FROM comat_monitor_history')]
+        flights += [json.loads(r[0]) for r in self.db.execute('SELECT payload FROM comat_app_history')]
         f = next((f for f in flights if key_of(f)==key),None)
         if not f: return dict(ok=True, message='Flug bereits entfernt')
         from .comatalarm import same_occurrence
@@ -197,7 +198,7 @@ class Operator:
                 for event in self.db.execute('SELECT event,payload FROM comat_outbox WHERE device=? AND sent=0',(row['id'],)).fetchall():
                     if json.loads(event['payload']).get('flight_id') in removed:
                         self.db.execute('DELETE FROM comat_outbox WHERE device=? AND event=?',(row['id'],event['event']))
-            for table in ('comat_manual','comat_monitor_history'):
+            for table in ('comat_manual','comat_monitor_history','comat_app_history'):
                 for row in self.db.execute('SELECT identity,payload FROM '+table).fetchall():
                     if same_occurrence(f,json.loads(row['payload'])):
                         self.db.execute('DELETE FROM '+table+' WHERE identity=?',(row['identity'],))
@@ -219,7 +220,7 @@ class Operator:
         devices = [r for r in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND api_token!='' AND server_polling=1",(time.time(),)) if r['id'] in approved]
         if not devices:
             raise web.HTTPConflict(text='Kein freigegebenes Gerät mit eingerichteter Pi-Abfrage verbunden')
-        flight = dict(id='PI_'+key[:32],number=f['number'],reference=f['reference'],origin=f['origin'],destination='BER',_schedule=f['schedule'])
+        flight = dict(id='PI_'+key[:32],number=f['number'],reference=f['reference'],created_at=now,origin=f['origin'],destination='BER',_schedule=f['schedule'])
         already = any(same_occurrence(flight,x) or (x['number'] in f['aliases'] and day_of(x['reference'])==f['day']) for r in devices for x in json.loads(r['watch']))
         if already: return dict(ok=True,message=f['number']+' wird bereits überwacht')
         with self.db:
@@ -229,6 +230,7 @@ class Operator:
             for r in devices:
                 watch = json.loads(r['watch'])+[flight]
                 self.db.execute('UPDATE comat_devices SET watch=?,expires=?,last_poll=0 WHERE id=?',(json.dumps(watch),now+86400,r['id']))
+        self.comat.history_sync.capture([flight], now)
         self.monitor.record('service','Über Ankunftstabelle zur Pi-Überwachung hinzugefügt',f['number'])
         self.monitor.archive(now)
         return dict(ok=True,message=f['number']+' wird jetzt auf dem Pi überwacht')

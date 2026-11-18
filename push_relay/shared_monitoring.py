@@ -30,10 +30,16 @@ class SharedMonitoring:
 
     def retain(self, incoming, prior, now):
         """A stale phone snapshot cannot delete a newly shared subscription."""
-        from .comatalarm import same_occurrence
+        from .comatalarm import same_occurrence, departure_from_ber
         result = [f for f in incoming if not self.removed(f)]
         for f in prior:
-            if (f.get('_shared_subscription') and self.current(f, now)
+            repairing = (not departure_from_ber(f) and f.get('aibt') and not f.get('aibt_position')
+                         and not f.get('cancelled') and not f.get('diverted')
+                         and now-f['aibt'] <= 86400 and f.get('_aibt_recovery_attempts', 0) < 6)
+            # Importing a completed flight into phone history removes it from
+            # the next active handoff. Finish only its already-running bounded
+            # coordinate repair; never recreate a watch from archived records.
+            if ((f.get('_shared_subscription') or repairing) and self.current(f, now)
                     and not self.removed(f) and not self.comat.monitor.operator.removed(f)
                     and not any(same_occurrence(f, other) for other in result)):
                 result.append(f)
@@ -62,7 +68,19 @@ class SharedMonitoring:
                 for event in self.db.execute('SELECT event,payload FROM comat_outbox WHERE device=? AND sent=0', (device['id'],)).fetchall():
                     if json.loads(event['payload']).get('flight_id') in removed_ids:
                         self.db.execute('DELETE FROM comat_outbox WHERE device=? AND event=?', (device['id'], event['event']))
-            self.db.execute('DELETE FROM comat_shared_removed WHERE deleted_at<?', (now-7*86400,))
+            # The app archive retains the current Berlin calendar month. Keep
+            # its deletion evidence just as long, even after active watches end.
+            from .history_sync import day_of
+            for row in self.db.execute('SELECT identity,payload FROM comat_shared_removed WHERE deleted_at<?', (now-7*86400,)).fetchall():
+                try:
+                    f = json.loads(row['payload'])
+                    retained = (day_of(f['reference'])[:7] == day_of(now)[:7]
+                                or day_of(f['reference']+48*3600)[:7] == day_of(now)[:7]
+                                or self.comat.history_sync.retained_occurrence(f, now))
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    retained = True
+                if not retained:
+                    self.db.execute('DELETE FROM comat_shared_removed WHERE identity=?', (row['identity'],))
 
     def fanout(self, devices, now):
         """Seed new recipients with a baseline; later milestones notify each one."""

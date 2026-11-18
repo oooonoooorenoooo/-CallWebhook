@@ -54,7 +54,8 @@ def ber_request(number, reference, departing=False):
 
 def same_occurrence(a, b):
     def identifier(f):
-        value = f.get("fr24ID", "").upper()
+        raw = f.get("fr24ID")
+        value = raw.upper() if isinstance(raw, str) else ''
         return value if value and not value.startswith(("TEMP_", "NS_")) else None
     left, right = identifier(a), identifier(b)
     if left and right:
@@ -735,6 +736,8 @@ class ComatAlarm:
             self.db.execute("ALTER TABLE comat_devices ADD COLUMN firebase_uid TEXT NOT NULL DEFAULT ''")
         from .shared_monitoring import SharedMonitoring
         self.shared_monitoring = SharedMonitoring(self)
+        from .history_sync import HistorySync
+        self.history_sync = HistorySync(self)
 
     async def refresh_shared_subscriptions(self, now):
         """Authorization, renewal and group subscriptions run without any app."""
@@ -753,6 +756,16 @@ class ComatAlarm:
             for r in devices:
                 if r['expires'] < now+12*3600:
                     self.db.execute('UPDATE comat_devices SET expires=? WHERE id=?', (now+86400, r['id']))
+        # Preserve approved historical snapshots before the 48h active-watch
+        # filter or a first post-restart handoff can remove them.
+        for r in devices:
+            try:
+                saved = json.loads(r['watch'])
+                if isinstance(saved, list):
+                    self.history_sync.capture(saved, now)
+            except (TypeError, ValueError):
+                continue
+        self.history_sync.backfill(now)
         self.shared_monitoring.fanout(devices, now)
 
     def validated_removals(self, value, prior, now):
@@ -769,8 +782,6 @@ class ComatAlarm:
             if (not isinstance(deleted_at, (int, float)) or isinstance(deleted_at, bool)
                     or not math.isfinite(deleted_at) or not 1_000_000_000 < deleted_at <= now+60):
                 raise ValueError('Invalid deletion time')
-            if deleted_at < now-7*86400:
-                continue
             identifier = removal.get('id')
             if identifier is not None and (not isinstance(identifier, str) or not 1 <= len(identifier) <= 160):
                 raise ValueError('Invalid removed flight ID')
@@ -780,15 +791,25 @@ class ComatAlarm:
                         or not isinstance(reference, (int, float)) or isinstance(reference, bool)
                         or not math.isfinite(reference) or reference <= 1_000_000_000):
                     raise ValueError('Invalid removed occurrence')
-                if abs(reference-deleted_at) > 7*86400:
+                if reference > now+7*86400:
                     continue
+                from .history_sync import day_of
                 row = {k: removal[k] for k in ('id', 'number', 'reference', 'fr24ID', 'origin', 'destination') if k in removal}
                 for key in ('fr24ID', 'origin', 'destination'):
                     if key in row and (not isinstance(row[key], str) or len(row[key]) > 64):
                         raise ValueError('Invalid removed occurrence')
+                if (abs(reference-deleted_at) > 7*86400 and day_of(reference)[:7] != day_of(now)[:7]
+                        and not self.history_sync.retained_occurrence(row, now)):
+                    continue
             else:
                 row = next((dict(f) for f in prior if identifier and f['id'].upper() == identifier.upper()), None)
                 if row is None:
+                    row = self.history_sync.resolve(identifier, now)
+                if row is None:
+                    continue
+            if deleted_at < now-7*86400:
+                from .history_sync import day_of
+                if day_of(row['reference'])[:7] != day_of(now)[:7] and not self.history_sync.retained_occurrence(row, now):
                     continue
             row['deleted_at'] = deleted_at
             result.append(row)
@@ -925,10 +946,11 @@ class ComatAlarm:
         if not isinstance(body, dict):
             raise ValueError("Invalid watch")
         arrival_sync = body.get('arrivals_sync') is True
+        history_sync = body.get('history_sync') is True
         # Flight changes and the resumable stand-model upload share this route.
         # Coalesced handoffs must fit beside uploads without delaying a new watch;
         # paid provider polling remains separately bounded by the worker budget.
-        self.relay.limit(('comat-arrivals:' if arrival_sync else 'comat-watch:') + device['id'], 30 if arrival_sync else 24, 60)
+        self.relay.limit(('comat-history:' if history_sync else 'comat-arrivals:' if arrival_sync else 'comat-watch:') + device['id'], 60 if history_sync else 30 if arrival_sync else 24, 60)
         access = await self.bind_stand_access(device, body)
         # Authorization may await Firebase while the worker stores a newer
         # milestone. Re-authenticate and merge from the current snapshot, never
@@ -936,6 +958,14 @@ class ComatAlarm:
         device = self.device(request)
         if access and device['firebase_uid'] != access['uid']:
             raise web.HTTPForbidden(text='Firebase device identity changed during handoff')
+        if history_sync:
+            if not access:
+                raise web.HTTPForbidden(text='Firebase device approval required for history')
+            now = time.time()
+            if device['server_polling']:
+                self.history_sync.capture(json.loads(device['watch']), now)
+            self.history_sync.backfill(now)
+            return web.json_response(self.history_sync.read(body, now), headers={'Cache-Control': 'no-store'})
         if arrival_sync:
             return web.json_response(self.monitor.operator.arrival_sync.read(device, body))
         if body.get('stand_sync') is True:
@@ -955,9 +985,14 @@ class ComatAlarm:
         self.api_status.configure(body.get("api_credentials"))
         now = time.time()
         prior = {f["id"]: f for f in json.loads(device["watch"])}
+        if access and device['server_polling']:
+            self.history_sync.capture(list(prior.values()), now)
+        self.history_sync.backfill(now)
         removals = self.validated_removals(body.get('removed_flights'), list(prior.values()), now)
         clean = []
         for f in flights:
+            if isinstance(f, dict) and (f.get('archived') is True or str(f.get('id', '')).startswith('PI_HISTORY_')):
+                continue  # Imported history never becomes a provider subscription.
             if not isinstance(f, dict) or not isinstance(f.get("id"), str) or not 1 <= len(f["id"]) <= 160 or not isinstance(f.get("number"), str) or not re.fullmatch(r"[A-Z0-9]{2,3}[0-9]{1,5}", f["number"]):
                 raise ValueError("Invalid flight")
             reference = f.get("reference")
@@ -1080,12 +1115,18 @@ class ComatAlarm:
                     # Newly subscribed historical events are a baseline, not alerts.
                     if old is not None:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", self.events(device["id"], old, row, prefs, now))
+        if access and server_polling:
+            self.history_sync.capture(clean, now)
         await self.deliver(device["id"], now)
         self.monitor.archive(now)
         self.poll_wakeup.set()
         if status_request:
             self.api_status.request_refresh(api_token)
+        current = self.device(request)
+        if current['firebase_uid'] != device['firebase_uid'] or (access and current['firebase_uid'] != access['uid']):
+            raise web.HTTPForbidden(text='Firebase device identity changed during handoff')
         return web.json_response(dict(self.stand_metadata(access), shared_watch_supported=True, token_refresh_supported=True,
+                                     history_sync_supported=bool(access), history=self.history_sync.metadata(now) if access else None,
                                      token_refreshed=refresh_push, api_status=self.api_status.snapshot(), watching=len(clean),
                                      background_ready=bool(api_token or (self.shared_tokens.get(device['id']) if access else '')),
                                      expires=now+86400, relay_alerts=relay_alerts, flights=clean))
@@ -1095,9 +1136,20 @@ class ComatAlarm:
         access = await self.stand_access(row['firebase_uid'])
         if row['firebase_uid'] and not access:
             raise web.HTTPForbidden(text='Firebase device approval required')
+        current = self.device(request)
+        if current['firebase_uid'] != row['firebase_uid'] or (access and current['firebase_uid'] != access['uid']):
+            raise web.HTTPForbidden(text='Firebase device identity changed during state read')
+        row = current
+        now = time.time()
+        if access:
+            if row['server_polling']:
+                self.history_sync.capture(json.loads(row['watch']), now)
+            self.history_sync.backfill(now)
         with self.db:
-            self.db.execute("INSERT OR REPLACE INTO comat_monitor_reads VALUES(?,?)",(row["id"],time.time()))
-        return web.json_response({**self.stand_metadata(access), "shared_watch_supported": True, "token_refresh_supported": True, "arrivals": self.monitor.operator.arrival_sync.metadata(), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, time.time()), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"] or (self.shared_tokens.get(row['id']) if access else '')), "expires": row["expires"]})
+            self.db.execute("INSERT OR REPLACE INTO comat_monitor_reads VALUES(?,?)",(row["id"],now))
+        return web.json_response({**self.stand_metadata(access), "shared_watch_supported": True, "token_refresh_supported": True,
+            "history_sync_supported": bool(access), "history": self.history_sync.metadata(now) if access else None,
+            "arrivals": self.monitor.operator.arrival_sync.metadata(), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, now), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"] or (self.shared_tokens.get(row['id']) if access else '')), "expires": row["expires"]}, headers={'Cache-Control': 'no-store'})
 
     async def revoke(self, request):
         row = self.device(request)
@@ -1220,8 +1272,15 @@ class ComatAlarm:
             if report:
                 logging.warning("ComatAlarm monitor_skip reason=device_approval")
             return
+        current = self.db.execute('SELECT * FROM comat_devices WHERE id=?', (device['id'],)).fetchone()
+        if (current is None or current['credential'] != device['credential']
+                or current['firebase_uid'] != device['firebase_uid']):
+            return
+        device = current
         positions = self.stand_model.positions() if access and self.stand_model.ready else unprotect_index(device['stand_index'])
         prefs = json.loads(device["preferences"])
+        if access and device['server_polling']:
+            self.history_sync.capture(json.loads(device['watch']), now)
         flights = [f for f in json.loads(device["watch"]) if self.shared_monitoring.current(f, now)]
         api_token = self.shared_tokens.get(device["id"], device["api_token"])
         calendar_error = "Kalenderdaten veraltet – App zur Aktualisierung öffnen" if prefs.get("calendar_valid_until", now+1) <= now else ""
@@ -1303,6 +1362,10 @@ class ComatAlarm:
                 changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND (server_polling=1 OR foreground_until<=?) AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
                 if changed:
                     self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
+                    current = self.db.execute('SELECT credential,firebase_uid,server_polling FROM comat_devices WHERE id=?', (device['id'],)).fetchone()
+                    if (access and current['server_polling'] and current['credential'] == device['credential']
+                            and current['firebase_uid'] == device['firebase_uid'] == access['uid']):
+                        self.history_sync.capture(flights, now)
             if report:
                 MONITOR_LOG.info("ComatAlarm monitor_result epoch=%d flights=%d committed=%s provider_error=%s events=%d",
                                 int(now), len(flights), bool(changed), bool(error), len(pending) if changed else 0)

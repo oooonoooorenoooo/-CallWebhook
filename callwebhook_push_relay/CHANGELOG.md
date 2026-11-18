@@ -1,3 +1,12 @@
+## 1.2.31
+
+- Abgeschlossene gemeinsame und über die Pi-Oberfläche übernommene Flüge erhalten einen eigenen, authentifizierten Verlaufsabgleich für die iPhone-App. Die Übernahme funktioniert auch nach Ablauf der aktiven Überwachung.
+- Der App-Verlauf bewahrt die ursprünglichen Eintrags-IDs, den Flugtag, die konkrete Flug-ID und vorhandene tatsächliche Zeiten sowie Standnachweise. Derselbe Flug wird beim erneuten Abgleich nicht wieder aktiv und löst keine erneuten Pushes aus.
+- Bereits vorhandene, sicher zuordenbare Pi-Daten werden nachgetragen. Der Export bleibt auf den gespeicherten aktuellen Berliner Kalendermonat begrenzt; historische Diagnoseeinträge ohne belegte gemeinsame Herkunft werden nicht pauschal freigegeben.
+- Der seitenweise Abruf verwendet ausschließlich gespeicherte Daten, prüft die Gerätefreigabe und erkennt Änderungen zwischen zwei Seiten. Zusätzliche Anbieterabfragen sind dafür nicht erforderlich.
+- Löschungen gelten über den gesamten auf dem Pi gespeicherten Archivzeitraum. Alias-IDs verhindern das Wiederauftauchen gelöschter Einträge unter einer neuen Archiv-ID.
+- Add-on und passende iOS-Version aktualisieren. Die App übernimmt beim nächsten Abgleich auch abgeschlossene Pi-Flüge direkt in den Verlauf.
+
 ## 1.2.30
 
 - Fällige FR24-Abfragen mehrerer zentral überwachter Flüge werden pro Zugang und identischem Abfragefenster gebündelt. Damit verbrauchen fünf, acht oder zwölf verschiedene Flüge nicht mehr jeweils zwei einzelne HTTP-Anfragen und verdrängen sich nicht gegenseitig aus dem Minutenbudget.

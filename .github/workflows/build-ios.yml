@@ -64,7 +64,7 @@ jobs:
           load: true
           tags: callwebhook-push-relay:ci
       - name: Verify ARM64 relay imports
-        run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import push_relay.shared_monitoring; import push_relay.landing_alert; import push_relay.fr24_batch; from push_relay.comatalarm import FlightProvider; FlightProvider(); import run; print('ARM64 relay dependencies ready')"
+        run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import push_relay.shared_monitoring; import push_relay.landing_alert; import push_relay.fr24_batch; import push_relay.history_sync; from push_relay.comatalarm import FlightProvider; FlightProvider(); import run; print('ARM64 relay dependencies ready')"
 
   development:
     runs-on: macos-26

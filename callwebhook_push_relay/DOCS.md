@@ -1,5 +1,27 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: Pi-Verlauf auf dem iPhone (ab 1.2.31)
+
+Ein Flug, der auf der Pi-Oberfläche übernommen und bei geschlossener iPhone-App
+abgeschlossen wurde, wird mit der passenden neuen App beim nächsten Abgleich
+direkt in den Verlauf übernommen. Das gilt auch dann, wenn er nicht mehr aktiv
+überwacht wird. Vorhandene Flugzeiten, Paketdaten und bestätigte Standnachweise
+werden mitgeführt. Wiederholte Abgleiche erzeugen keine zweite Flugkarte und
+keine erneute Alarmierung.
+
+Der Pi stellt dafür den gespeicherten aktuellen Kalendermonat in der Zeitzone
+Europe/Berlin bereit. Bereits vorhandene Daten werden übernommen, soweit ihre
+Herkunft aus einer freigegebenen Überwachung oder einer Pi-Aktion belegt ist.
+Frühere, bereits auf dem Pi gelöschte Monatsbestände können daraus nicht
+wiederhergestellt werden. Die auf dem iPhone schon gespeicherte Historie wird
+durch eine leere Antwort oder den Monatswechsel nicht gelöscht.
+
+Der Abruf verwendet die vorhandene Geräteberechtigung und ausschließlich
+gespeicherte Daten. Es entstehen dadurch keine zusätzlichen FR24-Abfragen.
+Explizite Löschungen werden auch beim späteren Archivabgleich berücksichtigt.
+Für diesen Abgleich sind der Push-Dienst 1.2.31 und die passende neue iOS-App
+erforderlich. Nach dem Update die App einmal öffnen und den Verlauf prüfen.
+
 ## ComatAlarm: gemeinsame Hintergrundalarme und Landevorwarnung (ab 1.2.29)
 
 Neue Kollegen-Überwachungen werden vom Pi an die bereits registrierten,

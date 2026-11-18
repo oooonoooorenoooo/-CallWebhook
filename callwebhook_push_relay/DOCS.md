@@ -1,5 +1,26 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: gemeinsame Hintergrundalarme und Landevorwarnung (ab 1.2.29)
+
+Neue Kollegen-Überwachungen werden vom Pi an die bereits registrierten,
+weiterhin freigegebenen Geräte verteilt. Die Empfänger müssen ihre App dafür
+nicht öffnen. Zentrale Registrierungen werden unabhängig vom App-Kontakt
+verlängert; gesperrte und widerrufene Geräte bleiben ausgeschlossen.
+
+Der neue Voralarm meldet eine Landung voraussichtlich in etwa drei Minuten.
+Er verlangt zwei frische, konsistente Live-Beobachtungen und prüft ETA, Kurs,
+Entfernung, Höhe über dem Zielflughafen und Sinkrate. Eine geplante Ankunftszeit
+oder veraltete Position löst keinen Voralarm aus. Bei unzuverlässigen Daten
+wird die Vorwarnung ausgelassen; die gewöhnliche bestätigte Landemeldung bleibt
+unabhängig. Die Warnung gilt nur kurz und wird vor jedem Zustellversuch geprüft.
+
+Das Add-on muss aktualisiert werden. Die passende neue iOS-Version ergänzt den
+Schalter, direkte Flugübergaben, explizite Löschungen und Token-Erneuerung für
+Tester. Vorhandene Einrichtungsschlüssel, APNs-Zugänge und Gerätefreigaben
+werden weiterverwendet. Die vollständige Zustellprüfung erfolgt mit gesperrten
+Geräten und geschlossenen Apps; ein grüner Build oder APNs-Erfolg allein reicht
+dafür nicht aus.
+
 ## ComatAlarm: BER-Abfragen auf dem Pi (ab 1.2.22)
 
 Die Flugabfrage und die gemeinsame API-Statusprüfung senden dieselben
@@ -160,20 +181,22 @@ kann dafür nicht verwendet werden. CI aktiviert Push für die bestehende Bundle
 und erstellt bei Bedarf ein passendes Profil mit den vorhandenen Zertifikaten.
 Es werden keine Zertifikate oder bestehenden Profile widerrufen.
 
-Die App übergibt bis zu zwei Flüge, Alarmregeln und ausschließlich Zeitfenster
-für erlaubte Kalendermeldungen (keine Kalendertitel). Flugereignisse werden im
-Hintergrund ungefähr minütlich über FR24 abgefragt, Gate und Streichungen auch
-über BER. Bei FR24-Tarif-/Zugangsfehlern werden FR24-Abfragen fünf Minuten pausiert.
-Abfragen verbrauchen FR24-Kontingent. Bei geöffneter App pausiert das Add-on nach
-der Übergabe; nach beendetem Flug endet dessen Abfrage. Ohne erneutes Öffnen der
-App endet der Auftrag nach 24 Stunden. Kalenderänderungen während geschlossener
-App werden erst beim nächsten Öffnen übernommen. Maximal zehn Geräte pro Dienst.
+Die App übergibt Flüge, Alarmregeln und ausschließlich Zeitfenster für erlaubte
+Kalendermeldungen (keine Kalendertitel). Flugereignisse werden auf dem Pi ungefähr
+minütlich über FR24 abgefragt, Gate und Streichungen auch über BER. Anbieterlimits
+und Sperrfristen bleiben wirksam; Abfragen verbrauchen FR24-Kontingent. Die
+zentrale Überwachung läuft bei geöffneter und geschlossener App. Abgeschlossene
+Flüge und zeitlich veraltete Vorgänge beenden ihre regulären Abfragen.
+Kalenderfenster reichen mit der neuen App 14 Tage; Änderungen werden beim
+nächsten App-Kontakt übernommen. Nach Ablauf wird ohne neue Fenster nicht
+eigenmächtig laut geschaltet. Maximal zehn Geräte pro Dienst.
 
 Der FR24-Token wird per HTTPS an den eigenen Dienst übertragen und dort im
 privaten Add-on-Verzeichnis gespeichert; niemals öffentlich in GitHub.
 Gerätezugänge, Flugzustand und bereits gesendete Ereignisse bleiben bei einem
-Add-on-Neustart erhalten. Abgelaufene Aufträge löschen den FR24-Token aus dem
-aktiven Datensatz. **Verbindung trennen** löscht Gerätezugang und Flugauftrag.
+Add-on-Neustart erhalten. Nur ungebundene ältere Registrierungen behalten den
+bisherigen Ablauf nach 24 Stunden. **Verbindung trennen** löscht den eigenen
+Gerätezugang und dessen Flugauftrag.
 Der Apple-Schlüssel bleibt ausschließlich im Betreiber-Add-on. Der neue
 ComatAlarm-Zugang wird getrennt von CallWebhook-App-Attest/VoIP und HATTS geprüft.
 

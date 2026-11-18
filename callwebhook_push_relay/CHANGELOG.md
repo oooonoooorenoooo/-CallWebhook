@@ -1,3 +1,15 @@
+## 1.2.29
+
+- Gemeinsam freigegebene Geräte erhalten neue Kollegen-Überwachungen direkt vom Pi, auch wenn ihre App geschlossen ist. Bestehende Alarm- und Kalenderregeln gelten weiterhin je Gerät.
+- Zentrale, weiterhin freigegebene Registrierungen werden vom Pi verlängert. 24 Stunden ohne App-Kontakt löschen keine aktive Überwachung mehr; fehlende Freigabe pausiert den Dienst, Widerruf bleibt wirksam.
+- Neue Überwachungen wecken den Arbeitszyklus sofort. Bereits erkannte Ereignisse werden vor weiteren Geräteabfragen versendet; ein fehlerhaftes Gerät blockiert andere nicht.
+- Neuer standardmäßig aktiver Voralarm „Landung in etwa 3 Minuten“: zwei frische, konsistente Live-Beobachtungen mit plausibler ETA, Kurs, Entfernung, relativer Höhe und Sinkrate. Keine Warnung allein aus Flugplanzeit, veralteter Position oder bestätigter Landung. Unbekannte Zielflughäfen und fehlende Live-ETA lösen keinen Voralarm aus.
+- Die Voralarmgrenze wird alle 15 Sekunden anhand vorhandener frischer Daten geprüft, ohne zusätzliche Anbieterabfrage. Ausstehende Warnungen verfallen nach spätestens 30 Sekunden; ETA-Änderung, Durchstarten oder Landung verhindern einen überholten Versand. Kein erneuter Voralarm für denselben Flug nach Neustart.
+- Explizite gemeinsame Fluglöschungen samt Wiederanlage-Zeitstempel verhindern das Wiederauftauchen durch alte App-Snapshots. Autorisierte Tester können ihren APNs-Token ohne geöffnete Administrator-App erneuern.
+- Kalenderfenster reichen mit der aktualisierten App 14 Tage. Abgelaufene Kalenderdaten bleiben erkennbar und geben Alarme nicht eigenmächtig frei. Bestehende Schichtregeln bleiben erhalten.
+- Nebenläufige Geräte-/Fluglöschungen, Tokenwechsel und Pi-Aktualisierungen werden nach asynchronen Freigabeprüfungen erneut geprüft. Neue Regressionstests für geschlossene Kollegen-Apps, Freigaben, Löschungen, Wiederholungen und den Landealarm.
+- Add-on aktualisieren; die neue iOS-Version ergänzt Alarmoption, unmittelbare Übergabe und explizite Löschungen. APNs-Annahme bleibt keine Zustellbestätigung des Endgeräts.
+
 ## 1.2.28
 
 - AIBT beendet den zentralen Koordinatenabruf nicht mehr vorzeitig. Fehlende AIBT-Koordinaten werden ohne App-Kennzeichen automatisch nachgeladen.

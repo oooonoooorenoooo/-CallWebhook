@@ -1,3 +1,11 @@
+## 1.2.30
+
+- Fällige FR24-Abfragen mehrerer zentral überwachter Flüge werden pro Zugang und identischem Abfragefenster gebündelt. Damit verbrauchen fünf, acht oder zwölf verschiedene Flüge nicht mehr jeweils zwei einzelne HTTP-Anfragen und verdrängen sich nicht gegenseitig aus dem Minutenbudget.
+- Der bestehende Takt und das Limit von acht FR24-HTTP-Anfragen pro Minute bleiben erhalten. Anbieter-Sperren und Wiederholungsfristen gelten weiterhin. Gebündelte Antworten werden mit den bisherigen Flug-ID-, Strecken- und Tagesprüfungen jedem einzelnen Flug zugeordnet.
+- Keine vorsorglichen Zusatzabfragen: Ein Batch wird erst ausgeführt, wenn ein fälliger Flug die entsprechende Abfrage tatsächlich benötigt. Fehler und Teilantworten lösen keine Kette von Einzelabfragen aus.
+- Neue Regressionstests verwenden den tatsächlichen Provider mit simulierten HTTP-Antworten für fünf, acht und zwölf unterschiedliche Flüge. Die Bündelung senkt HTTP-Anfragen; FR24-Credits richten sich weiterhin nach den zurückgegebenen Flugdaten.
+- Enthält die gemeinsame Hintergrundüberwachung und den späten Drei-Minuten-Voralarm aus 1.2.29. Das Add-on muss auf dem Pi aktualisiert werden.
+
 ## 1.2.29
 
 - Gemeinsam freigegebene Geräte erhalten neue Kollegen-Überwachungen direkt vom Pi, auch wenn ihre App geschlossen ist. Bestehende Alarm- und Kalenderregeln gelten weiterhin je Gerät.

@@ -21,6 +21,14 @@ werden weiterverwendet. Die vollständige Zustellprüfung erfolgt mit gesperrten
 Geräten und geschlossenen Apps; ein grüner Build oder APNs-Erfolg allein reicht
 dafür nicht aus.
 
+Ab 1.2.30 bündelt der Pi fällige FR24-Abfragen verschiedener überwachter Flüge
+pro Zugang und identischem Zeitfenster. So bleiben auch bei mehreren Kollegen
+genügend HTTP-Anfragen für aktuelle Anflugdaten verfügbar. Das bestehende
+Limit von acht Anfragen pro Minute und Anbieter-Sperrfristen bleiben erhalten.
+Die Bündelung spart HTTP-Anfragen, nicht automatisch FR24-Credits: Diese hängen
+von den zurückgegebenen Flugdaten ab. Es werden keine zusätzlichen Flüge
+vorsorglich abgefragt.
+
 ## ComatAlarm: BER-Abfragen auf dem Pi (ab 1.2.22)
 
 Die Flugabfrage und die gemeinsame API-Statusprüfung senden dieselben

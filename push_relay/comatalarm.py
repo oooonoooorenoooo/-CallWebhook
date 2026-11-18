@@ -234,6 +234,22 @@ class FlightProvider:
         self.requests = {}
         self.credentials = {}
         self.aware_cache = {}
+        from .fr24_batch import FR24BatchRequests
+        self.batches = FR24BatchRequests()
+
+    def plan_batches(self, flights, now):
+        from .fr24_batch import planned_queries
+        queries = []
+        for flight, token in flights:
+            try:
+                if not isinstance(token, str):
+                    continue
+                queries.extend((token, path, params) for path, params in planned_queries(flight, now))
+            except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
+                # A damaged stored candidate must not interrupt other devices.
+                # Their normal per-device poll isolation remains authoritative.
+                continue
+        self.batches.plan(queries, now)
 
     async def previous_arrival(self, flight, fr24, now):
         """Pi-only lookup; persisted throttles survive client reposts and restarts."""
@@ -330,7 +346,7 @@ class FlightProvider:
         self.cache = {k: v for k, v in self.cache.items() if now - v[0] < 120}
         result = {}
         async with ClientSession(timeout=ClientTimeout(total=10)) as session:
-            async def fr24(path, params):
+            async def fetch_fr24(path, params):
                 identity = cache_key[0]
                 if self.cooldown.get(identity, 0) > now:
                     raise RuntimeError("FR24: Abfrage pausiert (Tarif, Token oder Limit prüfen)")
@@ -348,6 +364,9 @@ class FlightProvider:
                     if not isinstance(body, dict) or not isinstance(body.get("data"), list):
                         raise RuntimeError("FR24: Antwortformat ungültig")
                     return body["data"]
+
+            async def fr24(path, params):
+                return await self.batches.request(token, path, params, now, fetch_fr24)
 
             if flight.get("_central") and departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now:
                 # Recover the BER turnaround, not this departure's later arrival
@@ -1149,6 +1168,22 @@ class ComatAlarm:
                             int(now), len(rows), sum(r['expires'] > now for r in rows),
                             sum(r['expires'] <= now for r in rows), sum(r['expires'] > now and r['server_polling'] for r in rows))
         self.provider.credentials = json.loads(self.db.execute("SELECT credentials FROM comat_api_status WHERE id=1").fetchone()[0])
+        # Plan only the same authorized, due central subscriptions the worker is
+        # about to visit. No network request occurs until lookup needs a member.
+        if isinstance(self.provider, FlightProvider):
+            batch_flights = []
+            for row in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND server_polling=1", (now,)).fetchall():
+                if row['id'] not in self.shared_authorized or now-row['last_poll'] < 60:
+                    continue
+                try:
+                    flights = json.loads(row['watch'])
+                    if not isinstance(flights, list):
+                        continue
+                    batch_flights.extend((f, self.shared_tokens.get(row['id'], row['api_token']))
+                                         for f in flights if isinstance(f, dict) and self.shared_monitoring.current(f, now))
+                except (ValueError, TypeError):
+                    continue
+            self.provider.plan_batches(batch_flights, now)
         delivered_devices = set()
         for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND (server_polling=1 OR foreground_until<=?)", (now,now)).fetchall():
             try:

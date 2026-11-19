@@ -1,5 +1,25 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: AIBT-Koordinaten nachbessern (ab 1.2.32)
+
+Der Push-Dienst verarbeitet die FR24-Ereignisposition und die vollständige
+Flugspur mit deren jeweiligem Antwortformat. Tatsächliche AIBT-Zeit und
+zugehörige Koordinate bleiben zusammen; eine Position eines anderen Legs
+oder eines älteren Ankunftsereignisses wird nicht übernommen.
+
+Sind die Koordinaten bei den ersten Abfragen noch nicht verfügbar, prüft der
+Pi innerhalb von 24 Stunden nach AIBT mit zunehmenden Abständen weiter.
+Das gilt auch für belegte, gespeicherte gemeinsame Archivankünfte, deren
+aktive Überwachung bereits beendet wurde. Anbieterlimits und Löschungen
+bleiben wirksam; die Nachbesserung erzeugt keine neuen Flugkarten oder
+wiederholten Alarme. Der reine Verlaufsdownload selbst führt weiterhin
+keine Flugdatenabfragen aus.
+
+Die passende neue iPhone-App übernimmt nachgebesserte Koordinaten auch dann,
+wenn ein älterer lokaler Reparaturversuch erfolglos war. Manuell festgelegte
+Parkpositionen bleiben erhalten. Eine vorhandene, noch nicht eindeutig
+zugeordnete Koordinate wird nicht mehr als fehlende Koordinate bezeichnet.
+
 ## ComatAlarm: Pi-Verlauf auf dem iPhone (ab 1.2.31)
 
 Ein Flug, der auf der Pi-Oberfläche übernommen und bei geschlossener iPhone-App

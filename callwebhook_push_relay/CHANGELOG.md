@@ -1,3 +1,12 @@
+## 1.2.32
+
+- Korrigiert die Verarbeitung der offiziellen FR24-Flugspurantwort. `flight-tracks` liefert eine Liste an der JSON-Wurzel; vorhandene AIBT-Koordinaten aus dieser Antwort werden nicht mehr als ungültiges Antwortformat verworfen.
+- AIBT-Zeit und Koordinate werden gemeinsam aus dem passenden Ereignis übernommen. Ein neueres Ankunftsereignis darf keine Koordinate eines älteren Ereignisses erben. Die gemessene, stationäre Ereignisposition hat Vorrang vor ergänzenden Gate-Koordinaten.
+- Fehlende Koordinaten werden nach sechs frühen Leerantworten innerhalb des bestehenden 24-Stunden-Zeitraums mit zunehmenden Abständen weiter nachgeprüft. Anbieter-Sperren und das gemeinsame Minutenbudget bleiben wirksam.
+- Bereits gespeicherte Archivankünfte aus belegter gemeinsamer Überwachung können auf dem Pi begrenzt nachgebessert werden. Der Verlauf wird dabei nicht wieder zur aktiven Flugüberwachung und erzeugt keine wiederholten Alarme. Freigaben und Löschungen werden vor und nach dem Abruf berücksichtigt.
+- Alte, mit dem vorhandenen BER-Index nicht zuordenbare Koordinaten erhalten eine begrenzte Prüfung mit der korrigierten Ereignisauswertung. Standplätze werden weiterhin anhand echter Koordinaten geprüft.
+- Die passende iPhone-Version verhindert, dass ein erfolgloser früherer Reparaturversuch später eintreffende gültige Koordinaten und bestätigte Standplätze verdrängt. Die Anzeige unterscheidet fehlende Koordinaten, gesperrte Standplatzdaten und eine noch offene Zuordnung.
+
 ## 1.2.31
 
 - Abgeschlossene gemeinsame und über die Pi-Oberfläche übernommene Flüge erhalten einen eigenen, authentifizierten Verlaufsabgleich für die iPhone-App. Die Übernahme funktioniert auch nach Ablauf der aktiven Überwachung.

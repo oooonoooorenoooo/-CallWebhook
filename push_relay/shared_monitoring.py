@@ -30,12 +30,11 @@ class SharedMonitoring:
 
     def retain(self, incoming, prior, now):
         """A stale phone snapshot cannot delete a newly shared subscription."""
-        from .comatalarm import same_occurrence, departure_from_ber
+        from .comatalarm import same_occurrence
+        from .aibt_recovery import retain_pending
         result = [f for f in incoming if not self.removed(f)]
         for f in prior:
-            repairing = (not departure_from_ber(f) and f.get('aibt') and not f.get('aibt_position')
-                         and not f.get('cancelled') and not f.get('diverted')
-                         and now-f['aibt'] <= 86400 and f.get('_aibt_recovery_attempts', 0) < 6)
+            repairing = retain_pending(f, now)
             # Importing a completed flight into phone history removes it from
             # the next active handoff. Finish only its already-running bounded
             # coordinate repair; never recreate a watch from archived records.

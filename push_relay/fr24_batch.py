@@ -14,17 +14,16 @@ from zoneinfo import ZoneInfo
 def planned_queries(flight, now):
     """Mirror central poll eligibility before offering summary/live requests."""
     from .comatalarm import arrival_tracking_expired, departure_from_ber, stamp, utc_query_time
+    from .aibt_recovery import due, position
     departing = departure_from_ber(flight)
     if (arrival_tracking_expired(flight, now) or flight.get('cancelled') or flight.get('diverted')
             or (departing and stamp(flight.get('atd')) and flight['atd'] <= now)):
         return []
-    repairing = bool(not departing and flight.get('aibt') and not flight.get('aibt_position'))
+    repairing = bool(not departing and flight.get('aibt') and not position(flight))
     outbound = bool(flight.get('track_outbound') and not flight.get('_outbound', {}).get('atd'))
     if not departing and flight.get('aibt') and not repairing and not outbound:
         return []
-    recovery_due = (repairing and now-flight['aibt'] <= 86400
-                    and flight.get('_aibt_recovery_attempts', 0) < 6
-                    and now-flight.get('_aibt_recovery_at', 0) >= 300)
+    recovery_due = repairing and due(flight, now)
     if repairing and not recovery_due and not outbound:
         return []
     identifier = flight.get('fr24ID')

@@ -292,9 +292,9 @@ class BatchPlanningTests(unittest.IsolatedAsyncioTestCase):
         base = flights(1, now)[0]
         cases = [dict(base, cancelled=True), dict(base, diverted=True),
                  dict(base, origin='BER', destination='FRA', atd=now-100),
-                 dict(base, aibt=now-60, aibt_position={'latitude': 52, 'longitude': 13}),
+                 dict(base, aibt=now-60, aibt_position={'latitude': 52.36507, 'longitude': 13.5053, 'timestamp': now-60}),
                  dict(base, aibt=now-60, _aibt_recovery_at=now-10),
-                 dict(base, aibt=now-60, _aibt_recovery_attempts=6),
+                 dict(base, aibt=now-60, _aibt_recovery_attempts=6, _aibt_recovery_at=now, _aibt_evidence_revision=2),
                  dict(base, fr24ID=None, reference=now+86400)]
         for candidate in cases:
             with self.subTest(candidate=candidate):

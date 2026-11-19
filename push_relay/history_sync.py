@@ -16,7 +16,9 @@ BERLIN = ZoneInfo('Europe/Berlin')
 PREFIX = 'PI_HISTORY_'
 SCALARS = ('number', 'reference', 'created_at', 'fr24ID', 'origin', 'destination',
            'registration', 'atd', 'ata', 'aibt', 'gate', 'gate_source', 'stand',
-           'cancelled', 'diverted', 'packets', 'track_outbound', 'outbound_number')
+           'cancelled', 'diverted', 'packets', 'track_outbound', 'outbound_number',
+           '_aibt_recovery_attempts', '_aibt_recovery_at', '_aibt_recovery_retry_at',
+           '_aibt_evidence_revision', '_parking_lookup_status')
 SCHEDULE = ('std', 'etd', 'atd', 'sta', 'eta', 'ata', 'aibt', 'eibt', 'gate',
             'gate_source', 'registration', 'aircraftType', 'origin', 'destination',
             'cancelled', 'diverted')
@@ -105,12 +107,20 @@ class HistorySync:
         schedule = scalar_fields(flight.get('_schedule'), SCHEDULE)
         if schedule:
             result['_schedule'] = schedule
+        recovery = scalar_fields(flight.get('_parking_recovery'),
+                                 ('state', 'last_attempt', 'next_attempt', 'attempts', 'evidence_revision', 'error'))
+        if recovery:
+            recovery.setdefault('next_attempt', None)
+            result['_parking_recovery'] = recovery
 
         def position(value):
             if not isinstance(value, dict):
                 return None
             if valid_coordinate(value.get('latitude'), value.get('longitude')) and stamp(value.get('timestamp')):
-                return {k: value[k] for k in ('latitude', 'longitude', 'timestamp')}
+                point = {k: value[k] for k in ('latitude', 'longitude', 'timestamp')}
+                if value.get('source') in ('fr24_event', 'fr24_gate_reference', 'fr24_historic', 'fr24_track'):
+                    point['source'] = value['source']
+                return point
             return None
 
         point = position(flight.get('aibt_position'))
@@ -166,6 +176,11 @@ class HistorySync:
             result.pop('stand', None)
             if incoming.get('_inbound', {}).get('aibt_position') and incoming.get('stand'):
                 result['stand'] = incoming['stand']
+        if result.get('aibt_position') and not departure_from_ber(result):
+            from .aibt_recovery import position
+            if not position(result):
+                result.pop('aibt_position', None)
+                result.pop('stand', None)
         return result
 
     def capture(self, flights, now=None, created_known=None, baseline=False, observed_at=None):

@@ -1,3 +1,17 @@
+## 1.2.33
+
+- Die aktualisierte Home-Assistant-Ansicht kann Ereignisse, Push-Versand und Fehlerprotokoll kopieren und als Textdatei herunterladen. Die Dashboard-View muss zusätzlich zum Add-on aktualisiert werden; gespeicherte Home-Assistant-Dashboards werden nicht automatisch ersetzt.
+- Der Ankunftsabgleich protokolliert auch erfolgreiche Ereignisantworten, aus denen keine passende AIBT übernommen wurde. Abfragezeitpunkt, Übernahme, Anbieterfehler und Abfragepausen bleiben unterscheidbar; Rohantworten und Zugangsdaten gelangen nicht ins Diagnosejournal.
+- Priorisiert den AIBT-Ereignisabgleich für gelandete Flüge vor allgemeinen Flugplanabfragen. Der schnelle Pfad arbeitet im 15-Sekunden-Arbeitszyklus und bündelt bis zu 15 echte Flug-IDs pro Ereignisabfrage. Zeit, Ereigniskoordinate, Stand und Push werden in demselben Verarbeitungsschritt weitergegeben.
+- Ergänzende BER-, FlightStats- und FlightAware-Abfragen sowie der periodische API-Statuscheck halten den Alarmdurchlauf nicht mehr während ihrer Netzwerkwartezeit auf. Fertige Flugplanwerte werden weiterhin durch denselben Arbeitszyklus mit erneuter Freigabe- und Zustandsprüfung übernommen.
+- Behebt einen blockierten Drei-Minuten-Voralarm: Eine gültige FR24-Liveantwort muss kein zusätzliches `on_ground`-Feld enthalten. Explizite Bodenmeldungen werden weiterhin ausgeschlossen; Frische, Höhe, Geschwindigkeit, Kurs und Sinkflug bleiben maßgeblich.
+- Plausible Endanflüge erhalten einen gebündelten Live-Abgleich alle 30 Sekunden, damit der bisherige 60-Sekunden-Cache das kurze Warnfenster nicht überspringt. Das gemeinsame Limit von acht FR24-HTTP-Anfragen pro Minute bleibt wirksam.
+- Schließt die Lücke zwischen bestätigter Landung und noch nicht gespeicherter AIBT. Das Ende der regelmäßigen Abfragen nach 25 Minuten beendet die gezielte Nachholung des Ankunftsereignisses nicht mehr. Sie läuft mit Warteabständen bis 24 Stunden nach ATA weiter.
+- Auch bereits archivierte Ankünfte mit ATA, aber ohne AIBT können das tatsächliche FR24-Ankunftsereignis samt Koordinate erhalten. Bereits vorhandene gemeinsame Überwachungen bleiben dafür auf dem Pi erhalten.
+- Die passende iPhone-App kann einen eigenen, vom Pi ausdrücklich unterstützten Reparaturauftrag für solche Verlaufseinträge übergeben. Dieser Auftrag erzeugt keine neue aktive Überwachung und spielt keine früheren Alarme erneut ab. Gelöschte Einträge und Gerätefreigaben werden weiterhin geprüft.
+- Ein normaler Pi-Flug ohne AIBT wird auf dem iPhone nicht allein wegen des lokalen 25-Minuten-Zeitlimits als ausdrücklicher Pi-Archiveintrag behandelt. Die Anzeige unterscheidet eine noch offene Ankunftsnachholung von einer bestätigten AIBT.
+- Der Nachholpfad verwendet die tatsächliche FR24-Flug-ID, Flugtag und Strecke. AIBT wird nicht aus EIBT, Stillstand oder einem Zeitlimit abgeleitet. Das gemeinsame Minutenbudget, Anbietersperren und die Prüfung echter Standplatzkoordinaten bleiben erhalten.
+
 ## 1.2.32
 
 - Korrigiert die Verarbeitung der offiziellen FR24-Flugspurantwort. `flight-tracks` liefert eine Liste an der JSON-Wurzel; vorhandene AIBT-Koordinaten aus dieser Antwort werden nicht mehr als ungültiges Antwortformat verworfen.

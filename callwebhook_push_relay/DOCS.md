@@ -1,5 +1,56 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: Protokolle kopieren und herunterladen (ab 1.2.33)
+
+Die aktualisierte Dashboard-View bietet Kopieren und Textdownload für
+Ereignisse, Push-Versand und Fehlerprotokoll. Die Ausgabe verwendet die bereits
+geladenen, bereinigten Monitordaten mit Zeitstempeln. Der Export selbst führt
+keine zusätzlichen Anbieterabfragen aus.
+
+Neben dem Add-on muss die bestehende ComatAlarm-View im Home-Assistant-Dashboard
+durch `homeassistant/dashboards/comatalarm.yaml` aus diesem Stand ersetzt werden.
+Die genaue Anleitung steht in `homeassistant/dashboards/COMATALARM.md`.
+Ein Add-on-Update ersetzt keine gespeicherte Dashboard-Konfiguration.
+
+## ComatAlarm: zeitnahe Ankunfts- und Landealarme (ab 1.2.33)
+
+Der Pi verarbeitet fällige Ankunftsereignisse vor allgemeinen Flugplanabfragen.
+Nach bestätigter Landung nutzt er den 15-Sekunden-Arbeitszyklus für einen
+gezielten FR24-Ereignisabgleich. Bis zu 15 Flug-IDs teilen sich eine Abfrage.
+Eine erkannte AIBT, ihre Koordinate und der zugeordnete Stand werden gemeinsam
+gespeichert; der zugehörige Push wird anschließend direkt bearbeitet.
+
+Ergänzende BER-, FlightStats- und FlightAware-Abfragen laufen in einem begrenzten
+Hintergrundcache. Ihre Netzwerkwartezeit blockiert den Alarmdurchlauf nicht.
+Der bestehende Arbeitszyklus übernimmt fertig verfügbare Flugplanwerte erst nach
+erneuter Prüfung von Gerätefreigabe und Flugzustand. Auch der periodische
+API-Statuscheck wartet im Hintergrund. Der 15-Sekunden-Takt ist die Zielkadenz;
+die Laufzeit der FR24-Abfrage und die anschließende Push-Übertragung bleiben
+zusätzliche Verarbeitungsschritte.
+
+Bei einem plausiblen Endanflug werden aktuelle Flugdaten gezielt alle
+30 Sekunden abgeglichen. Der Drei-Minuten-Voralarm benötigt zwei passende
+Beobachtungen, eine aktuelle FR24-ETA und einen plausiblen Sinkflug. Ein
+fehlendes zusätzliches Bodenstatus-Feld verhindert die Auswertung nicht;
+explizite Bodenmeldungen und bestätigte Landungen schließen den Voralarm aus.
+Die Frischegrenzen und das gemeinsame Minutenbudget bleiben wirksam.
+
+## ComatAlarm: fehlende AIBT nach bestätigter Landung (ab 1.2.33)
+
+Ist die Landung (ATA) bestätigt, aber die tatsächliche Ankunft am Stand (AIBT)
+noch nicht übernommen, fragt der Pi das Ankunftsereignis gezielt weiter ab.
+Nach dem bisherigen 25-Minuten-Zeitfenster folgen begrenzte Nachprüfungen mit
+Warteabständen bis 24 Stunden nach ATA. Die vom Anbieter gelieferte AIBT und
+die zugehörige Position werden gemeinsam gespeichert und im Verlauf verteilt.
+
+Das gilt auch für bereits gespeicherte gemeinsame Archivankünfte. Die passende
+iPhone-App übergibt außerdem eigene offene Verlaufseinträge als gesonderten
+Nachholauftrag, sobald der Pi diese Funktion unterstützt. Der Auftrag legt
+keine neue Überwachung an und löst keine alten Alarme erneut aus. Explizite
+Löschungen, die aktuelle Gerätefreigabe und das bestehende API-Budget gelten
+auch während der Nachholung. EIBT und ein abgelaufenes Zeitlimit ersetzen die
+tatsächliche AIBT nicht.
+
 ## ComatAlarm: AIBT-Koordinaten nachbessern (ab 1.2.32)
 
 Der Push-Dienst verarbeitet die FR24-Ereignisposition und die vollständige
@@ -7,7 +58,7 @@ Flugspur mit deren jeweiligem Antwortformat. Tatsächliche AIBT-Zeit und
 zugehörige Koordinate bleiben zusammen; eine Position eines anderen Legs
 oder eines älteren Ankunftsereignisses wird nicht übernommen.
 
-Sind die Koordinaten bei den ersten Abfragen noch nicht verfügbar, prüft der
+Wurden die Koordinaten bei den ersten Abfragen noch nicht übernommen, prüft der
 Pi innerhalb von 24 Stunden nach AIBT mit zunehmenden Abständen weiter.
 Das gilt auch für belegte, gespeicherte gemeinsame Archivankünfte, deren
 aktive Überwachung bereits beendet wurde. Anbieterlimits und Löschungen

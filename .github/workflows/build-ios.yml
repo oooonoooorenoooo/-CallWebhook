@@ -66,6 +66,37 @@ jobs:
       - name: Verify ARM64 relay imports
         run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import push_relay.shared_monitoring; import push_relay.landing_alert; import push_relay.fr24_batch; import push_relay.history_sync; import push_relay.aibt_recovery; from push_relay.comatalarm import FlightProvider; FlightProvider(); import run; print('ARM64 relay dependencies ready')"
 
+  comatalarm-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare dashboard browser checks
+        run: |
+          python3 -m venv "$RUNNER_TEMP/dashboard-python"
+          "$RUNNER_TEMP/dashboard-python/bin/pip" install PyYAML
+          npm install --prefix "$RUNNER_TEMP/dashboard-node" playwright@1.62.1
+          node "$RUNNER_TEMP/dashboard-node/node_modules/playwright/cli.js" install --with-deps chromium
+          curl --fail --location --retry 2 https://github.com/custom-cards/button-card/releases/download/v7.0.1/button-card.js -o "$RUNNER_TEMP/button-card.js"
+          printf '%s  %s\n' 5d6e9c6afca01e8014653fa56bb5d6aa9248d832c34fb944a7f2c36329bc22d1 "$RUNNER_TEMP/button-card.js" | sha256sum --check
+      - name: Check copy and downloads with the real dashboard card
+        run: |
+          export PATH="$RUNNER_TEMP/dashboard-python/bin:$PATH"
+          export NODE_PATH="$RUNNER_TEMP/dashboard-node/node_modules"
+          export BUTTON_CARD_BUNDLE="$RUNNER_TEMP/button-card.js"
+          node homeassistant/dashboards/test-monitor.cjs
+          node homeassistant/dashboards/test-monitor-exports.cjs
+          node homeassistant/dashboards/test-monitor-browser.cjs
+      - name: Save dashboard browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comatalarm-dashboard-browser
+          path: /tmp/comat-interaction-*.png
+          if-no-files-found: ignore
+
   development:
     runs-on: macos-26
     steps:
@@ -80,6 +111,11 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/backend-tests"
           "$RUNNER_TEMP/backend-tests/bin/pip" install PyYAML
           "$RUNNER_TEMP/backend-tests/bin/python" -m unittest discover -s tests -v
+      - name: Test ComatAlarm dashboard and diagnostic exports
+        run: |
+          export PATH="$RUNNER_TEMP/backend-tests/bin:$PATH"
+          node homeassistant/dashboards/test-monitor.cjs
+          node homeassistant/dashboards/test-monitor-exports.cjs
       - name: Test HA token lifetime and concurrent renewal
         run: |
           swiftc CallWebhook/HATokenRefresh.swift tests/HATokenRefreshTests.swift -o "$RUNNER_TEMP/ha-token-tests"

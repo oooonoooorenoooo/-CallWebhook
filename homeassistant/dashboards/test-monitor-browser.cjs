@@ -3,6 +3,7 @@
 // BUTTON_CARD_BUNDLE=/path/button-card.js CHROMIUM_PATH=/path/chrome node this-file
 const {chromium}=require('playwright');
 const {spawnSync}=require('node:child_process');
+const {readFileSync}=require('node:fs');
 const {resolve}=require('node:path');
 const assert=require('node:assert/strict');
 const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))['cards'][0]))",process.env.MONITOR_YAML||resolve(__dirname,'comatalarm.yaml')],{encoding:'utf8'}).stdout);
@@ -17,7 +18,14 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   await page.evaluate(()=>{window.cardHelpers={};});
   await page.addScriptTag({path:process.env.BUTTON_CARD_BUNDLE});
   await page.evaluate(config=>{
-   window.calls=[];window.posts=[];window.flightDeleted=false;window.arrivalTracked=false;
+   window.calls=[];window.posts=[];window.flightDeleted=false;window.arrivalTracked=false;window.copiedText='';
+   // Exercise the real textarea selection/click path without using the host clipboard.
+   document.execCommand=command=>{
+    if(command!=='copy')return false;
+    const selected=window.testCard.shadowRoot.activeElement;
+    if(!selected||selected.tagName!=='TEXTAREA'||selected.selectionEnd!==selected.value.length)return false;
+    window.copiedText=selected.value;return true;
+   };
    const now=Date.now()/1000,today=new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin'}).format(new Date());
    const card=document.createElement('button-card');
    window.testCard=card;
@@ -32,7 +40,7 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
      }
      window.calls.push(path);await new Promise(r=>setTimeout(r,30));
      const day=decodeURIComponent(path.split('day=')[1]);
-     return {generated_at:now,cycle_started:now,cycle_finished:now,api_status:{results:{FR24:'OK'}},pushes:{pending:0,accepted:1,expired:0},stand_model:{ready:true},devices:[],events:[],flights:window.flightDeleted?[]:[{key:'a'.repeat(64),number:'LH186',day:today,category:'active',origin:'FRA',destination:'BER',live:{},schedule:{},subscribers:[]}],arrivals:{day:today,fetched_at:now,flights:[{key:'b'.repeat(64),number:'EW207',airline:'Eurowings',origin:'CGN',origin_name:'Köln',reference:now+3600,schedule:{sta:now+3600},tracked:window.arrivalTracked,available:true}]},history:{day,available_days:[today],flights:[{key:'c'.repeat(64),number:'LH194',day,origin:'FRA',destination:'BER',registration:'D-AISP',category:'completed',stand:'B06',aibt:now-3600,live:{alt:100,gspeed:20},schedule:{},subscribers:[{device:'Gerät abc',status:'Registrierung abgelaufen'}]}],events:[]} };
+     return {generated_at:now,cycle_started:now,cycle_finished:now,api_status:{results:{FR24:'OK'}},pushes:{pending:0,accepted:1,expired:0},stand_model:{ready:true},devices:[],api_token:'PRIVATE_TEST_TOKEN',events:[{timestamp:now-10,kind:'event',flight:'LH194',device:'Gerät abc123',message:'Landung bestätigt; AIBT noch nicht übernommen'},{timestamp:now-5,kind:'push_accepted',flight:'LH194',device:'Gerät abc123',message:'alarmLanded: Apple angenommen'},{timestamp:now-1,kind:'error',flight:'LH194',message:'FR24: HTTP 429; Anbieterabfrage fehlgeschlagen'}],flights:window.flightDeleted?[]:[{key:'a'.repeat(64),number:'LH186',day:today,category:'active',origin:'FRA',destination:'BER',live:{},schedule:{},subscribers:[]}],arrivals:{day:today,fetched_at:now,flights:[{key:'b'.repeat(64),number:'EW207',airline:'Eurowings',origin:'CGN',origin_name:'Köln',reference:now+3600,schedule:{sta:now+3600},tracked:window.arrivalTracked,available:true}]},history:{day,available_days:[today],flights:[{key:'c'.repeat(64),number:'LH194',day,origin:'FRA',destination:'BER',registration:'D-AISP',category:'completed',stand:'B06',aibt:now-3600,live:{alt:100,gspeed:20},schedule:{},subscribers:[{device:'Gerät abc',status:'Registrierung abgelaufen'}]}],events:[{timestamp:Date.parse(day+'T12:00:00Z')/1000,kind:'event',flight:'LH194',message:'Verlaufseintrag am ausgewählten Tag'}]} };
     }};
    document.body.append(card);
   },config);
@@ -67,6 +75,27 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   assert.match(await archive.innerText(),/Abgeschlossen · im Verlauf/);
   assert.match(await archive.innerText(),/B06/);
   assert.doesNotMatch(await archive.innerText(),/Registrierung abgelaufen|Positionsdaten|Geschwindigkeit|Distanz|Bis ETA|letzter Zyklus|App-Datenabruf/);
+  const readsBeforeExport=await page.evaluate(()=>window.calls.length),postsBeforeExport=await page.evaluate(()=>window.posts.length);
+  await act(page.locator('button[data-cm-export="pushes"][data-cm-export-mode="copy"]'));
+  await page.waitForFunction(()=>window.copiedText.includes('ComatAlarm · Push-Versand'));
+  assert.match(await page.evaluate(()=>window.copiedText),/Landung: Apple angenommen/);
+  assert.doesNotMatch(await page.evaluate(()=>window.copiedText),/HTTP 429/);
+  assert.match(await page.locator('[data-cm-key="events"]').innerText(),/Push-Versand kopiert/);
+  const historyEvents=page.locator('[data-cm-key="history-events"]');
+  await act(historyEvents.locator(':scope > summary'));
+  const textDownloadPromise=page.waitForEvent('download');
+  await act(page.locator('button[data-cm-export="history"][data-cm-export-mode="txt"]'));
+  const textDownload=await textDownloadPromise;
+  assert.ok(textDownload.suggestedFilename().startsWith('comatalarm-history-'+selected+'-'));
+  assert.match(readFileSync(await textDownload.path(),'utf8'),new RegExp('Ausgewählter Berliner Kalendertag · '+selected));
+  const jsonDownloadPromise=page.waitForEvent('download');
+  await act(page.locator('button[data-cm-export="diagnosis"][data-cm-export-mode="json"]'));
+  const jsonDownload=await jsonDownloadPromise;
+  const exported=readFileSync(await jsonDownload.path(),'utf8'),diagnosis=JSON.parse(exported);
+  assert.equal(diagnosis.selected_history.day,selected);assert.equal(diagnosis.event_count,3);
+  assert.doesNotMatch(exported,/PRIVATE_TEST_TOKEN|api_token/);
+  assert.equal(await page.evaluate(()=>window.calls.length),readsBeforeExport,'exports use the loaded snapshot');
+  assert.equal(await page.evaluate(()=>window.posts.length),postsBeforeExport,'export is not a monitor command');
   const arrivals=page.locator('details[data-cm-key="arrivals"]');
   await act(arrivals.locator(':scope > summary'));
   const airline=page.locator('details[data-cm-key="airline:Eurowings"]');
@@ -91,7 +120,7 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   assert.deepEqual(errors,[]);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'no horizontal overflow');
   await page.screenshot({path:'/tmp/comat-interaction-'+(mobile?'touch':'desktop')+'.png',fullPage:true});
-  console.log('PASS real button-card: '+(mobile?'touch':'mouse + keyboard')+', nested details, history, clean archive, add monitoring and confirmed deletion');
+  console.log('PASS real button-card: '+(mobile?'touch':'mouse + keyboard')+', nested details, history, clean archive, copy, filtered TXT/JSON downloads, add monitoring and confirmed deletion');
   await page.close();
  }
  }finally{await browser.close();}

@@ -1,13 +1,36 @@
 # ComatAlarm im Home-Assistant-Dashboard
 
-Der Reiter zeigt gespeicherte Pi-Zustände. Die Ankunftstabelle lädt auf Anforderung eine gemeinsame BER-Tagesliste; daraus können Administratoren Flüge überwachen oder bestehende Flüge vom Pi entfernen. Die ComatAlarm-App benötigt kein Update.
+Der Reiter zeigt gespeicherte Pi-Zustände. Die Ankunftstabelle lädt auf Anforderung eine gemeinsame BER-Tagesliste; daraus können Administratoren Flüge überwachen oder bestehende Flüge vom Pi entfernen. Ereignisse, Push-Versand und Fehler lassen sich direkt kopieren oder als Textdatei herunterladen. Die Exportfunktionen benötigen kein App- oder Add-on-Update, wenn die bisherige Pi-Übersicht bereits funktioniert.
 
 ## Einrichten
 
-1. CallWebhook Push-Dienst auf 1.2.26 aktualisieren.
-2. CallWebhook Bootstrap auf 1.2.9 aktualisieren und einmal starten. Er installiert das HA-Backend 21 (Integration 1.2.17) und fordert einen Home-Assistant-Neustart an. Bestehende Konfiguration und Schlüssel bleiben erhalten.
-3. Die View aus `comatalarm.yaml` unter `views:` des vorhandenen Dashboards einfügen. Das vorhandene `custom:button-card` muss installiert sein. Für Reno wurde außerdem das vollständige bestehende Dashboard mit dem Reiter unmittelbar nach Home vorbereitet.
-4. Als Home-Assistant-Administrator öffnen. Die Ansicht aktualisiert alle 15 Sekunden. Es wird kein Schlüssel in YAML oder Browser gespeichert.
+1. Den aktuellen CallWebhook Push-Dienst und die vorhandene Home-Assistant-Integration verwenden. Bei einer Ersteinrichtung installiert der aktuelle CallWebhook Bootstrap die Integration; den danach angeforderten Home-Assistant-Neustart ausführen. Eine bereits funktionierende Monitoransicht benötigt für Kopieren und Download keine erneute Einrichtung und keine neuen Schlüssel.
+2. Das vorhandene `custom:button-card` muss installiert sein. Die Datei [comatalarm.yaml](comatalarm.yaml) enthält genau eine Dashboard-View; sie gehört unter `views:` des vorhandenen Dashboards.
+3. Als Home-Assistant-Administrator öffnen. Die Ansicht aktualisiert alle 15 Sekunden. Es wird kein Einrichtungsschlüssel in YAML oder Browser gespeichert.
+
+## Vorhandene Ansicht aktualisieren
+
+Die Dashboard-Konfiguration wird in Home Assistant gespeichert. Ein Update des Push-Dienst-Add-ons, einschließlich 1.2.33, ersetzt diese Konfiguration nicht automatisch. Die neuen Export-Schaltflächen erscheinen erst nach Übernahme der aktualisierten View. Sie können unabhängig vom Add-on-Update verwendet werden.
+
+1. Im vorhandenen Dashboard den YAML-/Rohkonfigurationseditor öffnen und den bisherigen Stand sichern.
+2. Die aktuelle [comatalarm.yaml](comatalarm.yaml) öffnen und den vollständigen Inhalt übernehmen.
+3. Wenn der Editor die **einzelne View** bearbeitet, deren gesamten Inhalt durch diese Datei ersetzen. Wenn der Editor das **gesamte Dashboard** mit `views:` zeigt, ausschließlich den Listeneintrag mit `path: comatalarm` ersetzen. Der Dateiinhalt bildet einen einzelnen Eintrag dieser Liste; Listenstrich und Einrückung entsprechend den anderen Views beibehalten. Alle übrigen Views bleiben bestehen. Existiert der Reiter noch nicht, diesen Eintrag unter `views:` ergänzen, beispielsweise unmittelbar nach Home.
+4. Speichern und den ComatAlarm-Reiter neu laden. Oben muss **Diagnose teilen** mit **Kopieren**, **.txt herunterladen** und **JSON herunterladen** erscheinen.
+
+Im Repository ist die einzelne ComatAlarm-View vorhanden. Eine vollständige, aktuelle Reno-Dashboarddatei liegt hier nicht vor; die View darf deshalb nicht als Ersatz für das gesamte vorhandene Dashboard eingefügt werden.
+
+## Protokolle kopieren und herunterladen
+
+- **Ereignisse & Push-Versand** öffnen. Die beiden Listen haben jeweils eigene Schaltflächen **Kopieren** und **.txt herunterladen**. Ereignisse enthalten keine Push- oder Fehlerzeilen; Push-Versand enthält die erkannten Versandresultate einschließlich fehlgeschlagener oder verworfener Meldungen.
+- **Fehlerprotokoll** öffnen und dort kopieren oder herunterladen. Diese Auswahl enthält Dienstfehler und fehlgeschlagenen Push-Versand.
+- Für einen bestimmten Tag **Verlauf** öffnen, den Tag wählen und warten, bis dessen Daten geladen sind. Unter **Ereignisse an diesem Tag** kopieren oder herunterladen. Während eines Tageswechsels werden keine alten Daten unter dem neu gewählten Datum exportiert.
+- **Diagnose teilen** oben erfasst die angezeigten Flugwerte, die letzten angezeigten Protokolle, Dienst-/API-Status, Push-Zähler und den aktuell gewählten Verlaufstag. **Kopieren** und **.txt herunterladen** liefern eine lesbare Textfassung; **JSON herunterladen** liefert dieselben freigegebenen Daten strukturiert für die technische Auswertung.
+
+Jeder Export nennt Exportzeit, Pi-Datenstand, Empfangszeit im Dashboard, gewählten Zeitraum und Filter sowie die enthaltenen Ereigniszeiten. Zeitangaben enthalten das Datum mit Jahr, Berliner Zeit einschließlich UTC-Abstand und UTC. Eine unterbrochene Verbindung wird als letzter gespeicherter Stand kenntlich gemacht. Die allgemeinen Protokolle umfassen die letzten bis zu 150 angezeigten Einträge; die Tagesauswahl gilt nur für das Tagesjournal. Die Gesamtdiagnose benennt beide Bereiche getrennt. Ein leeres Fehlerprotokoll bedeutet, dass in dieser Auswahl kein gespeicherter Fehler vorliegt; es belegt keinen erfolgreichen Abruf jedes einzelnen Flugwerts.
+
+**Kopieren** versucht zuerst die Browser-Zwischenablage und anschließend die verfügbare Textauswahl-Kopierfunktion. Sind beide gesperrt, erscheint ein markierbares Textfeld zum manuellen Kopieren. Der Download verwendet eine lokale UTF-8-Datei mit festem Namensmuster, zum Beispiel `comatalarm-history-2026-11-20-2026-11-20T08-30-00-000Z.txt`. Die Oberfläche bestätigt den gestarteten Download; in einer App oder einem Browser ohne Downloadfreigabe kann die Kopierfunktion verwendet werden.
+
+Die Schaltflächen verwenden nur den bereits autorisiert geladenen Monitorstand. Sie starten keine zusätzlichen Anbieterabfragen und senden nichts an Dritte. Exportiert werden ausdrücklich freigegebene Anzeigefelder; Gerätepseudonyme bleiben erhalten, Zugangsdaten, Firebase-UIDs, APNs-Tokens, Request-Header und rohe Anbieterantworten bleiben ausgeschlossen. Eine APNs-Annahme bleibt auch im Export eine Annahme durch Apple, keine Zustell- oder Lesebestätigung des iPhones.
 
 ## Bedeutung
 
@@ -31,9 +54,9 @@ Der Pi archiviert automatisch den letzten bekannten Stand je Flugtag vor dem Ent
 
 Wartend bedeutet: kein bestätigter Abflug und keine aktuelle Luftposition. Aktiv umfasst abgeflogene oder gelandete, noch nicht am Stand bestätigte Ankünfte. Abgeschlossen bedeutet AIBT bei Ankünften, ATD bei Abflügen ab BER, Ende des vorhandenen Ankunfts-Nachlaufs ohne AIBT oder Annullierung/Umleitung. Archivierte und abgeschlossene Kacheln heißen „Abgeschlossen · im Verlauf“. Sie enthalten nur Flugidentität, Flugplanzeiten, Parkposition/Gate, Pakete und gegebenenfalls Vor-/Folgeflug. Live-Telemetrie, Positionsalter und Registrierungs-/Gerätestatus entfallen. Push-Informationen stehen ausschließlich im Ereignisbereich. Noch laufende heutige Flüge werden nicht zusätzlich als abgeschlossen im Verlauf dargestellt.
 
-Frontend-Regressionsprüfung: `node homeassistant/dashboards/test-monitor.cjs` (Python mit PyYAML erforderlich).
+Frontend-Regressionsprüfungen: `node homeassistant/dashboards/test-monitor.cjs` und `node homeassistant/dashboards/test-monitor-exports.cjs` (Python mit PyYAML erforderlich). Die Exportprüfung verwendet synthetische Daten und prüft Abschnittsfilter, Berliner Tagesgrenzen, Datenalter, ausgeschlossene Zugangsdaten, Zwischenablage-Fallback, manuelle Textauswahl und UTF-8-Dateien.
 
-Interaktionen werden zusätzlich mit der echten `button-card` im Browser geprüft: `BUTTON_CARD_BUNDLE=/pfad/button-card.js CHROMIUM_PATH=/pfad/chromium node homeassistant/dashboards/test-monitor-browser.cjs` (Playwright und PyYAML erforderlich). Der Test umfasst Maus, Tastatur, Touch, verschachtelte Flugdetails, Zustandserhalt bei Aktualisierung und Tagesauswahl. Der Inhaltsbereich aktiviert eigene Pointer-Ereignisse und trennt seine Bedienelemente vom Action-Handler der umgebenden Karte, damit dieser das Aufklappen nicht verhindert. Die Prüfung umfasst auch das Hinzufügen einer Überwachung, Bestätigen/Abbrechen des Löschens und bereinigte Archivkacheln.
+Interaktionen werden zusätzlich mit der echten `button-card` im Browser geprüft: `BUTTON_CARD_BUNDLE=/pfad/button-card.js CHROMIUM_PATH=/pfad/chromium node homeassistant/dashboards/test-monitor-browser.cjs` (Playwright und PyYAML erforderlich). Der Test umfasst Maus, Tastatur, Touch, verschachtelte Flugdetails, Zustandserhalt bei Aktualisierung, Tagesauswahl, Kopieren sowie TXT-/JSON-Downloads. Der Inhaltsbereich aktiviert eigene Pointer-Ereignisse und trennt seine Bedienelemente vom Action-Handler der umgebenden Karte, damit dieser das Aufklappen oder die Textauswahl nicht verhindert. Die Prüfung umfasst auch das Hinzufügen einer Überwachung, Bestätigen/Abbrechen des Löschens und bereinigte Archivkacheln.
 
 
 ## Ankunftstabelle und Löschen

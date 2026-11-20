@@ -47,7 +47,7 @@ cards:
        },true);
        // Keep the parent button-card action handler from cancelling native touch
        // clicks or keyboard activation. Do not prevent scrolling/default actions.
-       const control=event=>event.target.closest?.('.cm summary, .cm button');
+       const control=event=>event.target.closest?.('.cm summary, .cm button, .cm textarea');
        for(const type of ['touchstart','touchend','touchcancel','mousedown','keydown']){
          card.shadowRoot.addEventListener(type,event=>{if(control(event))event.stopPropagation();},true);
        }
@@ -65,6 +65,11 @@ cards:
            return;
          }
          if(target.disabled)return;
+         if(target.dataset.cmExport){
+           event.preventDefault();
+           card._comatExport?.(target.dataset.cmExport,target.dataset.cmExportMode);
+           return;
+         }
          const action=target.dataset.cmAction;
          if(action){
            event.preventDefault();
@@ -85,7 +90,7 @@ cards:
           card._comatCommandMessage=result.message||'';card._comatConfirm='';
         }).catch(error=>{
           const code=error?.status_code||error?.status;
-          card._comatCommandError=code===409?'Aktion nicht möglich. Ankunftstabelle aktualisieren und freigegebene Pi-Geräteregistrierung prüfen.':'Aktion fehlgeschlagen. Push-Dienst 1.2.26 und Bootstrap 1.2.9 sowie die Verbindung prüfen.';
+          card._comatCommandError=code===409?'Aktion nicht möglich. Ankunftstabelle aktualisieren und freigegebene Pi-Geräteregistrierung prüfen.':'Aktion fehlgeschlagen. Push-Dienst, vorhandene Home-Assistant-Integration und Verbindung prüfen.';
         }).finally(()=>{clearTimeout(commandTimeout);card._comatCommandBusy=false;card._comatFetchAt=0;redraw();});
         redraw();
       };
@@ -114,7 +119,7 @@ cards:
       const row=(label,value)=>`<div class="kv"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
       const opened=key=>card._comatOpen[key]?' open':'';
       const section=(key,title,body,count='')=>`<details class="section" data-cm-key="${esc(key)}"${opened(key)}><summary><span>${esc(title)}</span>${count!==''?pill(count):''}</summary><div class="section-body">${body}</div></details>`;
-      const flags={alarmTakeoff:'Abflug',alarmLanded:'Landung',alarmGate:'Gate',alarmParking:'Parkposition',alarmCancelled:'Annullierung',alarmDiverted:'Umleitung'};
+      const flags={alarmTakeoff:'Abflug',alarmPrelanding:'Vor Landung',alarmLanded:'Landung',alarmGate:'Gate',alarmParking:'Parkposition',alarmCancelled:'Annullierung',alarmDiverted:'Umleitung'};
       const message=v=>Object.entries(flags).reduce((s,[key,label])=>s.replaceAll(key,label),String(v||''));
       const css=`<style>
       .cm{color:var(--primary-text-color,#e6eef8);text-align:left;white-space:normal;font-family:var(--primary-font-family,system-ui);padding:clamp(12px,2vw,28px);background:linear-gradient(135deg,rgba(40,106,160,.14),transparent 50%);border-radius:24px;line-height:1.5}
@@ -122,6 +127,7 @@ cards:
       .cm .section{margin-top:14px;border:1px solid rgba(130,156,190,.23);border-radius:16px;overflow:hidden}.cm summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;min-height:58px;padding:15px 18px;font-weight:700}.cm summary::-webkit-details-marker{display:none}.cm summary:before{content:'›';font-size:24px;color:#629bff;transition:transform .15s}.cm details[open]>summary:before{transform:rotate(90deg)}.cm summary>span:first-of-type{flex:1}.cm summary:focus-visible,.cm button:focus-visible{outline:2px solid #629bff;outline-offset:-3px}.cm .section-body{padding:0 16px 16px}.cm .flight{padding:0;overflow:hidden}.cm .flight>summary{flex-wrap:wrap;align-items:center}.cm .flight-body{padding:0 18px 18px}.cm .flight-brief{flex:1;min-width:180px}.cm .flight>summary>.pill{flex:0 0 auto;max-width:100%;overflow-wrap:normal}.cm .flight-head>.pill{flex:0 0 auto;max-width:60%;overflow-wrap:normal}.cm .flight-brief b{font-size:22px}.cm .flight-brief small{display:block;font-weight:400}.cm .day-picker{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0}.cm .day-picker button{font:inherit;color:inherit;background:rgba(100,140,190,.08);border:1px solid rgba(130,156,190,.23);border-radius:10px;min-width:42px;min-height:42px;cursor:pointer;position:relative}.cm .day-picker button[aria-pressed=true]{background:#3479db;color:white;border-color:#629bff}.cm .day-picker button.has-data:after{content:'';position:absolute;bottom:3px;left:calc(50% - 2px);width:4px;height:4px;background:#50c994;border-radius:50%}
       .cm .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.cm .action{font:inherit;font-size:13px;font-weight:600;min-height:44px;padding:9px 14px;border:1px solid rgba(98,155,255,.5);border-radius:10px;background:rgba(74,142,255,.12);color:#86b2ff;cursor:pointer}.cm .action.danger{color:#f39aa1;border-color:rgba(240,115,125,.35);background:rgba(240,115,125,.08)}.cm button:disabled{opacity:.5;cursor:default}.cm .arrival-table{overflow:auto}.cm .arrival-table table{min-width:480px}.cm .arrival-table td small{display:block}.cm .arrival-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
       @media(max-width:600px){.cm .arrival-table table{min-width:0}.cm .arrival-table thead{display:none}.cm .arrival-table tr{display:grid;grid-template-columns:1fr 1fr;padding:8px 0;border-bottom:1px solid rgba(130,156,190,.18)}.cm .arrival-table td{border:0}.cm .arrival-table td:first-child,.cm .arrival-table td:last-child{grid-column:1/-1}.cm .arrival-table td[data-label]:before{content:attr(data-label);display:block;color:#9ca9ba;font-size:11px}.cm .flight>summary{padding:10px 4px}.cm .flight-body{padding:0 4px 8px}.cm .times{grid-template-columns:repeat(2,1fr)}.cm .telemetry{grid-template-columns:repeat(2,1fr)}.cm td,.cm th{padding:7px}.cm .panel{padding:10px}.cm .flight{padding:14px}}
+      .cm .export-tools{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.cm .export-status{font-size:13px;margin:6px 0 12px;overflow-wrap:anywhere}.cm .export-manual{width:100%;min-height:180px;resize:vertical;color:inherit;background:var(--card-background-color,#121a28);border:1px solid #629bff;border-radius:10px;padding:12px;font:13px monospace}.cm .log-heading{font-size:17px;margin-top:18px}.cm .export-overview{margin:18px 0}
       </style>`;
       if(!d)return css+`<div class="cm"><div class="eyebrow">PI · BETRIEBSÜBERSICHT</div><h1>ComatAlarm</h1><div class="warn">${esc(card._comatError||'Verbindung zum Pi wird hergestellt …')}</div><p class="muted">Die Übersicht zeigt die tatsächlichen Pi-Daten. Es werden keine zusätzlichen Fluganbieter-Abfragen ausgelöst.</p></div>`;
       const time=Date.now()/1000;
@@ -131,6 +137,96 @@ cards:
       const flights=d.flights||[];
       const apis=d.api_status?.results||{};
       const apiAge=d.api_status?.checked_at?time-d.api_status.checked_at:null;
+      // Export only the display contract, never a raw monitor response or request.
+      // The backend already authors safe messages; redact defensively before sharing.
+      const safeText=(value,limit=400)=>{
+        let text=typeof value==='string'||typeof value==='number'?String(value):'';
+        if(/<(?:html|body|head|script)\b|^\s*[\[{]|\b(?:response_body|headers?)\s*[:=]/i.test(text))return '[Nicht freigegebener Rohinhalt entfernt]';
+        return text.replace(/\b(?:Bearer|Basic)\s+[^\s,;]+/gi,'[Zugangsdaten entfernt]')
+          .replace(/\b(?:authorization|cookie|[a-z_]*(?:token|password|passwd|secret|credential|api_key|setup_key|uid))\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,'[Zugangsdaten entfernt]')
+          .replace(/\b[A-Za-z0-9_-]{24,}(?:\.[A-Za-z0-9_-]+){0,2}\b/g,'[Kennung entfernt]')
+          .replace(/\b[^\s@]+@[^\s@]+\.[^\s@]+\b/g,'[Adresse entfernt]')
+          .replace(/https?:\/\/\S+/gi,'[URL entfernt]').replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,limit);
+      };
+      const exportTime=value=>{
+        if(typeof value!=='number'||!Number.isFinite(value)||value<=0||value>253402300799)return null;
+        const date=new Date(value*1000);
+        return {unix:value,utc:date.toISOString(),berlin:new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'shortOffset'}).format(date)};
+      };
+      const safeDay=value=>/^\d{4}-\d{2}-\d{2}$/.test(value||'')?value:null;
+      const safeFlight=value=>/^[A-Z0-9]{2,12}$/.test(value||'')?value:'';
+      const safeDevice=value=>!value?'':/^Gerät [0-9a-f]{6}$/.test(value)?value:'Gerät anonymisiert';
+      const exportEvent=e=>({time:exportTime(e.timestamp),kind:/^[a-z_]{1,40}$/.test(e.kind||'')?e.kind:'event',flight:safeFlight(e.flight),device:safeDevice(e.device),message:safeText(message(e.message))});
+      const exportFlight=f=>({number:safeFlight(f.number),day:safeDay(f.day),origin:/^[A-Z]{3,4}$/.test(f.origin||'')?f.origin:'',destination:/^[A-Z]{3,4}$/.test(f.destination||'')?f.destination:'',registration:/^[A-Z0-9-]{2,12}$/.test(f.registration||'')?f.registration:'',fr24_id:/^[a-f0-9]{6,16}$/i.test(f.fr24ID||'')?f.fr24ID:'',times:Object.fromEntries(['std','etd','atd','sta','eta','ata','eibt','aibt'].map(key=>[key,exportTime(f[key]??f.schedule?.[key])])),stand:safeText(f.stand,40),gate:safeText(f.gate||f.schedule?.gate,40),prediction:safeText(f.prediction?.text,160),packets:{in:Number.isFinite(f.packets?.in)?f.packets.in:null,out:Number.isFinite(f.packets?.out)?f.packets.out:null}});
+      const exportTitles={events:'Ereignisse',pushes:'Push-Versand',errors:'Fehlerprotokoll',history:'Ereignisse am ausgewählten Tag',diagnosis:'Gesamtdiagnose'};
+      const events=d.events||[];
+      const isPush=e=>String(e.kind||'').startsWith('push_');
+      const eventRows=events.filter(e=>e.kind!=='error'&&!isPush(e));
+      const pushRows=events.filter(isPush);
+      const errorRows=events.filter(e=>e.kind==='error'||e.kind==='push_failed');
+      card._comatBuildExport=scope=>{
+        if(!Object.hasOwn(exportTitles,scope))return null;
+        const historyLoaded=d.history?.day===card._comatDay;
+        if(scope==='history'&&!historyLoaded)return null;
+        const rows=scope==='events'?eventRows:scope==='pushes'?pushRows:scope==='errors'?errorRows:scope==='history'?d.history.events||[]:events;
+        const projected=rows.map(exportEvent),dates=projected.map(e=>e.time?.unix).filter(Number.isFinite);
+        const doc={schema:'comatalarm.diagnostics.v1',section:exportTitles[scope],exported_at:exportTime(Date.now()/1000),timezone:'Europe/Berlin',source:{snapshot_at:exportTime(d.generated_at),received_at:exportTime(card._comatReceived/1000),stale:!!readStale},filter:{period:scope==='history'?'Ausgewählter Berliner Kalendertag':'Letzte angezeigte Diagnoseeinträge',day:scope==='history'?safeDay(card._comatDay):null,kinds:scope==='events'?'Ohne Push-Versand und Fehler':scope==='pushes'?'Push-Versand':scope==='errors'?'Fehler und fehlgeschlagener Push-Versand':'Alle angezeigten Ereignisarten',snapshot_limit:150,from:dates.length?exportTime(Math.min(...dates)):null,to:dates.length?exportTime(Math.max(...dates)):null},event_count:projected.length,events:projected};
+        if(scope==='diagnosis'){
+          doc.system={started_at:exportTime(d.started_at),cycle_started:exportTime(d.cycle_started),cycle_finished:exportTime(d.cycle_finished),api_checked_at:exportTime(d.api_status?.checked_at),api_status:Object.fromEntries(['FR24','FlightStats','FlightAware','BER','ADSB.lol','OpenSky'].map(name=>[name,safeText(apis[name]||'Noch nicht geprüft',120)])),pushes:Object.fromEntries(['pending','accepted','expired'].map(key=>[key,Number.isFinite(d.pushes?.[key])?d.pushes[key]:null]))};
+          doc.flights=flights.map(exportFlight);
+          doc.selected_history={day:safeDay(card._comatDay),loaded:historyLoaded,flights:historyLoaded?(d.history.flights||[]).map(exportFlight):[],events:historyLoaded?(d.history.events||[]).map(exportEvent):[]};
+        }
+        return doc;
+      };
+      const formatExport=doc=>{
+        const stamp=value=>value?`${value.berlin} / ${value.utc}`:'—';
+        const lines=[`ComatAlarm · ${doc.section}`,`Exportiert: ${stamp(doc.exported_at)}`,`Pi-Datenstand: ${stamp(doc.source.snapshot_at)}`,`Im Dashboard empfangen: ${stamp(doc.source.received_at)}`,`Verbindung: ${doc.source.stale?'Letzter gespeicherter Stand; Abruf verzögert oder unterbrochen':'Aktuell'}`,`Zeitzone: ${doc.timezone}`,`Zeitraum: ${doc.filter.period}${doc.filter.day?' · '+doc.filter.day:''}`,`Filter: ${doc.filter.kinds}`,`Einträge: ${doc.event_count} (aus maximal ${doc.filter.snapshot_limit} angezeigten Diagnoseeinträgen)`,`Enthaltene Ereigniszeiten: ${stamp(doc.filter.from)} bis ${stamp(doc.filter.to)}`,'','„Apple angenommen“ bestätigt APNs-Annahme, keine iPhone-Zustellung oder Lesebestätigung.',''];
+        const appendEvents=rows=>{if(!rows.length)lines.push('Keine Einträge in dieser Auswahl.');for(const e of rows)lines.push(`[${stamp(e.time)}] ${e.kind} · ${e.flight||'Dienst'}${e.device?' · '+e.device:''}`,e.message||'—','');};
+        const appendFlights=rows=>{if(!rows.length)lines.push('Keine Flüge in dieser Auswahl.');for(const f of rows){lines.push(`${f.number||'Flug'} · ${f.day||'—'} · ${f.origin||'?'} → ${f.destination||'?'} · ${f.registration||'—'}${f.fr24_id?' · FR24 '+f.fr24_id:''}`);for(const [key,value] of Object.entries(f.times))lines.push(`${key.toUpperCase()}: ${stamp(value)}`);lines.push(`Parkposition: ${f.stand||'Nicht bestätigt'} · Gate: ${f.gate||'—'}`,`Prognose: ${f.prediction||'—'} · Pakete IN/OUT: ${f.packets.in??'—'} / ${f.packets.out??'—'}`,'');}};
+        appendEvents(doc.events);
+        if(doc.system){
+          lines.push('DIENSTSTATUS',`Pi-Start: ${stamp(doc.system.started_at)}`,`Zyklusbeginn: ${stamp(doc.system.cycle_started)}`,`Zyklusende: ${stamp(doc.system.cycle_finished)}`,`API-Status geprüft: ${stamp(doc.system.api_checked_at)}`);
+          for(const [name,status] of Object.entries(doc.system.api_status))lines.push(`${name}: ${status}`);
+          lines.push(`Push ausstehend / Apple angenommen / abgelaufen: ${doc.system.pushes.pending??'—'} / ${doc.system.pushes.accepted??'—'} / ${doc.system.pushes.expired??'—'}`,'','ANGEZEIGTE FLÜGE');appendFlights(doc.flights);
+          lines.push(`AUSGEWÄHLTER VERLAUFSTAG: ${doc.selected_history.day||'—'}`);
+          if(doc.selected_history.loaded){appendFlights(doc.selected_history.flights);appendEvents(doc.selected_history.events);}else lines.push('Dieser Tag ist noch nicht geladen; keine Daten eines anderen Tages übernommen.');
+        }
+        return lines.join('\n')+'\n';
+      };
+      card._comatExport=async(scope,mode='copy')=>{
+        if(!Object.hasOwn(exportTitles,scope)||!['copy','txt','json'].includes(mode))return;
+        const status=(text,error=false)=>{card._comatExportStatus={...(card._comatExportStatus||{}),[scope]:{text,error}};redraw();};
+        const doc=card._comatBuildExport(scope);
+        if(!doc){status('Der ausgewählte Tag wird noch geladen. Danach erneut versuchen.',true);return;}
+        const text=formatExport(doc);
+        if(mode==='copy'){
+          let copied=false;
+          if(globalThis.isSecureContext&&globalThis.navigator?.clipboard?.writeText){try{await navigator.clipboard.writeText(text);copied=true;}catch{}}
+          if(!copied){
+            let field;
+            const previous=card.shadowRoot?.activeElement||document.activeElement;
+            try{
+              field=document.createElement('textarea');field.value=text;field.readOnly=true;field.style.cssText='position:fixed;top:0;left:0;width:1px;height:1px;opacity:0';
+              (card.shadowRoot||document.body).appendChild(field);field.focus();field.select();field.setSelectionRange(0,text.length);
+              copied=!!document.execCommand('copy');
+            }catch{}finally{field?.remove();previous?.focus?.();}
+          }
+          if(copied){card._comatExportManual=null;status(`${exportTitles[scope]} kopiert.`);}else{card._comatExportManual={scope,text};status('Automatisches Kopieren ist hier gesperrt. Text unten markieren und kopieren oder als .txt herunterladen.',true);}
+          return;
+        }
+        let url,link;
+        try{
+          const content=mode==='json'?JSON.stringify(doc,null,2)+'\n':text;
+          url=URL.createObjectURL(new Blob([content],{type:mode==='json'?'application/json;charset=utf-8':'text/plain;charset=utf-8'}));
+          link=document.createElement('a');link.href=url;link.download=`comatalarm-${scope}-${doc.filter.day||'aktuell'}-${doc.exported_at.utc.replace(/[:.]/g,'-')}.${mode}`;link.style.display='none';document.body.appendChild(link);link.click();
+          status(`${mode==='json'?'JSON':'.txt'}-Download gestartet. Falls kein Download erscheint, „Kopieren“ verwenden.`);
+        }catch{status('Download konnte nicht gestartet werden. Bitte „Kopieren“ verwenden.',true);}finally{link?.remove();if(url)setTimeout(()=>URL.revokeObjectURL(url),30000);}
+      };
+      const exportControls=(scope,json=false)=>{
+        const state=card._comatExportStatus?.[scope],manual=card._comatExportManual;
+        const button=(mode,label)=>`<button type="button" class="action" data-cm-export="${scope}" data-cm-export-mode="${mode}" aria-label="${esc(exportTitles[scope]+' '+label)}">${label}</button>`;
+        return `<div class="export-tools" role="group" aria-label="${esc(exportTitles[scope]+' teilen')}">${button('copy','Kopieren')}${button('txt','.txt herunterladen')}${json?button('json','JSON herunterladen'):''}</div>${state?`<p class="export-status ${state.error?'orange':'muted'}" role="${state.error?'alert':'status'}">${esc(state.text)}</p>`:''}${manual?.scope===scope?`<textarea class="export-manual" readonly aria-label="${esc(exportTitles[scope]+' zum manuellen Kopieren')}">${esc(manual.text)}</textarea>`:''}`;
+      };
       const button=(action,key,label,disabled=false)=>`<button type="button" class="action ${action==='delete'||action==='confirm-delete'?'danger':''}" data-cm-action="${action}" data-cm-flight="${esc(key)}"${disabled||card._comatCommandBusy?' disabled':''}>${esc(label)}</button>`;
       const deleteControl=f=>!f.key?'':card._comatConfirm===f.key?`<div class="warn"><p>${esc(f.number)} · ${esc(f.day)} vom Pi löschen? Überwachung und Verlaufseintrag werden entfernt. Eine erneute App-Übergabe dieses Flugs wird unterdrückt.</p><div class="actions">${button('confirm-delete',f.key,'Ja, auf dem Pi löschen')}${button('cancel',f.key,'Abbrechen')}</div></div>`:`<div class="actions">${button('delete',f.key,'Flug vom Pi löschen')}</div>`;
       const renderFlights=(items,prefix)=>items.map(f=>{
@@ -160,7 +256,6 @@ cards:
        ${deleteControl(f)}
        </div></details>`;
       }).join('');
-      const events=d.events||[];
       const logs=(list)=>list.length?`<div class="scroll"><table><thead><tr><th>Zeit (Berlin)</th><th>Flug / Gerät</th><th>Ergebnis</th></tr></thead><tbody>${list.map(e=>`<tr><td>${clock(e.timestamp)}</td><td>${esc(e.flight||'Dienst')}<br><small>${esc(e.device)}</small></td><td>${pill(e.kind==='push_accepted'?'Apple angenommen':e.kind==='push_failed'?'Versand fehlgeschlagen':e.kind==='error'?'Fehler':e.kind==='push_skipped'?'Nicht gesendet':e.kind==='service'?'Dienst':'Ereignis',e.kind==='push_accepted'?'green':['error','push_failed'].includes(e.kind)?'red':'blue')}<br>${esc(message(e.message))}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Seit Einrichtung des Monitors keine Einträge vorhanden.</div>';
       const categoryOf=f=>f.category||((f.cancelled||f.diverted||(f.origin==='BER'?f.atd:f.aibt))?'completed':f.atd||f.ata?'active':'waiting');
       const days=new Date(Number(month.slice(0,4)),Number(month.slice(5,7)),0).getDate();
@@ -168,26 +263,27 @@ cards:
       const history=d.history;
       const historyReady=history?.day===card._comatDay;
       const picker=Array.from({length:days},(_,i)=>{const date=month+'-'+String(i+1).padStart(2,'0');return `<button type="button" data-cm-day="${date}" class="${history?.available_days?.includes(date)?'has-data':''}" aria-label="${date}" aria-pressed="${date===card._comatDay}">${String(i+1).padStart(2,'0')}</button>`;}).join('');
-      const historyHtml=`<div class="day-picker" role="group" aria-label="Verlaufstag auswählen">${picker}</div><p class="muted">${esc(card._comatDay.split('-').reverse().join('.'))} · Punkt = gespeicherte Flüge</p>${!history?'<div class="warn">Für den gespeicherten Monatsverlauf Push-Dienst 1.2.26 und Bootstrap 1.2.9 installieren.</div>':!historyReady?'<div class="empty">'+(card._comatError?'Verlauf nicht erreichbar. Erneuter Versuch folgt.':'Verlauf wird geladen …')+'</div>':`<div class="flights">${renderFlights(history.flights||[],'history')||'<div class="empty">Für diesen Tag wurden keine Flüge gespeichert.</div>'}</div>${section('history-events','Ereignisse an diesem Tag',logs(history.events||[]),(history.events||[]).length)}`}<p class="foot">Gespeichert wird der letzte bekannte Stand je Flugtag, auch bei geschlossenem Dashboard. Frühere, bereits gelöschte Flüge lassen sich nicht rückwirkend ergänzen.</p>`;
+      const historyHtml=`<div class="day-picker" role="group" aria-label="Verlaufstag auswählen">${picker}</div><p class="muted">${esc(card._comatDay.split('-').reverse().join('.'))} · Punkt = gespeicherte Flüge</p>${!history?'<div class="warn">Für den gespeicherten Monatsverlauf den Push-Dienst und die Home-Assistant-Integration aktualisieren.</div>':!historyReady?'<div class="empty">'+(card._comatError?'Verlauf nicht erreichbar. Erneuter Versuch folgt.':'Verlauf wird geladen …')+'</div>':`<div class="flights">${renderFlights(history.flights||[],'history')||'<div class="empty">Für diesen Tag wurden keine Flüge gespeichert.</div>'}</div>${section('history-events','Ereignisse an diesem Tag',exportControls('history')+logs(history.events||[]),(history.events||[]).length)}`}<p class="foot">Gespeichert wird der letzte bekannte Stand je Flugtag, auch bei geschlossenem Dashboard. Frühere, bereits gelöschte Flüge lassen sich nicht rückwirkend ergänzen.</p>`;
       const board=d.arrivals;
       if(board && card._comatOpen.arrivals && card._comatArrivalDay!==today && !card._comatCommandBusy){
         card._comatArrivalDay=today;card._comatRun('arrivals');
       }
       const upcoming=(board?.flights||[]).filter(f=>f.tracked||((f.schedule?.eta||f.reference)>=time));
       const airlines=[...new Set(upcoming.map(f=>f.airline))].sort((a,b)=>a.localeCompare(b,'de'));
-      const arrivalsHtml=!board?'<div class="warn">Für Ankunftstabelle und Flugaktionen Push-Dienst 1.2.26 und Bootstrap 1.2.9 installieren.</div>':`<div class="arrival-head"><p class="muted">${esc(today.split('-').reverse().join('.'))} · Star Alliance und Eurowings<br>Gemeinsame Tagesliste · Stand ${clock(board.fetched_at)}</p>${button('refresh_arrivals','','Tabelle aktualisieren',board.loading)}</div>${board.loading?'<p class="muted">BER-Ankünfte werden auf dem Pi geladen …</p>':''}${board.error?`<div class="warn">${esc(board.error)}${board.fetched_at?' · Letzter gespeicherter Stand bleibt sichtbar.':''}</div>`:''}${airlines.map(airline=>{const list=upcoming.filter(f=>f.airline===airline);return section('airline:'+airline,airline,`<div class="arrival-table"><table><thead><tr><th>Flug / Herkunft</th><th>Plan</th><th>Erwartet</th><th>Überwachung</th></tr></thead><tbody>${list.map(f=>`<tr><td><b>${esc(f.number)}</b><small>${esc(f.origin_name||f.origin)} (${esc(f.origin)})</small></td><td data-label="Plan">${clock(f.schedule?.sta||f.reference)}</td><td data-label="Erwartet">${clock(f.schedule?.eta)}</td><td>${button('track',f.key,f.tracked?'Wird überwacht':'Überwachen',f.tracked||!f.available||!!board.error||board.loading)}</td></tr>`).join('')}</tbody></table></div>`,list.length);}).join('')}${!upcoming.length&&!board.loading&&!board.error?'<div class="empty">Heute keine weiteren passenden Ankünfte.</div>':''}<p class="foot">„Überwachen“ übernimmt den Flug in die Pi-Abfrage und die bestehenden Push-Regeln der verbundenen Geräte. Der Pi arbeitet bis zu 24 Stunden ohne geöffnete App. Manuelle Aktualisierungen werden für alle Dashboard-Aufrufe mindestens fünf Minuten zwischengespeichert.</p>`;
+      const arrivalsHtml=!board?'<div class="warn">Für Ankunftstabelle und Flugaktionen den Push-Dienst und die Home-Assistant-Integration aktualisieren.</div>':`<div class="arrival-head"><p class="muted">${esc(today.split('-').reverse().join('.'))} · Star Alliance und Eurowings<br>Gemeinsame Tagesliste · Stand ${clock(board.fetched_at)}</p>${button('refresh_arrivals','','Tabelle aktualisieren',board.loading)}</div>${board.loading?'<p class="muted">BER-Ankünfte werden auf dem Pi geladen …</p>':''}${board.error?`<div class="warn">${esc(board.error)}${board.fetched_at?' · Letzter gespeicherter Stand bleibt sichtbar.':''}</div>`:''}${airlines.map(airline=>{const list=upcoming.filter(f=>f.airline===airline);return section('airline:'+airline,airline,`<div class="arrival-table"><table><thead><tr><th>Flug / Herkunft</th><th>Plan</th><th>Erwartet</th><th>Überwachung</th></tr></thead><tbody>${list.map(f=>`<tr><td><b>${esc(f.number)}</b><small>${esc(f.origin_name||f.origin)} (${esc(f.origin)})</small></td><td data-label="Plan">${clock(f.schedule?.sta||f.reference)}</td><td data-label="Erwartet">${clock(f.schedule?.eta)}</td><td>${button('track',f.key,f.tracked?'Wird überwacht':'Überwachen',f.tracked||!f.available||!!board.error||board.loading)}</td></tr>`).join('')}</tbody></table></div>`,list.length);}).join('')}${!upcoming.length&&!board.loading&&!board.error?'<div class="empty">Heute keine weiteren passenden Ankünfte.</div>':''}<p class="foot">„Überwachen“ übernimmt den Flug in die Pi-Abfrage und die bestehenden Push-Regeln der verbundenen Geräte. Der Pi arbeitet bis zu 24 Stunden ohne geöffnete App. Manuelle Aktualisierungen werden für alle Dashboard-Aufrufe mindestens fünf Minuten zwischengespeichert.</p>`;
       return css+`<div class="cm"><div class="hero"><div><div class="eyebrow">PI · BETRIEBSÜBERSICHT</div><h1>ComatAlarm</h1><p class="muted">Flüge, Datenquellen und Push-Versand an einem Ort</p></div>${pill(readStale?'Verbindung unterbrochen':cycleStale?'Abfragezyklus prüfen':'Pi-Abfragezyklus aktuell',readStale?'red':cycleStale?'orange':'green')}</div>
       ${readStale?`<div class="warn">${esc(card._comatError||'Datenabruf verzögert')} Zuletzt geladener Stand: ${clock(d.generated_at)}</div>`:''}
       ${card._comatCommandError?`<div class="warn" role="alert">${esc(card._comatCommandError)}</div>`:card._comatCommandMessage?`<p class="muted" role="status">${esc(card._comatCommandMessage)}</p>`:''}
       <div class="stats">${box('Flüge im Pi',flights.length,'Geräteübergreifend zusammengefasst')}${box('Letzter Zyklus',clock(d.cycle_finished),cycleAge===null?'Noch nicht beendet':'Vor '+age(Math.max(0,cycleAge)))}${box('Push ausstehend',d.pushes.pending,'Warteschlange · bis 15 Minuten')}${box('Apple angenommen',d.pushes.accepted,'Gespeicherte Meldungen · bis 48 h')}${box('Push abgelaufen',d.pushes.expired,'Ohne Annahme nach 15 Minuten')}${box('Standplatzmodell',d.stand_model.ready?'Bereit':'Nicht bereit',`${d.stand_model.observations||0} bestätigte Ankünfte gelernt`)}</div>
+      <div class="export-overview"><b>Diagnose teilen</b><p class="muted">Angezeigte Flüge, Protokolle und ausgewählter Verlaufstag mit Datenstand und Zeitstempeln.</p>${exportControls('diagnosis',true)}</div>
       ${section('api','API-Status',`<p class="muted">Derselbe gespeicherte Status wie in der App · geprüft ${clock(d.api_status.checked_at)} ${apiAge===null||apiAge>(d.api_status.valid_for||1800)?'· Status veraltet / fehlt':''}</p>
       <div class="apis">${['FR24','FlightStats','FlightAware','BER','ADSB.lol','OpenSky'].map(name=>{const value=apis[name]||'Noch nicht geprüft';return `<div class="api"><b>${name}</b>${pill(value,value==='OK'?'green':/HTTP|Fehler|abgelehnt|ungültig/i.test(value)?'red':'orange')}</div>`;}).join('')}</div>`)}
       ${['waiting','active','completed'].map((category,i)=>{const list=flights.filter(f=>categoryOf(f)===category);return section(category,['Wartende Flüge','Aktive Flüge','Abgeschlossene Flüge'][i],`<div class="flights">${renderFlights(list,'live')||'<div class="empty">Keine Flüge in diesem Bereich.</div>'}</div>`,list.length);}).join('')}
       ${section('arrivals','Ankunftstabelle · BER',arrivalsHtml,upcoming.length)}
       ${section('history','Verlauf · '+monthTitle,historyHtml)}
-      ${section('events','Ereignisse & Push-Versand',`<p class="muted">„Apple angenommen“ bestätigt die Übergabe an APNs. Eine Zustell- oder Lesebestätigung des iPhones liegt nicht vor.</p><div class="panel">${logs(events.filter(e=>e.kind!=='error'))}</div>
+      ${section('events','Ereignisse & Push-Versand',`<p class="muted">„Apple angenommen“ bestätigt die Übergabe an APNs. Eine Zustell- oder Lesebestätigung des iPhones liegt nicht vor.</p><h3 class="log-heading">Ereignisse</h3>${exportControls('events')}<div class="panel">${logs(eventRows)}</div><h3 class="log-heading">Push-Versand</h3>${exportControls('pushes')}<div class="panel">${logs(pushRows)}</div>
       `,events.filter(e=>e.kind!=='error').length)}
-      ${section('errors','Fehlerprotokoll',`<div class="panel">${logs(events.filter(e=>e.kind==='error'||e.kind==='push_failed'))}</div>
+      ${section('errors','Fehlerprotokoll',`${exportControls('errors')}<div class="panel">${logs(errorRows)}</div>
       `,events.filter(e=>['error','push_failed'].includes(e.kind)).length)}
       ${section('devices','Geräte & Übergabe',`<div class="panel scroll"><table><thead><tr><th>Gerät</th><th>Überwachung</th><th>Letzter App-Abruf</th><th>Gültig bis</th></tr></thead><tbody>${d.devices.map(x=>`<tr><td>${esc(x.name)}</td><td>${pill(x.expired?'Abgelaufen':x.error?'Fehler':!x.token_present?'API-Zugang fehlt':x.server_polling?'Pi zentral':'App / Pi',x.expired||x.error||!x.token_present?'orange':'green')}</td><td>${clock(x.last_app_read)}</td><td>${clock(x.expires)}</td></tr>`).join('')}</tbody></table></div>
       `,d.devices.length)}

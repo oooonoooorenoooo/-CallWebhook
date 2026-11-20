@@ -133,7 +133,10 @@ class SharedProviderCapacityTests(unittest.IsolatedAsyncioTestCase):
                 (queried_ids if selector == 'flight_ids' else queried_numbers).extend(members)
             self.assertCountEqual(queried_ids, [f['fr24ID'] for f in tracked])
             self.assertCountEqual(queried_numbers, [f['number'] for f in tracked])
-        self.assertEqual(len(http.calls), 3*expected_requests, '15-second local ticks must not buy new observations')
+        self.assertEqual(len(http.calls), 3*expected_requests+1,
+                         'The confirmed final approach adds one live-only batch at30s before its warning')
+        self.assertEqual([c[1] for c in http.calls if c[0] == self.now+30], ['live/flight-positions/full'])
+        self.assertFalse(any(c[0] in (self.now+15, self.now+45) for c in http.calls))
         alerts = [c for c in self.comat.sender.call_args_list if c.args[2]['flag'] == 'alarmPrelanding']
         self.assertEqual(len(alerts), count*2, 'one timely prelanding warning for every flight and recipient')
 

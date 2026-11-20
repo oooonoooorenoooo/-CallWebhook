@@ -95,7 +95,11 @@ def _candidate(flight, now, max_age=MAX_SAMPLE_AGE):
     source = str(live.get("source") or "").upper()
     if source and source not in ("ADS-B", "ADSB", "ADS_B", "MLAT"):
         return None
-    if live.get("on_ground") not in (False, 0):
+    # The official FR24 FlightPositionsFull schema has no on_ground field.
+    # Missing optional extensions cannot veto an otherwise measured approach;
+    # explicit ground/invalid values still veto it, as do the altitude, speed,
+    # descent, geometry and freshness checks below.
+    if "on_ground" in live and live.get("on_ground") not in (False, 0):
         return None
     observed, eta = _stamp(live.get("timestamp")), _stamp(live.get("eta"))
     if (observed is None or eta is None or not -5 <= now-observed <= max_age
@@ -129,6 +133,20 @@ def _candidate(flight, now, max_age=MAX_SAMPLE_AGE):
         return None
     return {"fr24_id": identifier, "destination": destination, "observed_at": observed,
             "eta": eta, "altitude_ft": altitude, "distance_km": distance}
+
+def prelanding_refresh_candidate(flight, now):
+    """Allow a sparse 30s live-only refresh for an already plausible final.
+
+    A point up to 90s old may justify fetching a new observation, never sending
+    an alert. Delivery still uses MAX_SAMPLE_AGE and the original lead window.
+    Timetable ETA/STA cannot make this predicate true.
+    """
+    state = flight.get("_landing_alert")
+    if (isinstance(state, dict) and state.get("fr24_id") == flight.get("fr24ID")
+            and "triggered_at" in state):
+        return False
+    candidate = _candidate(flight, now, max_age=90)
+    return bool(candidate and candidate["eta"]-now > MIN_WARNING_LEAD)
 
 
 def update_landing_alert(previous, current, now):

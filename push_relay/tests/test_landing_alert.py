@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import unittest
 
 from push_relay.landing_alert import (
-    AIRPORTS, ELEVATIONS_FT, alert_ttl, prelanding_is_current, update_landing_alert,
+    AIRPORTS, ELEVATIONS_FT, alert_ttl, prelanding_is_current, prelanding_refresh_candidate, update_landing_alert,
 )
 
 
@@ -12,9 +12,12 @@ NOW = 1_795_000_000.0
 
 def sample(at=NOW, eta=NOW+240, distance=20, altitude=3000, destination="BER", **changes):
     lat, lon = AIRPORTS[destination]
-    live = dict(fr24_id="abcdef", dest_iata=destination, timestamp=at, eta=eta,
+    # Fields from the official FR24 FlightPositionsFull model:
+    # https://github.com/Flightradar24/fr24api-sdk-python/blob/main/src/fr24sdk/models/flight.py
+    # In particular, that model does not supply an on_ground flag.
+    live = dict(fr24_id="abcdef", flight="LH194", orig_iata="FRA", dest_iata=destination, timestamp=at, eta=eta,
                 lat=lat+distance/111.195, lon=lon, alt=altitude+ELEVATIONS_FT[destination], gspeed=170,
-                vspeed=-700, track=180, on_ground=False, source="ADS-B")
+                vspeed=-700, track=180, source="ADSB")
     live.update(changes)
     return dict(id="device-flight", number="LH194", reference=NOW-3600,
                 fr24ID="abcdef", origin="FRA", destination=destination,
@@ -28,6 +31,66 @@ def approaching():
 
 
 class LandingAlertTests(unittest.TestCase):
+    def test_official_full_schema_does_not_require_an_invented_ground_flag(self):
+        self.assertNotIn("on_ground", sample()["_live"])
+        first, warned = approaching()
+        self.assertEqual(warned["_landing_alert"]["samples"], 2)
+        self.assertTrue(prelanding_is_current(warned, warned["_prelanding"], NOW+60))
+        for ground in (True, 1, None, "false"):
+            with self.subTest(ground=ground):
+                current = sample(at=NOW+60, distance=15, altitude=2300, on_ground=ground)
+                self.assertNotIn("_prelanding", update_landing_alert(first, current, NOW+60))
+
+    def test_refresh_can_fetch_after_delivery_freshness_but_cannot_alert(self):
+        flight = sample(at=NOW-60, eta=NOW+240)
+        self.assertTrue(prelanding_refresh_candidate(flight, NOW))
+        self.assertNotIn("_prelanding", update_landing_alert({}, flight, NOW))
+        self.assertFalse(prelanding_refresh_candidate(flight, NOW+31))
+        flight["_live"].pop("eta")
+        flight["_schedule"] = {"eta": NOW+240, "sta": NOW+240}
+        self.assertFalse(prelanding_refresh_candidate(flight, NOW))
+        _, warned = approaching()
+        self.assertFalse(prelanding_refresh_candidate(warned, NOW+60))
+
+    @staticmethod
+    def approach_phases(lag, fast_refresh):
+        misses, warnings, intervals = [], [], []
+        for phase in range(60):
+            eta, flight, last_fetch = NOW+480+phase, {}, -60
+            fetches, warned = [], False
+            for offset in range(0, 601, 15):
+                refresh = fast_refresh and prelanding_refresh_candidate(flight, NOW+offset)
+                if offset % 60 == 0 or refresh and offset-last_fetch >= 30:
+                    observed = NOW+offset-lag
+                    remaining = eta-observed
+                    # Constant 170 kt / -700 ft/min, positions describe the
+                    # aircraft at the actual observation time, not receipt time.
+                    measured = sample(at=observed, eta=eta, distance=170*1.852*remaining/3600,
+                                      altitude=700*remaining/60)
+                    flight = dict(flight, **measured)
+                    last_fetch = offset
+                    fetches.append(offset)
+                flight = update_landing_alert(flight, flight, NOW+offset)
+                if "_prelanding" in flight:
+                    warnings.append(eta-(NOW+offset))
+                    warned = True
+                    break
+            if not warned:
+                misses.append(phase)
+            intervals.extend(b-a for a, b in zip(fetches, fetches[1:]))
+        return misses, warnings, intervals
+
+    def test_thirty_second_final_refresh_closes_all_twenty_and_thirty_second_lag_phases(self):
+        for lag in (20, 30):
+            with self.subTest(source_age=lag):
+                misses, _, _ = self.approach_phases(lag, fast_refresh=False)
+                self.assertEqual(len(misses), 15, "the old minute cache misses a quarter of the possible final-approach phases")
+                misses, warnings, intervals = self.approach_phases(lag, fast_refresh=True)
+                self.assertEqual(misses, [], "targeted fresh observations close the gap without extending delivery freshness")
+                self.assertEqual(len(warnings), 60)
+                self.assertTrue(all(150 < lead <= 180 for lead in warnings))
+                self.assertGreaterEqual(min(intervals), 30, "the final-approach path never becomes 15-second live polling")
+
     def test_two_fresh_observations_trigger_at_three_minutes(self):
         first, second = approaching()
         self.assertNotIn("_prelanding", first)

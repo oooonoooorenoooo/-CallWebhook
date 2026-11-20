@@ -13,13 +13,18 @@ from zoneinfo import ZoneInfo
 
 def planned_queries(flight, now):
     """Mirror central poll eligibility before offering summary/live requests."""
-    from .comatalarm import arrival_tracking_expired, departure_from_ber, stamp, utc_query_time
-    from .aibt_recovery import due, position
+    from .comatalarm import arrival_tracking_expired, departure_from_ber, stamp, utc_query_time, live_refresh_due
+    from .aibt_recovery import due, position, in_window, fast_candidate, fast_due
+    if flight.get('_arrival_fast'):
+        return [('historic/flight-events/light', {'flight_ids': flight['fr24ID'], 'event_types': 'gate_arrival'})] if fast_due(flight, now) else []
+    if flight.get('_live_only'):
+        return [('live/flight-positions/full', {'flights': flight['number']})] if live_refresh_due(flight, now) else []
     departing = departure_from_ber(flight)
-    if (arrival_tracking_expired(flight, now) or flight.get('cancelled') or flight.get('diverted')
+    late_arrival = arrival_tracking_expired(flight, now)
+    if ((late_arrival and not in_window(flight, now)) or flight.get('cancelled') or flight.get('diverted')
             or (departing and stamp(flight.get('atd')) and flight['atd'] <= now)):
         return []
-    repairing = bool(not departing and flight.get('aibt') and not position(flight))
+    repairing = bool(not departing and (flight.get('aibt') or late_arrival) and not position(flight))
     outbound = bool(flight.get('track_outbound') and not flight.get('_outbound', {}).get('atd'))
     if not departing and flight.get('aibt') and not repairing and not outbound:
         return []
@@ -42,7 +47,7 @@ def planned_queries(flight, now):
                       'flight_datetime_from': utc_query_time(start.timestamp()),
                       'flight_datetime_to': utc_query_time(min((start+timedelta(days=1)).timestamp(), now))}
         result.append(('flight-summary/full', params))
-    if not flight.get('aibt'):
+    if not flight.get('aibt') and not flight.get('ata') and not late_arrival:
         result.append(('live/flight-positions/full', {'flights': flight['number']}))
     return result
 
@@ -61,9 +66,9 @@ class FR24BatchRequests:
         """Entries are (token, endpoint, original params), never arbitrary routes."""
         groups = {}
         for token, path, params in entries:
-            if not token or path not in ('flight-summary/full', 'live/flight-positions/full'):
+            if not token or path not in ('flight-summary/full', 'live/flight-positions/full', 'historic/flight-events/light'):
                 continue
-            selector = 'flight_ids' if path == 'flight-summary/full' and 'flight_ids' in params else 'flights'
+            selector = 'flight_ids' if path in ('flight-summary/full', 'historic/flight-events/light') and 'flight_ids' in params else 'flights'
             value = params.get(selector)
             if not isinstance(value, str) or not value or ',' in value:
                 continue  # Only combine the provider's existing single queries.
@@ -74,7 +79,7 @@ class FR24BatchRequests:
         self.plans = {}
         for family, entries in groups.items():
             selector = family[2]
-            limit = 10 if selector == 'flight_ids' else 15
+            limit = 10 if selector == 'flight_ids' and family[1] == 'flight-summary/full' else 15
             items = sorted(entries.items(), key=lambda item: item[1][selector])
             for start in range(0, len(items), limit):
                 group = items[start:start+limit]
@@ -84,12 +89,17 @@ class FR24BatchRequests:
 
     def cached(self, key, now):
         value = self.cache.get(key)
-        return value if value is not None and 0 <= now-value[0] < 60 else None
+        ttl = 15 if key[1] == 'historic/flight-events/light' else 30 if key[1] == 'live/flight-positions/full' else 60
+        return value if value is not None and 0 <= now-value[0] < ttl else None
+
+    def checked_at(self, token, path, params, now):
+        cached = self.cached(self.key(token, path, params), now)
+        return cached[0] if cached is not None else now
 
     @staticmethod
     def response(cached):
         if cached[2]:
-            raise RuntimeError('FR24: Sammelabfrage vorübergehend nicht verfügbar')
+            raise RuntimeError(cached[2] if isinstance(cached[2], str) else 'FR24: Sammelabfrage vorübergehend nicht verfügbar')
         return list(cached[1])
 
     async def request(self, token, path, params, now, fetch):
@@ -114,9 +124,11 @@ class FR24BatchRequests:
                 rows = await fetch(path, combined)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exception:
+                error = (str(exception) if isinstance(exception, RuntimeError) and str(exception).startswith('FR24: ')
+                         else 'FR24: Sammelabfrage vorübergehend nicht verfügbar')
                 for member, _ in missing:
-                    self.cache[member] = (now, None, True)
+                    self.cache[member] = (now, None, error)
                 raise
             # Keep the existing provider parsers in charge of flight-ID, route,
             # day and timestamp matching. This also preserves codeshare aliases:

@@ -228,6 +228,12 @@ def arrival_tracking_expired(flight, now):
     return bool(not departure_from_ber(flight) and flight.get("ata") and not flight.get("aibt") and now - flight["ata"] >= 25 * 60)
 
 
+def live_refresh_due(flight, now):
+    from .landing_alert import prelanding_refresh_candidate
+    return bool(prelanding_refresh_candidate(flight, now)
+                and now-(stamp(flight.get('_live_checked_at')) or stamp(flight.get('_checked_at')) or 0) >= 30)
+
+
 class FlightProvider:
     def __init__(self):
         self.cooldown = {}
@@ -237,6 +243,30 @@ class FlightProvider:
         self.aware_cache = {}
         from .fr24_batch import FR24BatchRequests
         self.batches = FR24BatchRequests()
+        from .flight_schedule import ScheduleCache
+        self.schedules = ScheduleCache(self)
+        self.background_schedules = False
+
+    def schedule_changes(self, flight, token, now):
+        result = self.schedules.get(flight, token, now)
+        if not result or result['_schedule_checked_at'] <= flight.get('_schedule_checked_at', 0):
+            return {}
+        # Supplemental observations may fill gaps; they never replace confirmed
+        # runway events or an identified route with an older cached response.
+        for key in ('atd', 'ata', 'origin', 'destination'):
+            if flight.get(key):
+                result.pop(key, None)
+        live = flight.get('_live') or {}
+        if (result.get('registration') and flight.get('registration')
+                and registration_key(result['registration']) != registration_key(flight['registration'])):
+            observed = stamp(live.get('timestamp')) if isinstance(live, dict) else None
+            if observed and now-observed < 120:
+                result.pop('registration', None)
+            else:
+                result['_live'] = {}
+                if departure_from_ber(dict(flight, **result)):
+                    result.update(_inbound={}, stand=None)
+        return result
 
     def plan_batches(self, flights, now):
         from .fr24_batch import planned_queries
@@ -331,13 +361,29 @@ class FlightProvider:
         return select((p for row in rows if isinstance(row, dict) and row.get("fr24_id") == identifier
                       for p in (row.get("tracks") or []) if isinstance(p, dict)), 'fr24_track')
 
-    async def lookup(self, flight, token, now):
-        from .aibt_recovery import EVIDENCE_REVISION, gate_arrival, position
-        if arrival_tracking_expired(flight, now):
-            return {}
-        cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"), bool(flight.get("_central")), bool(flight.get("_skip_parking_recovery")), registration_key(flight.get("registration")), bool(flight.get('_refresh_aibt_coordinate')), bool(flight.get('_parking_only')))
+    async def lookup(self, flight, token, now, schedule_credentials=None):
+        from .aibt_recovery import EVIDENCE_REVISION, gate_arrival, position, in_window, fast_candidate
+        credentials = self.credentials if schedule_credentials is None else schedule_credentials
+        credential_version = hashlib.sha256(json.dumps(credentials, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        if flight.get('_arrival_fast'):
+            if not flight.get('_central') or not fast_candidate(flight, now):
+                return {}
+            flight = dict(flight, _parking_only=True)
+        if flight.get('_live_only'):
+            from .landing_alert import prelanding_refresh_candidate
+            if not flight.get('_central') or not prelanding_refresh_candidate(flight, now):
+                return {}
+        late_arrival = arrival_tracking_expired(flight, now)
+        if late_arrival:
+            if not flight.get('_central') or not in_window(flight, now):
+                return {}
+            if not (flight.get('track_outbound') and not (flight.get('_outbound') or {}).get('atd')):
+                # The UI's 25-minute timeout only ends normal live tracking.
+                # A delayed gate event still receives sparse, exact-leg repair.
+                flight = dict(flight, _parking_only=True)
+        cache_key = (hashlib.sha256(token.encode()).hexdigest(), flight["number"], flight["reference"], flight.get("fr24ID"), bool(flight.get("_central")), bool(flight.get("_skip_parking_recovery")), registration_key(flight.get("registration")), bool(flight.get('_refresh_aibt_coordinate')), bool(flight.get('_parking_only')), bool(flight.get('_arrival_fast')), bool(flight.get('_live_only')), bool(flight.get('_schedule_only')), credential_version)
         cached = self.cache.get(cache_key)
-        if cached and now - cached[0] < 60:
+        if cached and now - cached[0] < (15 if flight.get('_arrival_fast') else 30 if flight.get('_live_only') else 60):
             return dict(cached[1])
         self.cache = {k: v for k, v in self.cache.items() if now - v[0] < 120}
         result = {}
@@ -366,7 +412,7 @@ class FlightProvider:
             async def fr24(path, params):
                 return await self.batches.request(token, path, params, now, fetch_fr24)
 
-            if flight.get("_central") and departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now:
+            if not flight.get('_schedule_only') and flight.get("_central") and departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now:
                 # Recover the BER turnaround, not this departure's later arrival
                 # at another airport. No live/schedule/provider fan-out is needed.
                 try:
@@ -379,11 +425,11 @@ class FlightProvider:
             identifier = flight.get("fr24ID")
             if identifier and identifier.startswith(("TEMP_", "NS_")):
                 identifier = None
-            provider_error = ('FR24-Token fehlt' if not token and flight.get('_central') and flight.get('aibt')
+            provider_error = ('FR24-Token fehlt' if not flight.get('_schedule_only') and not token and flight.get('_central') and (flight.get('ata') or flight.get('aibt'))
                               and (not position(flight) or flight.get('_refresh_aibt_coordinate')) else '')
             try:
-                if token:
-                    if not (identifier and flight.get("ata")):
+                if token and not flight.get('_schedule_only'):
+                    if not flight.get('_live_only') and not (identifier and flight.get("ata")):
                         if identifier:
                             params = {"flight_ids": identifier}
                         else:
@@ -406,11 +452,18 @@ class FlightProvider:
                             actual, planned = row.get("dest_iata_actual"), row.get("dest_iata")
                             if actual and planned and actual != planned:
                                 result["diverted"] = True
-                    if (not departure_from_ber(dict(flight, **result)) and identifier
+                    if (not flight.get('_live_only') and not departure_from_ber(dict(flight, **result)) and identifier
                             and (result.get("ata") or flight.get("ata") or flight.get("aibt"))
                             and (not position(flight) or flight.get('_refresh_aibt_coordinate')) and not flight.get("_skip_parking_recovery")):
-                        rows = await fr24("historic/flight-events/light", {"flight_ids": identifier, "event_types": "gate_arrival"})
-                        result.update(gate_arrival(rows, identifier, result.get('ata') or flight.get('ata'), now+60))
+                        result['_arrival_event_checked_at'] = now
+                        result['_arrival_event_status'] = 'request'
+                        event_params = {"flight_ids": identifier, "event_types": "gate_arrival"}
+                        rows = await fr24("historic/flight-events/light", event_params)
+                        result['_arrival_event_checked_at'] = self.batches.checked_at(token, 'historic/flight-events/light', event_params, now)
+                        result['_arrival_event_received_at'] = result['_arrival_event_checked_at']
+                        evidence = gate_arrival(rows, identifier, result.get('ata') or flight.get('ata'), now+60)
+                        result.update(evidence)
+                        result['_arrival_event_status'] = 'accepted' if evidence.get('aibt') else 'no_match'
                         aibt = result.get("aibt") or flight.get("aibt")
                         candidate = result.get('aibt_position')
                         prefer_historic = flight.get('_refresh_aibt_coordinate') and candidate and candidate.get('source') == 'fr24_gate_reference'
@@ -420,7 +473,7 @@ class FlightProvider:
                             if point:
                                 result["aibt_position"] = point
                         result['_aibt_evidence_revision'] = EVIDENCE_REVISION
-                    if flight.get("_central") and not flight.get('_parking_only') and not departure_from_ber(flight) and flight.get("track_outbound") and flight.get("registration") and (flight.get("ata") or flight.get("aibt")):
+                    if flight.get("_central") and not flight.get('_parking_only') and not flight.get('_live_only') and not departure_from_ber(flight) and flight.get("track_outbound") and flight.get("registration") and (flight.get("ata") or flight.get("aibt")):
                         airport = flight.get("destination") or "BER"
                         def matches_outbound(row):
                             return (isinstance(row, dict) and row.get("orig_iata") == airport
@@ -438,8 +491,10 @@ class FlightProvider:
                             row = next((r for r in outgoing if matches_outbound(r)), None)
                             if row:
                                 result["_outbound"] = {"number":row["flight"],"id":row.get("fr24_id"),"destination":row.get("dest_iata") or ""}
-                    if flight.get("_central") and not flight.get('_parking_only') and not (result.get("aibt") or flight.get("aibt")):
+                    if flight.get("_central") and not flight.get('_parking_only') and not late_arrival and not (result.get("aibt") or flight.get("aibt") or result.get('ata') or flight.get('ata')):
+                        result['_live_checked_at'] = now
                         rows = await fr24("live/flight-positions/full", {"flights": flight["number"]})
+                        result['_live_checked_at'] = self.batches.checked_at(token, 'live/flight-positions/full', {'flights': flight['number']}, now)
                         matches = [r for r in rows if isinstance(r, dict)
                             and (r.get("fr24_id") == identifier if identifier else r.get("flight") == flight["number"])
                             and (not flight.get("destination") or r.get("dest_iata") == flight["destination"])
@@ -462,7 +517,27 @@ class FlightProvider:
                     provider_error = 'FR24: Antwort konnte nicht verarbeitet werden'
                 else:
                     provider_error = 'FR24: Abfrage vorübergehend nicht verfügbar'
-            if flight.get('_parking_only'):
+                if result.get('_arrival_event_status') == 'request':
+                    result['_arrival_event_status'] = ('paused' if provider_error in
+                        ('FR24: Minutenschutz aktiv', 'FR24: Abfrage pausiert (Tarif, Token oder Limit prüfen)') else 'error')
+            if flight.get('_parking_only') or flight.get('_live_only'):
+                result = {k: v for k, v in result.items() if v is not None}
+                if provider_error:
+                    result['_error'] = provider_error
+                self.cache[cache_key] = (now, result)
+                return result
+            if self.background_schedules and not flight.get('_schedule_only'):
+                resolved = dict(flight, **{k: v for k, v in result.items() if v is not None})
+                self.schedules.request(resolved, token, now)
+                supplemental = self.schedule_changes(resolved, token, now)
+                result = dict(supplemental, **result, _checked_at=now)
+                if departure_from_ber(dict(flight, **result)):
+                    result.pop('aibt', None); result.pop('aibt_position', None)
+                    try:
+                        if token:
+                            result.update(await self.previous_arrival(dict(flight, **result), fr24, now))
+                    except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
+                        provider_error = 'Vorflug-Abgleich vorübergehend nicht verfügbar'
                 result = {k: v for k, v in result.items() if v is not None}
                 if provider_error:
                     result['_error'] = provider_error
@@ -496,15 +571,15 @@ class FlightProvider:
                 from .flight_schedule import schedule_lookup, aware_lookup
                 schedule = {}
                 try:
-                    schedule = await schedule_lookup(session, flight, self.credentials, self.cooldown, now)
+                    schedule = await schedule_lookup(session, flight, credentials, self.cooldown, now)
                 except (RuntimeError, ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
                     pass
                 # Preserve the existing low-frequency FlightAware fallback/status check.
-                aware_key = (cache_key[0], flight["number"], int(flight["reference"]//86400))
+                aware_key = (cache_key[0], credential_version, flight["number"], int(flight["reference"]//86400))
                 aware = self.aware_cache.get(aware_key)
                 if not aware or now-aware[0] >= (1800 if schedule.get("std") else 300):
                     try:
-                        values = await aware_lookup(session, flight, self.credentials, self.cooldown, now)
+                        values = await aware_lookup(session, flight, credentials, self.cooldown, now)
                         self.aware_cache[aware_key] = (now, values)
                         aware = (now, values)
                     except (RuntimeError, ValueError, TypeError, AttributeError, ClientError, OSError, asyncio.TimeoutError):
@@ -534,7 +609,7 @@ class FlightProvider:
                     # Destination-arrival milestones never describe the BER stand.
                     result.pop("aibt", None); result.pop("aibt_position", None)
                     try:
-                        if token: result.update(await self.previous_arrival(resolved, fr24, now))
+                        if token and not flight.get('_schedule_only'): result.update(await self.previous_arrival(resolved, fr24, now))
                     except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError):
                         provider_error = "Vorflug-Abgleich vorübergehend nicht verfügbar"
                         previous = flight.get("_inbound") or {}
@@ -581,9 +656,9 @@ class SharedAPIStatus:
         row = self.db.execute("SELECT checked,results FROM comat_api_status WHERE id=1").fetchone()
         return {"checked_at": row["checked"], "results": json.loads(row["results"]), "valid_for": 1800}
 
-    def request_refresh(self, token):
+    def request_refresh(self, token, manual=True, now=None):
         if self.task is None or self.task.done():
-            self.task = asyncio.create_task(self.refresh(token, manual=True))
+            self.task = asyncio.create_task(self.refresh(token, manual=manual, now=now))
             self.task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
 
     async def refresh(self, token, manual=False, now=None):
@@ -988,16 +1063,25 @@ class ComatAlarm:
             self.history_sync.capture(list(prior.values()), now)
         self.history_sync.backfill(now)
         removals = self.validated_removals(body.get('removed_flights'), list(prior.values()), now)
-        clean = []
+        clean, recovery_rows = [], []
         for f in flights:
-            if isinstance(f, dict) and (f.get('archived') is True or str(f.get('id', '')).startswith('PI_HISTORY_')):
+            recovery_only = isinstance(f, dict) and f.get('recovery_only') is True
+            if isinstance(f, dict) and 'recovery_only' in f and not isinstance(f['recovery_only'], bool):
+                raise ValueError('Invalid recovery ownership')
+            if recovery_only and (f.get('repair_arrival') is not True or not access or body.get('server_polling') is not True):
+                raise web.HTTPForbidden(text='Approved central arrival recovery required')
+            if not recovery_only and isinstance(f, dict) and (f.get('archived') is True or str(f.get('id', '')).startswith('PI_HISTORY_')):
                 continue  # Imported history never becomes a provider subscription.
             if not isinstance(f, dict) or not isinstance(f.get("id"), str) or not 1 <= len(f["id"]) <= 160 or not isinstance(f.get("number"), str) or not re.fullmatch(r"[A-Z0-9]{2,3}[0-9]{1,5}", f["number"]):
                 raise ValueError("Invalid flight")
             reference = f.get("reference")
-            if not isinstance(reference, (float, int)) or isinstance(reference, bool) or not math.isfinite(reference) or abs(reference - now) > 48 * 3600:
+            if (not isinstance(reference, (float, int)) or isinstance(reference, bool) or not math.isfinite(reference)
+                    or (not recovery_only and abs(reference-now) > 48*3600)
+                    or (recovery_only and not 1_000_000_000 < reference <= now+48*3600)):
                 raise ValueError("Invalid reference")
             row = {k: f[k] for k in FIELDS if k in f}
+            if recovery_only and row.get('created_at') == 0:
+                row.pop('created_at')  # History uses zero for an unknown creation date.
             created_at = row.get('created_at')
             if created_at is not None and (not isinstance(created_at, (float, int)) or isinstance(created_at, bool)
                     or not math.isfinite(created_at) or not 1_000_000_000 < created_at <= now+60):
@@ -1012,9 +1096,11 @@ class ComatAlarm:
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")
             old = prior.get(row["id"]) or next((p for p in prior.values() if same_occurrence(p, row)), {})
+            if recovery_only and old and not same_occurrence(old, row):
+                old = {}
             if old and self.shared_monitoring.removed(old):
                 old = {}
-            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_repair_attempted_at", "_repair_attempts", "_aibt_recovery_at", "_aibt_recovery_attempts", "_aibt_recovery_retry_at", "_aibt_evidence_revision", "_parking_lookup_status", "_parking_recovery", "_outbound", "_shared_subscription", "_landing_alert", "_prelanding"):
+            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_schedule_checked_at", "_live_checked_at", "_repair_attempted_at", "_repair_attempts", "_aibt_recovery_at", "_aibt_recovery_attempts", "_aibt_recovery_retry_at", "_aibt_evidence_revision", "_arrival_event_checked_at", "_arrival_event_received_at", "_arrival_event_status", "_arrival_event_logged_at", "_parking_lookup_status", "_parking_recovery", "_outbound", "_shared_subscription", "_landing_alert", "_prelanding"):
                 if old.get(key):
                     row[key] = old[key]
             for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized", "_departure_repair_at", "_departure_repair_attempts"):
@@ -1024,6 +1110,28 @@ class ComatAlarm:
                 row.update(gate=old["gate"], gate_source=old["gate_source"])
             if departure_from_ber(row) and "_inbound" in old:
                 row["stand"] = old.get("stand")
+            if recovery_only:
+                from .aibt_recovery import in_window
+                # A capability-gated request for a recent local history record
+                # is only evidence for the bounded archive repair queue. It
+                # cannot subscribe an archived occurrence or replay its alerts.
+                archived = self.history_sync.resolve(row['id'], now)
+                if archived is None and row['id'].startswith('PI_HISTORY_'):
+                    matches = [json.loads(r['payload']) for r in self.db.execute('SELECT payload FROM comat_app_history')
+                               if same_occurrence(json.loads(r['payload']), row)]
+                    if len(matches) != 1:
+                        continue  # Old client-generated aliases must resolve to trusted server history.
+                    archived = matches[0]
+                if archived and not same_occurrence(archived, row):
+                    raise ValueError('Arrival recovery identity mismatch')
+                if (stamp(row.get('ata')) and in_window(row, now)
+                        and not f.get('aibt') and not departure_from_ber(row)):
+                    if archived:
+                        row['created_at'] = archived['created_at']
+                        if row['id'] == archived['id']:
+                            row.pop('id')
+                    recovery_rows.append((row, archived.get('_created_at_proven') if archived else None))
+                continue
             if any(entry["id"] == row["id"] for entry in clean):
                 raise ValueError("Duplicate flight")
             clean.append(row)
@@ -1116,6 +1224,8 @@ class ComatAlarm:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", self.events(device["id"], old, row, prefs, now))
         if access and server_polling:
             self.history_sync.capture(clean, now)
+            for row, created_known in recovery_rows:
+                self.history_sync.capture([row], now, created_known=created_known, baseline=True)
         await self.deliver(device["id"], now)
         self.monitor.archive(now)
         self.poll_wakeup.set()
@@ -1125,6 +1235,7 @@ class ComatAlarm:
         if current['firebase_uid'] != device['firebase_uid'] or (access and current['firebase_uid'] != access['uid']):
             raise web.HTTPForbidden(text='Firebase device identity changed during handoff')
         return web.json_response(dict(self.stand_metadata(access), shared_watch_supported=True, token_refresh_supported=True,
+                                     arrival_recovery_supported=bool(access),
                                      history_sync_supported=bool(access), history=self.history_sync.metadata(now) if access else None,
                                      token_refreshed=refresh_push, api_status=self.api_status.snapshot(), watching=len(clean),
                                      background_ready=bool(api_token or (self.shared_tokens.get(device['id']) if access else '')),
@@ -1147,6 +1258,7 @@ class ComatAlarm:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO comat_monitor_reads VALUES(?,?)",(row["id"],now))
         return web.json_response({**self.stand_metadata(access), "shared_watch_supported": True, "token_refresh_supported": True,
+            "arrival_recovery_supported": bool(access),
             "history_sync_supported": bool(access), "history": self.history_sync.metadata(now) if access else None,
             "arrivals": self.monitor.operator.arrival_sync.metadata(), "server_polling_supported": True, "api_status_supported": True, "api_status": self.api_status.snapshot(), "relay_alerts_supported": True, "flights": self.central_predictions(json.loads(row["watch"]), access, now), "last_poll": row["last_poll"], "error": row["error"], "background_ready": bool(row["api_token"] or (self.shared_tokens.get(row['id']) if access else '')), "expires": row["expires"]}, headers={'Cache-Control': 'no-store'})
 
@@ -1185,9 +1297,16 @@ class ComatAlarm:
                 if same_occurrence(flight, snapshot):
                     return {k: snapshot[k] for k in ("atd", "ata", "aibt", "fr24ID", "registration", "gate", "gate_source", "cancelled", "diverted") if snapshot.get(k)}
         identity = hashlib.sha256(token.encode()).hexdigest()
+        configured = getattr(self.provider, 'credentials', {})
+        version = hashlib.sha256(json.dumps(configured if isinstance(configured, dict) else {},
+                                           sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         self.shared_results = [entry for entry in self.shared_results if now-entry[2] < 60]
-        for owner, snapshot, _, result in self.shared_results:
-            if owner == identity and bool(snapshot.get("_central")) == central and bool(snapshot.get("_skip_parking_recovery")) == bool(flight.get("_skip_parking_recovery")) and bool(snapshot.get('_refresh_aibt_coordinate')) == bool(flight.get('_refresh_aibt_coordinate')) and bool(snapshot.get('_parking_only')) == bool(flight.get('_parking_only')) and same_occurrence(snapshot, flight) and registration_key(snapshot.get("registration")) == registration_key(flight.get("registration")):
+        ttl = 15 if flight.get('_arrival_fast') else 30 if flight.get('_live_only') else 60
+        for owner, snapshot, checked, result in self.shared_results:
+            if (owner == identity and snapshot.get('_credential_version') == version and now-checked < ttl and bool(snapshot.get("_central")) == central
+                    and all(bool(snapshot.get(k)) == bool(flight.get(k)) for k in
+                        ('_skip_parking_recovery', '_refresh_aibt_coordinate', '_parking_only', '_arrival_fast', '_live_only'))
+                    and same_occurrence(snapshot, flight) and registration_key(snapshot.get("registration")) == registration_key(flight.get("registration"))):
                 return dict(result)
         try:
             query = dict(flight, _central=True) if central else flight
@@ -1200,8 +1319,64 @@ class ComatAlarm:
             self.last_successful_lookup[self.polling_key(flight, token)] = now
         self.last_successful_lookup = {k: v for k, v in self.last_successful_lookup.items() if now-v < 2*86400}
         # Store provider IDs discovered by this request to separate real legs.
-        self.shared_results.append((identity, dict(flight, _central=central, **{k: result[k] for k in ("fr24ID", "origin", "destination") if result.get(k)}), now, result))
+        self.shared_results.append((identity, dict(flight, _central=central, _credential_version=version,
+            **{k: result[k] for k in ("fr24ID", "origin", "destination") if result.get(k)}), now, result))
         return dict(result)
+
+    async def apply_ready_schedules(self, device, now):
+        """The existing worker alone commits completed private cache results."""
+        from .landing_alert import update_landing_alert
+        if device['id'] not in self.shared_authorized:
+            return
+        access = await self.stand_access(device['firebase_uid'])
+        current = self.db.execute('SELECT * FROM comat_devices WHERE id=?', (device['id'],)).fetchone()
+        if (not access or current is None or access['uid'] != device['firebase_uid']
+                or any(current[k] != device[k] for k in ('credential', 'firebase_uid', 'api_token'))
+                or not current['server_polling'] or current['expires'] <= now):
+            return
+        device = current
+        flights, prefs = json.loads(device['watch']), json.loads(device['preferences'])
+        token = self.shared_tokens.get(device['id'], device['api_token'])
+        eligible = []
+        for flight in flights:
+            if not isinstance(flight, dict) or not self.shared_monitoring.current(flight, now):
+                continue
+            if flight.get('cancelled') or flight.get('diverted'):
+                continue
+            if departure_from_ber(flight) and flight.get('atd'):
+                continue
+            if (not departure_from_ber(flight) and (flight.get('ata') or flight.get('aibt'))
+                    and not (flight.get('track_outbound') and not (flight.get('_outbound') or {}).get('atd'))):
+                continue
+            eligible.append(flight)
+        pending = []
+        for flight in sorted(eligible, key=lambda f: self.provider.schedules.last_started(dict(f, _central=True), token)):
+            # New unknown routes first get their normal FR24 resolution. Later
+            # cache refreshes are offered oldest-first, so a2-task limit cannot
+            # repeatedly select the same first two flights and starve the rest.
+            query = dict(flight, _central=True)
+            if stamp(flight.get('_checked_at')) or self.provider.schedules.last_started(query, token):
+                self.provider.schedules.request(query, token, now)
+            changes = self.provider.schedule_changes(query, token, now)
+            if not changes:
+                continue
+            updated = update_landing_alert(flight, dict(flight, **changes), now)
+            pending.extend(self.events(device['id'], flight, updated, prefs, now))
+            flight.clear(); flight.update(updated)
+        encoded = json.dumps(flights)
+        if encoded == device['watch']:
+            return
+        with self.db:
+            changed = self.db.execute('''UPDATE comat_devices SET watch=?
+                WHERE id=? AND watch=? AND preferences=? AND credential=? AND firebase_uid=?
+                AND api_token=? AND server_polling=1 AND expires>?''',
+                (encoded, device['id'], device['watch'], device['preferences'], device['credential'],
+                 device['firebase_uid'], device['api_token'], now)).rowcount
+            if changed:
+                self.db.executemany('INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)', pending)
+                self.history_sync.capture(flights, now)
+        if changed:
+            await self.deliver(device['id'], now)
 
     async def tick(self, now=None):
         async with self.poll_lock:
@@ -1210,6 +1385,7 @@ class ComatAlarm:
             self.monitor.cycle_finished = time.time() if now is None else now
 
     async def _tick(self, now):
+        from .aibt_recovery import fast_due
         await self.refresh_shared_subscriptions(now)
         report = now-self.last_monitor_report >= 300
         if report:
@@ -1222,19 +1398,52 @@ class ComatAlarm:
         # Plan only the same authorized, due central subscriptions the worker is
         # about to visit. No network request occurs until lookup needs a member.
         if isinstance(self.provider, FlightProvider):
+            self.provider.background_schedules = True
+            self.provider.schedules.wakeup = self.poll_wakeup.set
+            for device in self.db.execute('SELECT * FROM comat_devices WHERE expires>? AND server_polling=1', (now,)).fetchall():
+                try:
+                    await self.apply_ready_schedules(device, now)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exception:
+                    logging.warning('ComatAlarm schedule_cache_apply_failed kind=%s', type(exception).__name__)
             batch_flights = []
             for row in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND server_polling=1", (now,)).fetchall():
-                if row['id'] not in self.shared_authorized or now-row['last_poll'] < 60:
+                if row['id'] not in self.shared_authorized:
                     continue
                 try:
                     flights = json.loads(row['watch'])
                     if not isinstance(flights, list):
                         continue
-                    batch_flights.extend((f, self.shared_tokens.get(row['id'], row['api_token']))
-                                         for f in flights if isinstance(f, dict) and self.shared_monitoring.current(f, now))
-                except (ValueError, TypeError):
+                    for f in flights:
+                        if not isinstance(f, dict) or not self.shared_monitoring.current(f, now):
+                            continue
+                        token = self.shared_tokens.get(row['id'], row['api_token'])
+                        if fast_due(f, now):
+                            batch_flights.append((dict(f, _arrival_fast=True), token))
+                        elif live_refresh_due(f, now):
+                            batch_flights.append((dict(f, _live_only=True), token))
+                        if now-row['last_poll'] >= 60:
+                            batch_flights.append((f, token))
+                except (AttributeError, KeyError, OverflowError, ValueError, TypeError):
                     continue
             self.provider.plan_batches(batch_flights, now)
+            # All timely event/live work precedes every slow schedule lookup,
+            # not merely the unrelated flights on one particular device.
+            for quick in ('arrival', 'live'):
+                for device in self.db.execute('SELECT * FROM comat_devices WHERE expires>? AND server_polling=1', (now,)).fetchall():
+                    if device['id'] not in self.shared_authorized:
+                        continue
+                    try:
+                        due = fast_due if quick == 'arrival' else live_refresh_due
+                        if not any(due(f, now) for f in json.loads(device['watch']) if isinstance(f, dict)):
+                            continue
+                        await self.poll_device(device, now, report, quick=quick)
+                        await self.deliver(device['id'], now)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exception:
+                        logging.warning('ComatAlarm quick_poll_failed kind=%s', type(exception).__name__)
         delivered_devices = set()
         for device in self.db.execute("SELECT * FROM comat_devices WHERE expires>? AND (server_polling=1 OR foreground_until<=?)", (now,now)).fetchall():
             try:
@@ -1254,7 +1463,7 @@ class ComatAlarm:
         await self.repair_archived_arrival(now)
         active = self.db.execute("SELECT api_token FROM comat_devices WHERE expires>? AND api_token!='' ORDER BY expires DESC LIMIT 1", (now,)).fetchone()
         if active:
-            await self.api_status.refresh(active["api_token"], now=now)
+            self.api_status.request_refresh(active['api_token'], manual=False, now=now)
         self.monitor.archive(now)
         with self.db:
             self.db.execute("DELETE FROM comat_outbox WHERE created<?",(now-2*86400,))
@@ -1263,7 +1472,7 @@ class ComatAlarm:
             # temporary authorization outages. Revocation still stops all work.
             self.db.execute("UPDATE comat_devices SET api_token='',watch='[]' WHERE expires<=? AND NOT (server_polling=1 AND firebase_uid!='')",(now,))
 
-    async def poll_device(self, device, now, report=False):
+    async def poll_device(self, device, now, report=False, quick=None):
         from .landing_alert import update_landing_alert
         from . import aibt_recovery
         access = await self.stand_access(device['firebase_uid'])
@@ -1285,10 +1494,13 @@ class ComatAlarm:
         flights = [f for f in json.loads(device["watch"]) if self.shared_monitoring.current(f, now)]
         api_token = self.shared_tokens.get(device["id"], device["api_token"])
         calendar_error = "Kalenderdaten veraltet – App zur Aktualisierung öffnen" if prefs.get("calendar_valid_until", now+1) <= now else ""
-        if now-device["last_poll"] >= 60:
-            error, pending = calendar_error, []
-            ordered = sorted(flights, key=lambda f: (bool(f.get('aibt')), self.last_successful_lookup.get(self.polling_key(f, api_token), 0)))
+        if quick or now-device["last_poll"] >= 60:
+            error, pending, receipts = calendar_error, [], []
+            ordered = sorted(flights, key=lambda f: (bool(f.get('aibt')) or arrival_tracking_expired(f, now),
+                self.last_successful_lookup.get(self.polling_key(f, api_token), 0)))
             for flight in ordered:
+                if quick and not (aibt_recovery.fast_due(flight, now) if quick == 'arrival' else live_refresh_due(flight, now)):
+                    continue
                 departed = departure_from_ber(flight) and stamp(flight.get("atd")) and flight["atd"] <= now
                 if departed:
                     if previous_parking_ready(flight):
@@ -1304,19 +1516,29 @@ class ComatAlarm:
                         continue
                     if now-flight.get("_departure_repair_at", 0) < 900:
                         continue
-                if not departure_from_ber(flight) and flight.get('aibt'):
+                late_arrival = arrival_tracking_expired(flight, now)
+                if not departure_from_ber(flight) and (flight.get('aibt') or late_arrival):
                     flight.update(aibt_recovery.describe(flight, positions, now))
                 refresh_coordinate = aibt_recovery.refresh_needed(flight, positions, now)
-                repairing = bool(device["server_polling"] and not departure_from_ber(flight) and flight.get("aibt")
+                repairing = bool(device["server_polling"] and not departure_from_ber(flight) and (flight.get("aibt") or late_arrival)
                                  and (not aibt_recovery.position(flight) or refresh_coordinate))
                 outbound = bool(device["server_polling"] and flight.get("track_outbound") and not flight.get("_outbound", {}).get("atd"))
-                if arrival_tracking_expired(flight, now) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
+                if (not quick and isinstance(self.provider, FlightProvider) and device['server_polling']
+                        and aibt_recovery.fast_candidate(flight, now) and not outbound):
+                    continue  # The globally prioritized event pass owns taxi-in.
+                if (late_arrival and not (repairing and aibt_recovery.in_window(flight, now))) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
                     continue
                 recovery_due = repairing and aibt_recovery.due(flight, now, positions)
                 if repairing and not recovery_due and not outbound:
                     continue
                 try:
                     query = dict(flight, _skip_parking_recovery=True) if repairing and not recovery_due else flight
+                    if quick == 'arrival':
+                        query = dict(flight, _arrival_fast=True, _parking_only=True)
+                    elif quick == 'live':
+                        query = dict(flight, _live_only=True)
+                    elif aibt_recovery.fast_candidate(flight, now) and not aibt_recovery.fast_due(flight, now):
+                        query = dict(query, _skip_parking_recovery=True)
                     if recovery_due and refresh_coordinate:
                         query = dict(query, _refresh_aibt_coordinate=True)
                     changes = await self.shared_lookup(query, api_token, now, central=bool(device["server_polling"]))
@@ -1338,7 +1560,7 @@ class ComatAlarm:
                     if updated.get('aibt_position') and not aibt_recovery.position(updated) and not departure_from_ber(updated):
                         changes.update(aibt_position=None, stand=None)
                         updated.update(changes)
-                    if not departure_from_ber(updated) and updated.get("aibt"):
+                    if not departure_from_ber(updated) and (updated.get("aibt") or late_arrival or quick == 'arrival'):
                         changes.update(aibt_recovery.describe(updated, positions, now, lookup_error))
                         status = changes['_parking_lookup_status']
                         if status != flight.get("_parking_lookup_status"):
@@ -1353,6 +1575,10 @@ class ComatAlarm:
                         changes['_stand_prediction'] = self.stand_model.apply(updated, now, match_stand)
                         updated.update(changes)
                     updated.update(changes)
+                    message = aibt_recovery.receipt(updated, flight, now)
+                    if message:
+                        updated['_arrival_event_logged_at'] = now
+                        receipts.append((message, flight['number']))
                     updated = update_landing_alert(flight, updated, now)
                     pending.extend(self.events(device["id"], flight, updated, prefs, now))
                     flight.clear(); flight.update(updated)
@@ -1361,14 +1587,27 @@ class ComatAlarm:
                     error = "Flugabfrage fehlgeschlagen; Token, Tarif und Verbindung prüfen"
             # Compare-and-swap the entire snapshot after all network I/O. Removed
             # flights, changed preferences and foreground takeovers win the race.
+            if device['firebase_uid']:
+                access = await self.stand_access(device['firebase_uid'])
+                if not access or access['uid'] != device['firebase_uid']:
+                    return
             with self.db:
-                changed = self.db.execute("UPDATE comat_devices SET watch=?,last_poll=?,error=? WHERE id=? AND watch=? AND preferences=? AND (server_polling=1 OR foreground_until<=?) AND expires>?",(json.dumps(flights),now,error,device["id"],device["watch"],device["preferences"],now,now)).rowcount
+                checked = device['last_poll'] if quick else now
+                changed = self.db.execute("""UPDATE comat_devices SET watch=?,last_poll=?,error=?
+                    WHERE id=? AND watch=? AND preferences=? AND credential=? AND firebase_uid=? AND api_token=?
+                    AND stand_index=? AND server_polling=? AND (server_polling=1 OR foreground_until<=?) AND expires>?""",
+                    (json.dumps(flights), checked, error, device['id'], device['watch'], device['preferences'],
+                     device['credential'], device['firebase_uid'], device['api_token'], device['stand_index'],
+                     device['server_polling'], now, now)).rowcount
                 if changed:
                     self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
                     current = self.db.execute('SELECT credential,firebase_uid,server_polling FROM comat_devices WHERE id=?', (device['id'],)).fetchone()
                     if (access and current['server_polling'] and current['credential'] == device['credential']
                             and current['firebase_uid'] == device['firebase_uid'] == access['uid']):
                         self.history_sync.capture(flights, now)
+            if changed:
+                for message, number in receipts:
+                    self.monitor.record('arrival', message, number, device['id'], now)
             if report:
                 MONITOR_LOG.info("ComatAlarm monitor_result epoch=%d flights=%d committed=%s provider_error=%s events=%d",
                                 int(now), len(flights), bool(changed), bool(error), len(pending) if changed else 0)
@@ -1416,7 +1655,8 @@ class ComatAlarm:
             for row in self.db.execute('SELECT * FROM comat_app_history'):
                 try:
                     flight = json.loads(row['payload'])
-                    if (aibt_recovery.due(flight, now, positions) and not self.history_sync.removed(flight)
+                    if ((flight.get('aibt') or arrival_tracking_expired(flight, now))
+                            and aibt_recovery.due(flight, now, positions) and not self.history_sync.removed(flight)
                             and not any(same_occurrence(flight, f) for f in watched)):
                         candidates.append((row, flight))
                 except (AttributeError, KeyError, TypeError, ValueError):
@@ -1449,10 +1689,15 @@ class ComatAlarm:
                 updated.pop('aibt_position', None)
                 updated.pop('stand', None)
             updated.update(aibt_recovery.describe(updated, positions, now, lookup_error))
+            message = aibt_recovery.receipt(updated, flight, now)
+            if message:
+                updated['_arrival_event_logged_at'] = now
             # Preserve original aliases and unknown creation provenance; a repair
             # is neither a fresh user creation nor a new subscription.
             updated.pop('id', None)
             self.history_sync.capture([updated], now, created_known=bool(flight.get('_created_at_proven')))
+            if message:
+                self.monitor.record('arrival', message, flight['number'], source['id'], now)
             return  # At most one archive chain in a worker pass; HTTP budget is shared.
 
     def events(self, device_id, old, updated, prefs, now):
@@ -1539,6 +1784,7 @@ class ComatAlarm:
             app.router.add_route(method,"/comatalarm/v1/"+path,handler)
         async def worker():
             while True:
+                cycle_start = asyncio.get_running_loop().time()
                 self.poll_wakeup.clear()
                 try:
                     await self.tick()
@@ -1548,7 +1794,10 @@ class ComatAlarm:
                     # No exception text/traceback: provider errors may contain secrets.
                     logging.warning("ComatAlarm monitor_cycle_failed kind=%s; retry_in_seconds=15", type(error).__name__)
                 try:
-                    await asyncio.wait_for(self.poll_wakeup.wait(), timeout=15)
+                    # Keep a target cadence from the start of the cycle instead
+                    # of adding another 15 seconds after slow provider work.
+                    remaining = max(0, 15-(asyncio.get_running_loop().time()-cycle_start))
+                    await asyncio.wait_for(self.poll_wakeup.wait(), timeout=remaining)
                 except asyncio.TimeoutError:
                     pass
         async def tester_worker():
@@ -1573,6 +1822,8 @@ class ComatAlarm:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if isinstance(self.provider, FlightProvider):
+                await self.provider.schedules.close()
             logging.getLogger().removeHandler(self.monitor.handler)
         app.cleanup_ctx.append(context)
 

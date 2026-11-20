@@ -18,7 +18,8 @@ SCALARS = ('number', 'reference', 'created_at', 'fr24ID', 'origin', 'destination
            'registration', 'atd', 'ata', 'aibt', 'gate', 'gate_source', 'stand',
            'cancelled', 'diverted', 'packets', 'track_outbound', 'outbound_number',
            '_aibt_recovery_attempts', '_aibt_recovery_at', '_aibt_recovery_retry_at',
-           '_aibt_evidence_revision', '_parking_lookup_status')
+           '_aibt_evidence_revision', '_arrival_event_checked_at', '_arrival_event_received_at',
+           '_arrival_event_status', '_arrival_event_logged_at', '_parking_lookup_status')
 SCHEDULE = ('std', 'etd', 'atd', 'sta', 'eta', 'ata', 'aibt', 'eibt', 'gate',
             'gate_source', 'registration', 'aircraftType', 'origin', 'destination',
             'cancelled', 'diverted')
@@ -322,6 +323,10 @@ class HistorySync:
                 completed = f['_outbound']['atd']
             if not (completed or f.get('cancelled') or f.get('diverted') or arrival_tracking_expired(f, now)):
                 continue
+            if not f.get('aibt') and arrival_tracking_expired(f, now):
+                from .aibt_recovery import in_window, describe
+                if not in_window(f, now):
+                    f.update(describe(f, [], now))
             if not f.pop('_created_at_proven', None):
                 f['created_at'] = 0  # Unknown is never evidence of a later re-add.
             observed = f.pop('_terminal_observed_at', None)

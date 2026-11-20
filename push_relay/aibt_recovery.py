@@ -1,8 +1,44 @@
 """Exact AIBT evidence selection and a shared, bounded recovery policy."""
 import math
+import re
 
 EVIDENCE_REVISION = 2
 MAX_AGE = 24*3600
+FAST_INTERVAL = 15
+
+
+def fast_candidate(flight, now):
+    """An identified aircraft on taxi-in needs fresh gate events, not live polls."""
+    from .comatalarm import departure_from_ber, stamp
+    identifier, ata = flight.get('fr24ID'), stamp(flight.get('ata'))
+    return bool(isinstance(identifier, str) and identifier and ',' not in identifier
+                and not identifier.upper().startswith(('TEMP_', 'NS_'))
+                and ata and -60 <= now-ata < 25*60 and not flight.get('aibt')
+                and not departure_from_ber(flight) and not flight.get('cancelled') and not flight.get('diverted'))
+
+
+def fast_due(flight, now):
+    from .comatalarm import stamp
+    return fast_candidate(flight, now) and now-(stamp(flight.get('_arrival_event_checked_at')) or 0) >= FAST_INTERVAL
+
+
+def receipt(flight, previous, now):
+    """A safe, sparse diagnostic distinguishes a valid empty reply from no query."""
+    state = flight.get('_arrival_event_status')
+    if (state == previous.get('_arrival_event_status')
+            and now-previous.get('_arrival_event_logged_at', 0) < 300):
+        return None
+    message = {
+        'accepted': 'FR24 gate_arrival: Antwort enthält passende AIBT',
+        'no_match': 'FR24 gate_arrival: Antwort geprüft; keine passende AIBT übernommen',
+        'paused': 'FR24 gate_arrival: Abruf vorübergehend pausiert',
+        'error': 'FR24 gate_arrival: Abruf fehlgeschlagen',
+    }.get(state)
+    if message:
+        identifier = flight.get('fr24ID')
+        if isinstance(identifier, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', identifier):
+            message += ' · Leg '+identifier
+    return message
 
 
 def position(flight):
@@ -17,10 +53,17 @@ def position(flight):
     return None
 
 
+def started_at(flight):
+    from .comatalarm import stamp
+    # ATA is the only safe clock for a missing gate-arrival event. Neither a
+    # planned/EIBT time nor a stationary position proves that event occurred.
+    return stamp(flight.get('aibt')) or stamp(flight.get('ata'))
+
+
 def in_window(flight, now):
     from .comatalarm import departure_from_ber, stamp
-    aibt = stamp(flight.get('aibt'))
-    return bool(aibt and -60 <= now-aibt < MAX_AGE and not departure_from_ber(flight)
+    started = started_at(flight)
+    return bool(started and -60 <= now-started < MAX_AGE and not departure_from_ber(flight)
                 and not flight.get('cancelled') and not flight.get('diverted'))
 
 
@@ -75,6 +118,7 @@ def attempt_update(flight, now, error='', retry_at=0):
 def describe(flight, positions, now, error=None):
     from .comatalarm import match_stand, stamp
     point = position(flight)
+    confirmed = bool(stamp(flight.get('aibt')))
     previous = flight.get('_parking_recovery') or {}
     error = previous.get('error', '') if error is None else error
     next_at = None
@@ -89,16 +133,25 @@ def describe(flight, positions, now, error=None):
         if refresh_needed(flight, positions, now):
             next_at = next_attempt(flight)
     elif not in_window(flight, now):
-        state, text = 'expired', 'AIBT bestätigt · innerhalb von 24 Stunden keine passende Koordinate übernommen'
+        state = 'expired'
+        text = ('AIBT bestätigt · innerhalb von 24 Stunden keine passende Koordinate übernommen' if confirmed else
+                'Landung bestätigt · innerhalb von 24 Stunden keine AIBT übernommen')
     elif error:
-        state, text = 'paused', 'AIBT bestätigt · Koordinatenabruf pausiert: '+error
+        state = 'paused'
+        text = ('AIBT bestätigt · Koordinatenabruf pausiert: ' if confirmed else
+                'Landung bestätigt · AIBT-Abfrage pausiert: ')+error
         next_at = next_attempt(flight)
     else:
-        state, text = 'pending', 'AIBT bestätigt · Koordinate noch nicht übernommen; Pi prüft mit Warteabstand erneut'
+        state = 'pending'
+        text = ('AIBT bestätigt · Koordinate noch nicht übernommen; Pi prüft mit Warteabstand erneut' if confirmed else
+                'Landung bestätigt · AIBT noch nicht übernommen; Pi prüft Gate-Arrival erneut')
         next_at = next_attempt(flight)
-    if next_at is not None and next_at >= (stamp(flight.get('aibt')) or now)+MAX_AGE:
+    if next_at is not None and not confirmed and fast_candidate(flight, now):
+        next_at = max(now, (stamp(flight.get('_arrival_event_checked_at')) or 0)+FAST_INTERVAL)
+    if next_at is not None and next_at >= (started_at(flight) or now)+MAX_AGE:
         next_at = None
-    meta = dict(state=state, last_attempt=flight.get('_aibt_recovery_at', 0), next_attempt=next_at,
+    last_attempt = max(flight.get('_aibt_recovery_at', 0), flight.get('_arrival_event_checked_at', 0))
+    meta = dict(state=state, last_attempt=last_attempt, next_attempt=next_at,
                 attempts=attempts(flight), evidence_revision=revision(flight))
     if error and state == 'paused':
         meta['error'] = error

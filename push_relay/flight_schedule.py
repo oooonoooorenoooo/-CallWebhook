@@ -1,7 +1,79 @@
 """Shared schedule lookups for Pi-owned tracking (never manufacture runway events)."""
+import asyncio
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+
+
+class ScheduleCache:
+    """At most two private supplemental lookups; never writes application state."""
+    def __init__(self, provider):
+        self.provider = provider
+        self.results, self.started, self.tasks = {}, {}, {}
+        self.wakeup = None
+        self.closed = False
+
+    def key(self, flight, token, credentials=None):
+        credentials = self.provider.credentials if credentials is None else credentials
+        fingerprint = hashlib.sha256(json.dumps(credentials, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        return (hashlib.sha256(token.encode()).hexdigest(), fingerprint, bool(flight.get('_central')),
+                flight['number'], flight['reference'],
+                flight.get('origin') or '', flight.get('destination') or '',
+                str(flight.get('fr24ID') or '').upper(), flight.get('registration') or '')
+
+    def last_started(self, flight, token):
+        return self.started.get(self.key(flight, token), 0)
+
+    def get(self, flight, token, now):
+        entry = self.results.get(self.key(flight, token))
+        if entry is None or not 0 <= now-entry[0] < 1800:
+            return {}
+        result = dict(entry[1])
+        result['_schedule_checked_at'] = entry[0]
+        return result
+
+    def request(self, flight, token, now):
+        key = self.key(flight, token)
+        if (not self.closed and key not in self.tasks and len(self.tasks) < 2
+                and now-self.started.get(key, 0) >= 60):
+            snapshot, credentials = dict(flight), dict(self.provider.credentials)
+            self.started[key] = now
+            task = asyncio.create_task(self._fetch(key, snapshot, token, credentials, now))
+            self.tasks[key] = task
+            task.add_done_callback(lambda done: self._finished(key, done))
+        # No queued tasks: the authorized worker reoffers still-due candidates,
+        # oldest first, while completed entries keep their normal60s interval.
+        return self.get(flight, token, now)
+
+    async def _fetch(self, key, flight, token, credentials, now):
+        result = await self.provider.lookup(dict(flight, _schedule_only=True),
+                                            token, now, schedule_credentials=credentials)
+        # A result belonging to another route cannot supplement this occurrence.
+        if any(flight.get(k) and result.get(k) and flight[k] != result[k] for k in ('origin', 'destination')):
+            result = {}
+        allowed = ('_schedule', 'gate', 'gate_source', 'atd', 'ata', 'origin', 'destination',
+                   'registration', 'cancelled', 'diverted')
+        self.results[key] = (now, {k: result[k] for k in allowed if k in result})
+        self.results = {k: v for k, v in self.results.items() if now-v[0] < 1800}
+        self.started = {k: v for k, v in self.started.items() if now-v < 1800 or k in self.tasks}
+
+    def _finished(self, key, task):
+        if self.tasks.get(key) is task:
+            self.tasks.pop(key, None)
+        if not task.cancelled():
+            task.exception()  # Consume failures; retry only through the normal interval.
+        if not self.closed and self.wakeup:
+            self.wakeup()
+
+    async def close(self):
+        self.closed = True
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.tasks.clear()
 
 
 def timestamp(value, zone="UTC"):

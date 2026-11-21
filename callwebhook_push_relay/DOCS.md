@@ -23,7 +23,15 @@ Sperrfristen bleiben maßgeblich. Es wird kein neuer kostenpflichtiger Dienst
 eingerichtet. Sind auch dort keine passenden Daten vorhanden, bleibt der
 fehlende Wert ausdrücklich offen.
 
-CallWebhook Push-Dienst auf **1.2.36** aktualisieren und die dazugehörige
+Ab **1.2.37** wird der Stand-Push ausgelöst, sobald tatsächliche AIBT, passende
+Koordinate und lokal ermittelter Stand gemeinsam vorliegen. Eine vorab
+eingetroffene AIBT verbraucht den einmaligen Alarm nicht. Die Beobachtungs- und
+Übernahmezeit bleiben in der Diagnose unterscheidbar.
+Solange bei einer aktuellen Ankunft noch die Koordinate fehlt, bleibt der
+15-Sekunden-Ankunftsabgleich aktiv; die langsamere historische Nachprüfung
+verzögert diesen Durchlauf nicht.
+
+CallWebhook Push-Dienst auf **1.2.37** aktualisieren und die dazugehörige
 ComatAlarm-App installieren. Für die erweiterten Diagnoseexporte zusätzlich
 die aktualisierte vollständige Dashboard-Konfiguration übernehmen; ein
 Add-on-Update ersetzt den gespeicherten Dashboard-Inhalt nicht.

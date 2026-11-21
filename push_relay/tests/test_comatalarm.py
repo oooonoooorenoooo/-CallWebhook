@@ -159,15 +159,18 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.comat.provider.lookup.return_value = {'ata':self.now-100,'aibt':self.now-60}
         await self.comat.tick(self.now+1)
         sent = self.comat.sender.await_count
+        self.assertEqual([c.args[2]['flag'] for c in self.comat.sender.call_args_list], ['alarmLanded'])
         self.comat.provider.lookup.return_value = {'aibt_position':dict(latitude=52.36507,longitude=13.5053,timestamp=self.now-60)}
         await self.comat.tick(self.now+62)
         self.assertEqual(self.comat.provider.lookup.await_count,2)
         state = await (await self.client.get('/comatalarm/v1/state',headers=self.headers)).json()
         self.assertEqual(state['flights'][0]['stand'],'B06')
         self.assertEqual(state['flights'][0]['aibt_position']['timestamp'],self.now-60)
-        self.assertEqual(self.comat.sender.await_count,sent, 'Recovery must not replay the AIBT alert')
+        self.assertEqual(self.comat.sender.await_count,sent+1, 'The first confirmed stand must notify even when AIBT was already known')
+        self.assertEqual(self.comat.sender.call_args.args[2]['flag'], 'alarmParking')
         await self.comat.tick(self.now+123)
         self.assertEqual(self.comat.provider.lookup.await_count,2)
+        self.assertEqual(self.comat.sender.await_count,sent+1, 'Confirmed parking must not repeat')
 
     async def test_recovery_errors_back_off_without_spending_attempts(self):
         self.flight.update(aibt=self.now-100,ata=self.now-200)
@@ -272,7 +275,9 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         await self.comat.tick(self.now+1)
         self.assertEqual(self.comat.sender.await_count, 1)
         self.comat.provider.lookup.assert_not_awaited()
-        updated.update(ata=self.now-5, aibt=self.now-1, stand="B05")
+        updated.update(ata=self.now-5, aibt=self.now-1, aibt_source='FR24', stand="B05",
+                       aibt_position=dict(latitude=52.36507, longitude=13.5053,
+                                          timestamp=self.now-1, source='fr24_event'))
         await self.watch(foreground=True, relay_alerts=True, flights=[updated])
         self.assertEqual(self.comat.sender.await_count, 3)
         self.assertEqual(self.comat.sender.call_args.args[2]["flight_state"]["stand"], "B05")
@@ -358,20 +363,33 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comat.sender.await_count, 5)
 
     async def test_push_contains_confirmed_widget_milestones(self):
-        await self.watch()
+        self.flight.update(origin='FRA', destination='BER')
+        await self.watch(stand_positions=[dict(name='B05', latitude=52.36507, longitude=13.5053)])
         for index, field in enumerate(("atd", "ata", "aibt")):
             self.comat.provider.lookup.return_value = {field:self.now+index*61}
+            if field == 'aibt':
+                self.comat.provider.lookup.return_value.update(aibt_source='FlightStats',
+                    aibt_position=dict(latitude=52.36507, longitude=13.5053,
+                                       timestamp=self.now+index*61, source='adsb_lol'))
             await self.comat.tick(self.now+index*61+1)
             payload = self.comat.sender.call_args.args[2]
             self.assertEqual(payload["flight_state"]["id"], self.flight["id"])
             self.assertEqual(payload["flight_state"][field], self.now+index*61)
             self.assertNotIn("api_token", payload["flight_state"])
-            self.assertNotIn("aibt_position", payload["flight_state"])
+            if field == 'aibt':
+                self.assertEqual(payload['flag'], 'alarmParking')
+                self.assertEqual(payload['flight_state']['stand'], 'B05')
+                self.assertEqual(payload['flight_state']['aibt_position']['timestamp'], self.now+index*61)
+                self.assertEqual(payload['flight_state']['aibt_source'], 'FlightStats')
+            else:
+                self.assertNotIn("aibt_position", payload["flight_state"])
 
     async def test_all_apps_closed_for_hours_still_poll_and_deliver_events(self):
         self.flight.update(number='LH186',origin='FRA',destination='BER')
-        await self.watch(foreground=True, server_polling=True, relay_alerts=True)
-        await self.add_peer(dict(self.flight,id='peer-186'),foreground=True,server_polling=True,relay_alerts=True)
+        positions = [dict(name='B05', latitude=52.36507, longitude=13.5053)]
+        await self.watch(foreground=True, server_polling=True, relay_alerts=True, stand_positions=positions)
+        await self.add_peer(dict(self.flight,id='peer-186'),foreground=True,server_polling=True,relay_alerts=True,
+                            stand_positions=positions)
         self.comat.sender.reset_mock()
         self.comat.stand_access = AsyncMock(return_value={'uid':'approved-device','administrator':False})
         self.comat.db.execute("UPDATE comat_devices SET firebase_uid='approved-device'")
@@ -383,7 +401,9 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
             if elapsed >= 7200:
                 evidence.update(ata=self.now+7200)
             if elapsed >= 7500:
-                evidence.update(aibt=self.now+7500)
+                evidence.update(aibt=self.now+7500, aibt_source='FlightStats',
+                                aibt_position=dict(latitude=52.36507, longitude=13.5053,
+                                                   timestamp=self.now+7500, source='adsb_lol'))
             self.comat.provider.lookup.return_value=evidence
             await self.comat.tick(self.now+elapsed)
             if 7200 <= elapsed < 7261:
@@ -598,7 +618,9 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('TK1729',text)
 
     async def test_foreground_takeover_background_events_and_no_duplicates(self):
-        await self.watch(foreground=True)
+        self.flight.update(origin='FRA', destination='BER')
+        await self.watch(foreground=True,
+                         stand_positions=[dict(name='B05', latitude=52.36507, longitude=13.5053)])
         await self.comat.tick(self.now+1)
         self.comat.provider.lookup.assert_not_awaited()
         await self.watch()
@@ -608,7 +630,9 @@ class ComatAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comat.sender.call_args.args[2]['title'],'Abgehoben')
         await self.comat.tick(self.now+70)
         self.assertEqual(self.comat.sender.await_count,1)
-        self.comat.provider.lookup.return_value = {'ata':self.now+71,'aibt':self.now+73}
+        self.comat.provider.lookup.return_value = {'ata':self.now+71,'aibt':self.now+73,
+            'aibt_source':'FlightStats', 'aibt_position':dict(latitude=52.36507, longitude=13.5053,
+                                                           timestamp=self.now+73, source='adsb_lol')}
         await self.comat.tick(self.now+140)
         self.assertEqual(self.comat.sender.await_count,3)
         count = self.comat.provider.lookup.await_count

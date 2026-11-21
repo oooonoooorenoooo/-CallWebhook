@@ -43,8 +43,9 @@ class SharedMonitoringTests(unittest.IsolatedAsyncioTestCase):
         return json.loads(self.row(uid)['watch'])
 
     async def test_new_colleague_flight_reaches_closed_peer_without_app_read(self):
-        await self.own()
-        await self.colleague()
+        positions = [dict(name='B05', latitude=52.36507, longitude=13.5053)]
+        await self.own(stand_positions=positions)
+        await self.colleague(stand_positions=positions)
         self.comat.provider.lookup.return_value = {'atd': self.now, 'fr24ID': 'actual-leg'}
         await self.comat.tick(self.now+1)
         self.assertEqual(self.comat.provider.lookup.await_count, 1)
@@ -53,7 +54,9 @@ class SharedMonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.watched('reno')[0]['_shared_subscription'])
         self.comat.provider.lookup.return_value = {'ata': self.now+62, 'fr24ID': 'actual-leg'}
         await self.comat.tick(self.now+63)
-        self.comat.provider.lookup.return_value = {'aibt': self.now+124, 'fr24ID': 'actual-leg'}
+        self.comat.provider.lookup.return_value = {'aibt': self.now+124, 'fr24ID': 'actual-leg',
+            'aibt_source': 'FlightStats', 'aibt_position': dict(latitude=52.36507, longitude=13.5053,
+                                                             timestamp=self.now+124, source='adsb_lol')}
         await self.comat.tick(self.now+125)
         flags = [call.args[2]['flag'] for call in self.comat.sender.call_args_list]
         self.assertEqual(flags.count('alarmTakeoff'), 2)

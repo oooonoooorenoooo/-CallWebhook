@@ -1,3 +1,9 @@
+## 1.2.37
+
+- Eine bereits übernommene AIBT ohne Koordinate bleibt im schnellen 15-Sekunden-Ankunftsabgleich. Die langsamere historische Nachprüfung bremst diesen aktiven Durchlauf nicht mehr; auch die Diagnose zeigt den tatsächlich nächsten schnellen Versuch.
+- Der Pi versendet „Am Stand angekommen“ erst gemeinsam mit tatsächlicher AIBT, einer zeitlich passenden Koordinate und dem daraus lokal ermittelten Stand. Treffen Zeit und Koordinate getrennt ein, löst die spätere Vervollständigung den einmaligen Stand-Push aus. Die reine AIBT verbraucht den Alarm nicht mehr vorzeitig.
+- Die Regel entspricht der iPhone-App und gilt für alle freigegebenen Empfänger bei geschlossener App. Bereits versandte Alarm-IDs bleiben gegen Duplikate geschützt; Archivkorrekturen erzeugen weiterhin keine neuen Abonnements oder nachgespielten Alarme.
+
 ## 1.2.36
 
 - Benötigt für die Ankunft ausschließlich tatsächliche AIBT sowie passende Latitude/Longitude. Die Parkposition wird lokal aus dem BER-Standplatzbestand ermittelt; ein Gate- oder Standcode des Datenanbieters ist keine Voraussetzung.

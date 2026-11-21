@@ -64,7 +64,7 @@ class HistorySyncTests(unittest.IsolatedAsyncioTestCase):
         return value
 
     async def test_pi_tracked_completed_flight_syncs_after_watch_disappears_without_io(self):
-        await self.own()
+        await self.own(stand_positions=[dict(name='B06', latitude=52.36507, longitude=13.5053)])
         flight = self.seed_arrival()
         response = await self.command('track', flight['key'])
         self.assertEqual(response.status, 200)
@@ -402,13 +402,22 @@ class HistorySyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_history_import_handoff_preserves_only_existing_bounded_coordinate_repair(self):
         f = self.completed()
         f.pop('aibt_position')
-        await self.own(flights=[f])
+        await self.own(flights=[f],
+                       stand_positions=[dict(name='B06', latitude=52.36507, longitude=13.5053)])
         self.assertEqual((await self.read())['count'], 1)
         await self.own(flights=[])
         self.assertEqual(len(self.watched('reno')), 1)
+        self.assertTrue(self.watched('reno')[0].get('_arrival_recovery_only'))
+        await self.add_peer(f, flights=[], firebase_token='colleague',
+                            server_polling=True, relay_alerts=True)
         self.comat.provider.lookup.return_value = {'aibt_position': self.completed()['aibt_position']}
         await self.comat.tick(self.now)
         self.comat.sender.assert_not_awaited()
+        self.assertEqual(self.watched('reno')[0]['stand'], 'B06',
+                         'A real local match remains a silent history repair')
+        self.assertTrue(self.watched('reno')[0].get('_arrival_recovery_only'))
+        self.assertEqual(self.watched('colleague'), [],
+                         'A repair-only history row cannot create a new peer subscription')
         self.assertEqual((await self.read())['flights'][0]['aibt_position']['timestamp'], self.now-90)
         await self.own(flights=[])
         self.assertEqual(self.watched('reno'), [])

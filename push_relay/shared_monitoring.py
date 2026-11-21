@@ -41,7 +41,10 @@ class SharedMonitoring:
             if ((f.get('_shared_subscription') or repairing) and self.current(f, now)
                     and not self.removed(f) and not self.comat.monitor.operator.removed(f)
                     and not any(same_occurrence(f, other) for other in result)):
-                result.append(f)
+                retained = dict(f)
+                if repairing and f.get('aibt') and not f.get('track_outbound'):
+                    retained['_arrival_recovery_only'] = True
+                result.append(retained)
         return result
 
     def remove(self, removals, now):
@@ -100,6 +103,8 @@ class SharedMonitoring:
         union = []
         for device, watch in decoded:
             for flight in watch:
+                if flight.get('_arrival_recovery_only'):
+                    continue  # Archive repair never creates new subscriptions.
                 if (not self.current(flight, now) or self.removed(flight)
                         or self.comat.monitor.operator.removed(flight)):
                     continue

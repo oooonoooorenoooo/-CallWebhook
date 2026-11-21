@@ -239,7 +239,12 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['stand'], 'B06')
         self.assertEqual(result['_aibt_recovery_attempts'], 7)
         self.assertEqual(result['_parking_recovery']['state'], 'complete')
-        self.comat.sender.assert_not_awaited()
+        self.assertEqual(self.comat.sender.await_count, 1)
+        self.assertEqual(self.comat.sender.call_args.args[2]['flag'], 'alarmParking')
+        self.assertEqual(self.comat.sender.call_args.args[2]['flight_state']['aibt_position']['timestamp'],
+                         self.flight['aibt']-5)
+        await self.tick(15)
+        self.assertEqual(self.comat.sender.await_count, 1, 'The first recovered stand is a single parking milestone')
 
     async def test_later_alternative_data_is_accepted_without_any_fr24_retry(self):
         await self.prepare(attempts=0)
@@ -262,7 +267,8 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         saved = self.watched('reno')[0]
         self.assertEqual(saved['aibt_position'], old)
         self.assertEqual(saved['_parking_recovery']['state'], 'ambiguous')
-        self.assertNotIn('stand', saved)
+        self.assertIsNone(saved.get('stand'))
+        self.comat.sender.assert_not_awaited()
         self.arrival_lookup.assert_not_awaited()
         self.assertEqual(len(self.http.calls), 0)
         await self.tick(61)
@@ -276,7 +282,8 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
                                 details={'gate_lat': old['latitude'], 'gate_lon': old['longitude']})]
         await self.tick()
         self.assertEqual(self.watched('reno')[0]['_parking_recovery']['state'], 'ambiguous')
-        self.assertNotIn('stand', self.watched('reno')[0])
+        self.assertIsNone(self.watched('reno')[0].get('stand'))
+        self.comat.sender.assert_not_awaited()
         for elapsed in (61, 901, 3601):
             await self.tick(elapsed)
         self.assertEqual(len(self.http.calls), 0)

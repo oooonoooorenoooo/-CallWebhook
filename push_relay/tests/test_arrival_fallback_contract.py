@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from push_relay.aibt_recovery import exhaustion_marker, fr24_exhausted, position
-from push_relay.comatalarm import FlightProvider
+from push_relay.comatalarm import FlightProvider, transitions
 from push_relay.fr24_batch import planned_queries
 from push_relay.history_sync import HistorySync
 from push_relay.arrival_sources import ArrivalSources, adsb_samples
@@ -61,6 +61,24 @@ class ArrivalMarkerContracts(unittest.TestCase):
         self.assertIsNone(position(flight))
         flight['aibt_position']['timestamp'] = aibt-5
         self.assertIsNotNone(position(flight))
+
+    def test_parking_transition_waits_for_valid_position_and_stand_with_stable_event_key(self):
+        before = occurrence()
+        timed = dict(before, aibt=NOW-300, aibt_source='FlightStats')
+        point = dict(latitude=52.36507, longitude=13.5053, timestamp=NOW-305,
+                     source='adsb_lol', on_ground=True, ground_speed=0.0)
+        incomplete = [timed, dict(timed, gate='B06'), dict(timed, stand='B06'),
+                      dict(timed, aibt_position=point),
+                      dict(timed, aibt_position=point, stand=' '),
+                      dict(timed, aibt_position=dict(point, timestamp=NOW), stand='B06')]
+        for current in incomplete:
+            with self.subTest(current=current):
+                self.assertFalse(any(event[1] == 'alarmParking' for event in transitions(before, current)))
+        complete = dict(timed, aibt_position=point, stand='B06')
+        self.assertEqual([event[:2] for event in transitions(timed, complete)], [('aibt', 'alarmParking')])
+        self.assertEqual(transitions(complete, dict(complete)), [])
+        self.assertEqual(transitions(complete, dict(complete, stand='B07')), [],
+                         'A stand correction cannot create a second parking milestone')
 
 
 class ArrivalProviderContracts(unittest.IsolatedAsyncioTestCase):

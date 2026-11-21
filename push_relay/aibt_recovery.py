@@ -157,7 +157,7 @@ def attempt_update(flight, now, error='', retry_at=0):
     return result
 
 
-def describe(flight, positions, now, error=None):
+def describe(flight, positions, now, error=None, *, fast=True):
     from .comatalarm import match_stand, stamp
     point = position(flight)
     confirmed = bool(stamp(flight.get('aibt')))
@@ -190,7 +190,7 @@ def describe(flight, positions, now, error=None):
                 ('AIBT bestätigt · Koordinate noch nicht übernommen' if confirmed else
                  'Landung bestätigt · AIBT noch nicht übernommen; Ankunftsdaten werden geprüft'))
         next_at = next_attempt(flight)
-    if next_at is not None and not confirmed and fast_candidate(flight, now):
+    if next_at is not None and fast and fast_candidate(flight, now):
         next_at = max(now, max(stamp(flight.get('_arrival_event_checked_at')) or 0,
                                stamp(flight.get('_arrival_sources_checked_at')) or 0)+FAST_INTERVAL)
     if next_at is not None and next_at >= (started_at(flight) or now)+MAX_AGE:
@@ -202,9 +202,13 @@ def describe(flight, positions, now, error=None):
     if error and state == 'paused':
         meta['error'] = error
     result = dict(_parking_lookup_status=text, _parking_recovery=meta)
-    if point and positions and match_stand(point, positions):
-        result.update(stand=match_stand(point, positions), _aibt_evidence_revision=EVIDENCE_REVISION)
-        meta['evidence_revision'] = EVIDENCE_REVISION
+    if point:
+        # A new coordinate invalidates an unrelated previously stored stand.
+        # Only this point's local match may accompany the parking notification.
+        result['stand'] = match_stand(point, positions)
+        if result['stand']:
+            result['_aibt_evidence_revision'] = EVIDENCE_REVISION
+            meta['evidence_revision'] = EVIDENCE_REVISION
     return result
 
 

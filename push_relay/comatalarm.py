@@ -157,6 +157,7 @@ def package_instructions(packets):
 
 
 def transitions(old, new):
+    from .aibt_recovery import position as arrival_position
     number = new["number"]
     events = []
     if new.get("_prelanding") and not old.get("_prelanding"):
@@ -165,12 +166,18 @@ def transitions(old, new):
     for field, flag, title, body in (
         ("atd", "alarmTakeoff", "Abgehoben", f"{number} ist abgehoben."),
         ("ata", "alarmLanded", "Gelandet", f"{number} ist gelandet."),
-        ("aibt", "alarmParking", "Am Stand angekommen", f"{number} · {new.get('registration') or 'Kennzeichen unbekannt'} · Stand {new.get('stand') or 'nicht ermittelt'}" + (" · " + package_instructions(new.get("packets")) if package_instructions(new.get("packets")) else "")),
         ("cancelled", "alarmCancelled", "Flug gestrichen", f"{number} wurde gestrichen."),
         ("diverted", "alarmDiverted", "Flug umgeleitet", f"{number} wurde umgeleitet."),
     ):
         if not old.get(field) and new.get(field):
             events.append((field, flag, title, body))
+    def parked(flight):
+        return bool(not departure_from_ber(flight) and arrival_position(flight)
+                    and isinstance(flight.get('stand'), str) and flight['stand'].strip())
+    if parked(new) and not parked(old):
+        body = f"{number} · {new.get('registration') or 'Kennzeichen unbekannt'} · Stand {new['stand']}"
+        packages = package_instructions(new.get('packets'))
+        events.append(('aibt', 'alarmParking', 'Am Stand angekommen', body + (' · '+packages if packages else '')))
     if new.get("gate") and old.get("gate") != new["gate"]:
         events.append(("gate:" + new["gate"], "alarmGate", "Gate-Update", f"{number} · Gate {new['gate']}"))
     if departure_from_ber(new) and not new.get("atd") and new.get("stand"):
@@ -1286,6 +1293,8 @@ class ComatAlarm:
             for key in ARRIVAL_FIELDS:
                 if old.get(key):
                     row[key] = old[key]
+            if old.get('_arrival_recovery_only'):
+                row['_arrival_recovery_only'] = True
             if row.get('fr24_arrival_exhausted') and not valid_exhaustion(row):
                 row.pop('fr24_arrival_exhausted')
             for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized", "_departure_repair_at", "_departure_repair_attempts"):
@@ -1770,7 +1779,10 @@ class ComatAlarm:
                     continue  # The globally prioritized event pass owns taxi-in.
                 if (late_arrival and not (repairing and aibt_recovery.in_window(flight, now))) or (not departure_from_ber(flight) and flight.get("aibt") and not repairing and not outbound) or flight.get("cancelled") or flight.get("diverted"):
                     continue
-                recovery_due = repairing and aibt_recovery.due(flight, now, positions)
+                # The arrival pass already checked fast_due above. A time-only
+                # result must not put its missing coordinate back behind the
+                # slower historical-recovery interval.
+                recovery_due = repairing and (quick == 'arrival' or aibt_recovery.due(flight, now, positions))
                 if repairing and not recovery_due and not outbound:
                     continue
                 try:
@@ -1792,9 +1804,7 @@ class ComatAlarm:
                         retry_at = self.provider.cooldown.get(hashlib.sha256(api_token.encode()).hexdigest(), 0) if isinstance(self.provider, FlightProvider) else 0
                         changes.update(aibt_recovery.attempt_update(flight, now, lookup_error, retry_at))
                     if changes.get("aibt_position"):
-                        stand = match_stand(changes["aibt_position"], positions)
-                        if stand:
-                            changes["stand"] = stand
+                        changes["stand"] = match_stand(changes["aibt_position"], positions)
                     if "_inbound" in changes:
                         point = (changes["_inbound"] or {}).get("aibt_position")
                         changes["stand"] = match_stand(point, positions) if point else None
@@ -1943,7 +1953,7 @@ class ComatAlarm:
             if updated.get('aibt_position') and not aibt_recovery.position(updated):
                 updated.pop('aibt_position', None)
                 updated.pop('stand', None)
-            updated.update(aibt_recovery.describe(updated, positions, now, lookup_error))
+            updated.update(aibt_recovery.describe(updated, positions, now, lookup_error, fast=False))
             message = aibt_recovery.receipt(updated, flight, now)
             if message:
                 updated['_arrival_event_logged_at'] = now
@@ -1956,6 +1966,8 @@ class ComatAlarm:
             return  # At most one archive chain in a worker pass; HTTP budget is shared.
 
     def events(self, device_id, old, updated, prefs, now):
+        if old.get('_arrival_recovery_only') or updated.get('_arrival_recovery_only'):
+            return []
         pending = []
         for event, flag, title, body in transitions(old, updated):
             observed = stamp(updated.get(event))

@@ -3,7 +3,9 @@ import asyncio
 import hashlib
 import json
 import unittest
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 from push_relay.comatalarm import FlightProvider
 from push_relay.tests import test_shared_monitoring as shared_fixtures
@@ -130,6 +132,65 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await task
+
+    async def test_partial_aibt_then_local_stand_notifies_both_closed_apps_once(self):
+        flight = self.taxi_flights(1)[0]
+        self.configure([flight])
+        await self.own(flights=[flight], stand_positions=self.positions())
+        await self.add_peer(dict(flight, id='other-closed-phone-flight'), firebase_token='colleague',
+                            server_polling=True, relay_alerts=True, stand_positions=self.positions())
+        actual, observed = self.now-10, self.now-15
+        self.arrival_lookup.return_value = dict(aibt=actual, aibt_source='FlightStats',
+            _arrival_sources_checked_at=self.now, _arrival_sources_status='aibt_only')
+
+        # The real worker receives the empty FR24 reply and commits only the
+        # independently confirmed time. Neither phone opens or posts again.
+        await self.tick(0)
+        for uid in ('reno', 'colleague'):
+            saved = self.watched(uid)[0]
+            self.assertEqual(saved['aibt'], actual)
+            self.assertEqual(saved['aibt_source'], 'FlightStats')
+            self.assertFalse(saved.get('aibt_position'))
+            self.assertFalse(saved.get('stand'))
+            self.assertIn('fr24_arrival_exhausted', saved)
+        self.comat.sender.assert_not_awaited()
+        self.assertEqual([call[1] for call in self.http.calls], ['historic/flight-events/light'])
+
+        point = dict(latitude=52.36507, longitude=13.5053, timestamp=observed,
+                     source='adsb_lol', on_ground=True, ground_speed=0.0)
+        self.arrival_lookup.return_value = dict(aibt=actual, aibt_source='FlightStats',
+            aibt_position=point, _arrival_sources_checked_at=self.now+15,
+            _arrival_sources_status='complete')
+
+        async def assert_committed_before_push(token, environment, payload):
+            saved = json.loads(self.comat.db.execute(
+                'SELECT watch FROM comat_devices WHERE token=?', (token,)).fetchone()['watch'])[0]
+            self.assertEqual(saved['aibt'], actual)
+            self.assertEqual(saved['aibt_position'], point)
+            self.assertEqual(saved['stand'], 'B06')
+            self.assertEqual(payload['flag'], 'alarmParking')
+            self.assertEqual(payload['flight_state']['aibt'], actual)
+            self.assertEqual(payload['flight_state']['aibt_position'], point)
+            self.assertEqual(payload['flight_state']['stand'], 'B06')
+            self.assertIn('Stand B06', payload['body'])
+            return True
+
+        self.comat.sender.side_effect = assert_committed_before_push
+        # A known AIBT must keep the active arrival's 15-second fast lane while
+        # its independently observed coordinate is still missing.
+        await self.tick(15)
+        self.assertEqual(self.comat.sender.await_count, 2)
+        self.assertEqual(len({call.args[0] for call in self.comat.sender.call_args_list}), 2)
+        day = datetime.fromtimestamp(flight['reference'], ZoneInfo('Europe/Berlin')).date().isoformat()
+        expected_event = hashlib.sha256((flight['number']+':'+day+':aibt').encode()).hexdigest()
+        self.assertEqual({call.args[2]['event_id'] for call in self.comat.sender.call_args_list}, {expected_event})
+        for uid in ('reno', 'colleague'):
+            self.assertEqual(self.watched(uid)[0]['stand'], 'B06')
+        for offset in (30, 45, 60):
+            await self.tick(offset)
+        self.assertEqual(self.comat.sender.await_count, 2, 'Each recipient gets only the first confirmed stand')
+        self.assertEqual([call[1] for call in self.http.calls], ['historic/flight-events/light'],
+                         'Completing parking cannot retry the exhausted FR24 occurrence')
 
     async def test_fifteen_event_ids_share_one_call_and_429_never_fans_out(self):
         tracked = self.taxi_flights(16)

@@ -1,6 +1,6 @@
 # ComatAlarm im Home-Assistant-Dashboard
 
-Der Reiter zeigt gespeicherte Pi-Zustände. Die Ankunftstabelle lädt auf Anforderung eine gemeinsame BER-Tagesliste; daraus können Administratoren Flüge überwachen oder bestehende Flüge vom Pi entfernen. Ereignisse, Push-Versand und Fehler lassen sich direkt kopieren oder als Textdatei herunterladen. Die Exportfunktionen benötigen kein App- oder Add-on-Update, wenn die bisherige Pi-Übersicht bereits funktioniert.
+Der Reiter zeigt gespeicherte Pi-Zustände. Die Ankunftstabelle lädt auf Anforderung eine gemeinsame BER-Tagesliste; daraus können Administratoren Flüge überwachen oder bestehende Flüge vom Pi entfernen. Ereignisse, Push-Versand und Fehler lassen sich direkt kopieren oder als Textdatei herunterladen. Unter **FR24-Endpunkt prüfen** kann der Administrator einen historischen Flight-Events-Light-Abruf anhand der FR24-ID ausführen und dessen HTTP-Status und Antwort anzeigen, kopieren oder als JSON herunterladen. Dafür nutzt der Pi seinen vorhandenen FR24-Token; ein iOS-Update oder die Eingabe eines Tokens ist nicht erforderlich.
 
 ## Einrichten
 
@@ -10,14 +10,26 @@ Der Reiter zeigt gespeicherte Pi-Zustände. Die Ankunftstabelle lädt auf Anford
 
 ## Vorhandene Ansicht aktualisieren
 
-Die Dashboard-Konfiguration wird in Home Assistant gespeichert. Ein Update des Push-Dienst-Add-ons, einschließlich 1.2.33, ersetzt diese Konfiguration nicht automatisch. Die neuen Export-Schaltflächen erscheinen erst nach Übernahme der aktualisierten View. Sie können unabhängig vom Add-on-Update verwendet werden.
+Die Dashboard-Konfiguration wird in Home Assistant gespeichert. Ein Update des Push-Dienst-Add-ons ersetzt diese Konfiguration nicht automatisch. Die neuen Schaltflächen erscheinen erst nach Übernahme der aktualisierten View. **FR24-Endpunkt prüfen** benötigt zusätzlich den Push-Dienst ab **1.2.35** und die zugehörige aktuelle Home-Assistant-Integration, die den neuen Administratorbefehl weiterleitet. Nach einem Integrationsupdate Home Assistant neu starten. Die bisherigen Protokollexporte benötigen diese Erweiterung nicht.
 
 1. Im vorhandenen Dashboard den YAML-/Rohkonfigurationseditor öffnen und den bisherigen Stand sichern.
 2. Die aktuelle [comatalarm.yaml](comatalarm.yaml) öffnen und den vollständigen Inhalt übernehmen.
 3. Wenn der Editor die **einzelne View** bearbeitet, deren gesamten Inhalt durch diese Datei ersetzen. Wenn der Editor das **gesamte Dashboard** mit `views:` zeigt, ausschließlich den Listeneintrag mit `path: comatalarm` ersetzen. Der Dateiinhalt bildet einen einzelnen Eintrag dieser Liste; Listenstrich und Einrückung entsprechend den anderen Views beibehalten. Alle übrigen Views bleiben bestehen. Existiert der Reiter noch nicht, diesen Eintrag unter `views:` ergänzen, beispielsweise unmittelbar nach Home.
-4. Speichern und den ComatAlarm-Reiter neu laden. Oben muss **Diagnose teilen** mit **Kopieren**, **.txt herunterladen** und **JSON herunterladen** erscheinen.
+4. Speichern und den ComatAlarm-Reiter neu laden. Oben muss **Diagnose teilen** mit **Kopieren**, **.txt herunterladen** und **JSON herunterladen** erscheinen. Unter **API-Status** steht der neue Bereich **FR24-Endpunkt prüfen**.
 
 Im Repository ist die einzelne ComatAlarm-View vorhanden. Eine vollständige, aktuelle Reno-Dashboarddatei liegt hier nicht vor; die View darf deshalb nicht als Ersatz für das gesamte vorhandene Dashboard eingefügt werden.
+
+## FR24 Historic Flight Events Light direkt prüfen
+
+1. **FR24-Endpunkt prüfen** aufklappen und die einzelne **FR24-ID** eingeben, beispielsweise `42a83e5a`. In Flugdetails und Verlaufseinträgen mit gespeicherter ID gibt es auch **FR24-ID … prüfen**; das übernimmt nur die ID in das Eingabefeld und startet noch keinen Abruf.
+2. **Ankunft am Stand · gate_arrival** für die AIBT-Diagnose wählen. **Alle Ereignisse** verwendet den FR24-Filter `event_types=all`.
+3. **Abfragen** anklicken oder im ID-Feld die Eingabetaste drücken. Der Pi führt einen einzelnen GET auf `https://fr24api.flightradar24.com/api/historic/flight-events/light` mit `flight_ids` und `event_types` aus. Der vorhandene Token wird ausschließlich serverseitig verwendet. Der Abruf verbraucht FR24-API-Guthaben und beachtet die gemeinsame Anbieterbegrenzung.
+4. HTTP-Status, angefragte ID, Filter und Abrufzeit in Berlin/UTC zusammen mit dem Antwortinhalt prüfen. Auch Antworten mit HTTP-Fehlerstatus und nicht als JSON lesbare Antworten werden als Diagnose angezeigt. Eine technische Sperre oder ein fehlender Token erscheint ausdrücklich als fehlende HTTP-Antwort, nicht als leerer erfolgreicher Abruf.
+5. Mit **Kopieren** oder **JSON herunterladen** die Antwort samt Abfragekontext teilen. Falls die Zwischenablage gesperrt ist, erscheint ein markierbares JSON-Textfeld. Der Dateiname enthält FR24-ID und Exportzeit.
+
+Die Antwort wird für diese Ansicht nicht durch den AIBT-Parser, einen BER-Koordinatenfilter oder die Standplatzzuordnung reduziert. Beispielsweise bleiben `gate_ident: null`, `timestamp`, `gate_lat` und `gate_lon` in ihrer ursprünglichen Struktur sichtbar. Der Pi entfernt Zugangsdaten aus Antwortinhalten; eine Größenbegrenzung oder solche Bereinigungen werden in der Anzeige und im Export benannt. Providertexte werden ausschließlich als Text dargestellt.
+
+Diese manuelle Prüfung verändert keine Flugwerte, AIBT, Parkpositionen oder Push-Zustände. Die 15-sekündige Monitoraktualisierung ruft diesen Endpunkt nicht erneut ab. Eingabe, Auswahl und Abfrageergebnis bleiben während der Aktualisierung erhalten. Die Ergebnisüberschrift nennt immer die tatsächlich abgefragte FR24-ID, auch wenn anschließend eine andere ID in das Feld eingegeben wird. Für einen weiteren Abruf erneut **Abfragen** wählen.
 
 ## Protokolle kopieren und herunterladen
 
@@ -30,7 +42,7 @@ Jeder Export nennt Exportzeit, Pi-Datenstand, Empfangszeit im Dashboard, gewähl
 
 **Kopieren** versucht zuerst die Browser-Zwischenablage und anschließend die verfügbare Textauswahl-Kopierfunktion. Sind beide gesperrt, erscheint ein markierbares Textfeld zum manuellen Kopieren. Der Download verwendet eine lokale UTF-8-Datei mit festem Namensmuster, zum Beispiel `comatalarm-history-2026-11-20-2026-11-20T08-30-00-000Z.txt`. Die Oberfläche bestätigt den gestarteten Download; in einer App oder einem Browser ohne Downloadfreigabe kann die Kopierfunktion verwendet werden.
 
-Die Schaltflächen verwenden nur den bereits autorisiert geladenen Monitorstand. Sie starten keine zusätzlichen Anbieterabfragen und senden nichts an Dritte. Exportiert werden ausdrücklich freigegebene Anzeigefelder; Gerätepseudonyme bleiben erhalten, Zugangsdaten, Firebase-UIDs, APNs-Tokens, Request-Header und rohe Anbieterantworten bleiben ausgeschlossen. Eine APNs-Annahme bleibt auch im Export eine Annahme durch Apple, keine Zustell- oder Lesebestätigung des iPhones.
+Die Schaltflächen zum Protokollexport verwenden nur den bereits autorisiert geladenen Monitorstand. Sie starten keine zusätzlichen Anbieterabfragen und senden nichts an Dritte. Exportiert werden ausdrücklich freigegebene Anzeigefelder; Gerätepseudonyme bleiben erhalten, Zugangsdaten, Firebase-UIDs, APNs-Tokens, Request-Header und rohe Anbieterantworten bleiben ausgeschlossen. Die separate FR24-Endpunktprüfung hat ihren eigenen Antwort-Export wie oben beschrieben. Eine APNs-Annahme bleibt auch im Export eine Annahme durch Apple, keine Zustell- oder Lesebestätigung des iPhones.
 
 ## Bedeutung
 
@@ -54,9 +66,9 @@ Der Pi archiviert automatisch den letzten bekannten Stand je Flugtag vor dem Ent
 
 Wartend bedeutet: kein bestätigter Abflug und keine aktuelle Luftposition. Aktiv umfasst abgeflogene oder gelandete, noch nicht am Stand bestätigte Ankünfte. Abgeschlossen bedeutet AIBT bei Ankünften, ATD bei Abflügen ab BER, Ende des vorhandenen Ankunfts-Nachlaufs ohne AIBT oder Annullierung/Umleitung. Archivierte und abgeschlossene Kacheln heißen „Abgeschlossen · im Verlauf“. Sie enthalten nur Flugidentität, Flugplanzeiten, Parkposition/Gate, Pakete und gegebenenfalls Vor-/Folgeflug. Live-Telemetrie, Positionsalter und Registrierungs-/Gerätestatus entfallen. Push-Informationen stehen ausschließlich im Ereignisbereich. Noch laufende heutige Flüge werden nicht zusätzlich als abgeschlossen im Verlauf dargestellt.
 
-Frontend-Regressionsprüfungen: `node homeassistant/dashboards/test-monitor.cjs` und `node homeassistant/dashboards/test-monitor-exports.cjs` (Python mit PyYAML erforderlich). Die Exportprüfung verwendet synthetische Daten und prüft Abschnittsfilter, Berliner Tagesgrenzen, Datenalter, ausgeschlossene Zugangsdaten, Zwischenablage-Fallback, manuelle Textauswahl und UTF-8-Dateien.
+Frontend-Regressionsprüfungen: `node homeassistant/dashboards/test-monitor.cjs`, `node homeassistant/dashboards/test-monitor-exports.cjs` und `node homeassistant/dashboards/test-monitor-fr24.cjs` (Python mit PyYAML erforderlich). Die Prüfungen verwenden synthetische Daten und prüfen Abschnittsfilter, Berliner Tagesgrenzen, Datenalter, ausgeschlossene Zugangsdaten, Zwischenablage-Fallback, manuelle Textauswahl und UTF-8-Dateien. Die FR24-Prüfung deckt den ausdrücklich ausgelösten Einzelabruf, die Bindung eines Ergebnisses an seine ID, vollständige verschachtelte Ereignisfelder, Fehlerantworten, sichere Textdarstellung und Diagnoseexport ab.
 
-Interaktionen werden zusätzlich mit der echten `button-card` im Browser geprüft: `BUTTON_CARD_BUNDLE=/pfad/button-card.js CHROMIUM_PATH=/pfad/chromium node homeassistant/dashboards/test-monitor-browser.cjs` (Playwright und PyYAML erforderlich). Der Test umfasst Maus, Tastatur, Touch, verschachtelte Flugdetails, Zustandserhalt bei Aktualisierung, Tagesauswahl, Kopieren sowie TXT-/JSON-Downloads. Der Inhaltsbereich aktiviert eigene Pointer-Ereignisse und trennt seine Bedienelemente vom Action-Handler der umgebenden Karte, damit dieser das Aufklappen oder die Textauswahl nicht verhindert. Die Prüfung umfasst auch das Hinzufügen einer Überwachung, Bestätigen/Abbrechen des Löschens und bereinigte Archivkacheln.
+Interaktionen werden zusätzlich mit der echten `button-card` im Browser geprüft: `BUTTON_CARD_BUNDLE=/pfad/button-card.js CHROMIUM_PATH=/pfad/chromium node homeassistant/dashboards/test-monitor-browser.cjs` (Playwright und PyYAML erforderlich). Der Test umfasst Maus, Tastatur, Touch, verschachtelte Flugdetails, Zustandserhalt bei Aktualisierung, Tagesauswahl, Kopieren sowie TXT-/JSON-Downloads. Der Inhaltsbereich aktiviert eigene Pointer-Ereignisse und trennt seine Bedienelemente vom Action-Handler der umgebenden Karte, damit dieser das Aufklappen oder die Textauswahl nicht verhindert. Die Prüfung umfasst auch das Hinzufügen einer Überwachung, Bestätigen/Abbrechen des Löschens, bereinigte Archivkacheln und die FR24-Abfrage einschließlich Eingabe, Fokus und Textauswahl über eine Aktualisierung hinweg.
 
 
 ## Ankunftstabelle und Löschen

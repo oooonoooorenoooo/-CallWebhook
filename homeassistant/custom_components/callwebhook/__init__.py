@@ -16,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import CoreState, HomeAssistant
 
 DOMAIN = "callwebhook"
-BACKEND_API_VERSION = 21
+BACKEND_API_VERSION = 22
 BACKEND_BOOT_ID = secrets.token_hex(16)
 
 HOST = "192.168.178.1"
@@ -1127,11 +1127,21 @@ class ComatAlarmMonitorView(HomeAssistantView):
         payload = None
         if command:
             payload = await request.json()
-            if not isinstance(payload,dict) or payload.get("action") not in ("delete","track","arrivals","refresh_arrivals"):
+            if not isinstance(payload,dict) or payload.get("action") not in ("delete","track","arrivals","refresh_arrivals","fr24_historic_events"):
                 raise web.HTTPBadRequest(text="Ungültiger Monitor-Befehl")
             if payload["action"] in ("delete","track") and (not isinstance(payload.get("key"),str) or len(payload["key"])!=64 or any(c not in "0123456789abcdef" for c in payload["key"])):
                 raise web.HTTPBadRequest(text="Ungültiger Flugschlüssel")
-            payload = {k:payload[k] for k in ("action","key") if k in payload}
+            if payload["action"] == "fr24_historic_events":
+                flight_id = payload.get("fr24_id")
+                event_types = payload.get("event_types", "gate_arrival")
+                if (not isinstance(flight_id,str) or not 1 <= len(flight_id.strip()) <= 64
+                        or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in flight_id.strip())
+                        or not isinstance(event_types,str) or event_types not in ("gate_arrival","all","")):
+                    raise web.HTTPBadRequest(text="Ungültige FR24-ID oder Ereignisauswahl")
+                payload = {"action":"fr24_historic_events", "fr24_id":flight_id.strip(),
+                           "event_types":event_types or "all"}
+            else:
+                payload = {k:payload[k] for k in ("action","key") if k in payload}
         day = request.query.get("day", "")
         if day and (len(day)!=10 or not day.replace("-", "").isdigit() or day[4]!="-" or day[7]!="-"):
             raise web.HTTPBadRequest(text="Ungültiger Verlaufstag")
@@ -1154,6 +1164,8 @@ class ComatAlarmMonitorView(HomeAssistantView):
                     if command and response.status == 409:
                         return web.json_response({"error":"Aktion nicht möglich: Ankunftstabelle aktualisieren und freigegebene Pi-Geräteregistrierung prüfen"},status=409)
                     if response.status != 200:
+                        if command and payload["action"] == "fr24_historic_events":
+                            return web.json_response({"error":"FR24-Prüfung nicht verfügbar; Push-Dienst auf 1.2.35 oder neuer aktualisieren"},status=502)
                         return web.json_response({"error":"Monitor nicht verfügbar; Push-Dienst auf 1.2.26 oder neuer aktualisieren"},status=502)
                     body = await response.read()
                     if len(body)>2_000_000:

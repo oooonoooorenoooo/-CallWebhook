@@ -64,7 +64,7 @@ jobs:
           load: true
           tags: callwebhook-push-relay:ci
       - name: Verify ARM64 relay imports
-        run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import push_relay.shared_monitoring; import push_relay.landing_alert; import push_relay.fr24_batch; import push_relay.history_sync; import push_relay.aibt_recovery; from push_relay.comatalarm import FlightProvider; FlightProvider(); import run; print('ARM64 relay dependencies ready')"
+        run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import push_relay.shared_monitoring; import push_relay.landing_alert; import push_relay.fr24_batch; import push_relay.history_sync; import push_relay.aibt_recovery; import push_relay.fr24_diagnostics; from push_relay.comatalarm import FlightProvider; FlightProvider(); import run; print('ARM64 relay dependencies ready')"
 
   comatalarm-dashboard:
     runs-on: ubuntu-latest
@@ -88,6 +88,7 @@ jobs:
           export BUTTON_CARD_BUNDLE="$RUNNER_TEMP/button-card.js"
           node homeassistant/dashboards/test-monitor.cjs
           node homeassistant/dashboards/test-monitor-exports.cjs
+          node homeassistant/dashboards/test-monitor-fr24.cjs
           node homeassistant/dashboards/test-monitor-browser.cjs
       - name: Save dashboard browser screenshots
         if: always()
@@ -116,6 +117,7 @@ jobs:
           export PATH="$RUNNER_TEMP/backend-tests/bin:$PATH"
           node homeassistant/dashboards/test-monitor.cjs
           node homeassistant/dashboards/test-monitor-exports.cjs
+          node homeassistant/dashboards/test-monitor-fr24.cjs
       - name: Test HA token lifetime and concurrent renewal
         run: |
           swiftc CallWebhook/HATokenRefresh.swift tests/HATokenRefreshTests.swift -o "$RUNNER_TEMP/ha-token-tests"

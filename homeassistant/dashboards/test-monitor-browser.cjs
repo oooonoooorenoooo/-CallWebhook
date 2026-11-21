@@ -18,7 +18,7 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   await page.evaluate(()=>{window.cardHelpers={};});
   await page.addScriptTag({path:process.env.BUTTON_CARD_BUNDLE});
   await page.evaluate(config=>{
-   window.calls=[];window.posts=[];window.flightDeleted=false;window.arrivalTracked=false;window.copiedText='';
+   window.calls=[];window.posts=[];window.flightDeleted=false;window.arrivalTracked=false;window.copiedText='';window.fr24Status=200;
    // Exercise the real textarea selection/click path without using the host clipboard.
    document.execCommand=command=>{
     if(command!=='copy')return false;
@@ -34,13 +34,17 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
     callApi:async(method,path,body)=>{
      if(method==='POST'){
       window.posts.push(body);
+      if(body.action==='fr24_historic_events'){
+       await new Promise(r=>setTimeout(r,30));
+       return {ok:window.fr24Status===200,diagnostic:{schema:'comatalarm.fr24-events.v1',requested_at:now,completed_at:now,endpoint:'https://fr24api.flightradar24.com/api/historic/flight-events/light',method:'GET',params:{flight_ids:body.fr24_id,event_types:body.event_types},http_status:window.fr24Status,content_type:'application/json',response:window.fr24Status===200?{data:[{fr24_id:body.fr24_id,events:[{type:'gate_arrival',timestamp:'2023-01-27T06:16:18Z',details:{gate_ident:null,gate_lat:55.61253,gate_lon:12.63116}}]}]}:{message:'Rate limit <img src=x onerror=alert(1)>'},response_text:null,error:window.fr24Status===200?null:'upstream_http',message:'FR24 HTTP '+window.fr24Status,response_truncated:false,redacted:false}};
+      }
       if(body.action==='delete')window.flightDeleted=true;
       if(body.action==='track')window.arrivalTracked=true;
       return {ok:true,message:'Aktion gespeichert'};
      }
      window.calls.push(path);await new Promise(r=>setTimeout(r,30));
      const day=decodeURIComponent(path.split('day=')[1]);
-     return {generated_at:now,cycle_started:now,cycle_finished:now,api_status:{results:{FR24:'OK'}},pushes:{pending:0,accepted:1,expired:0},stand_model:{ready:true},devices:[],api_token:'PRIVATE_TEST_TOKEN',events:[{timestamp:now-10,kind:'event',flight:'LH194',device:'Gerät abc123',message:'Landung bestätigt; AIBT noch nicht übernommen'},{timestamp:now-5,kind:'push_accepted',flight:'LH194',device:'Gerät abc123',message:'alarmLanded: Apple angenommen'},{timestamp:now-1,kind:'error',flight:'LH194',message:'FR24: HTTP 429; Anbieterabfrage fehlgeschlagen'}],flights:window.flightDeleted?[]:[{key:'a'.repeat(64),number:'LH186',day:today,category:'active',origin:'FRA',destination:'BER',live:{},schedule:{},subscribers:[]}],arrivals:{day:today,fetched_at:now,flights:[{key:'b'.repeat(64),number:'EW207',airline:'Eurowings',origin:'CGN',origin_name:'Köln',reference:now+3600,schedule:{sta:now+3600},tracked:window.arrivalTracked,available:true}]},history:{day,available_days:[today],flights:[{key:'c'.repeat(64),number:'LH194',day,origin:'FRA',destination:'BER',registration:'D-AISP',category:'completed',stand:'B06',aibt:now-3600,live:{alt:100,gspeed:20},schedule:{},subscribers:[{device:'Gerät abc',status:'Registrierung abgelaufen'}]}],events:[{timestamp:Date.parse(day+'T12:00:00Z')/1000,kind:'event',flight:'LH194',message:'Verlaufseintrag am ausgewählten Tag'}]} };
+     return {generated_at:now,cycle_started:now,cycle_finished:now,api_status:{results:{FR24:'OK'}},pushes:{pending:0,accepted:1,expired:0},stand_model:{ready:true},devices:[],api_token:'PRIVATE_TEST_TOKEN',events:[{timestamp:now-10,kind:'event',flight:'LH194',device:'Gerät abc123',message:'Landung bestätigt; AIBT noch nicht übernommen'},{timestamp:now-5,kind:'push_accepted',flight:'LH194',device:'Gerät abc123',message:'alarmLanded: Apple angenommen'},{timestamp:now-1,kind:'error',flight:'LH194',message:'FR24: HTTP 429; Anbieterabfrage fehlgeschlagen'}],flights:window.flightDeleted?[]:[{key:'a'.repeat(64),number:'LH186',day:today,category:'active',origin:'FRA',destination:'BER',live:{},schedule:{},subscribers:[]}],arrivals:{day:today,fetched_at:now,flights:[{key:'b'.repeat(64),number:'EW207',airline:'Eurowings',origin:'CGN',origin_name:'Köln',reference:now+3600,schedule:{sta:now+3600},tracked:window.arrivalTracked,available:true}]},history:{day,available_days:[today],flights:[{key:'c'.repeat(64),number:'LH194',day,fr24ID:'42a83e5a',origin:'FRA',destination:'BER',registration:'D-AISP',category:'completed',stand:'B06',aibt:now-3600,live:{alt:100,gspeed:20},schedule:{},subscribers:[{device:'Gerät abc',status:'Registrierung abgelaufen'}]}],events:[{timestamp:Date.parse(day+'T12:00:00Z')/1000,kind:'event',flight:'LH194',message:'Verlaufseintrag am ausgewählten Tag'}]} };
     }};
    document.body.append(card);
   },config);
@@ -96,6 +100,44 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   assert.doesNotMatch(exported,/PRIVATE_TEST_TOKEN|api_token/);
   assert.equal(await page.evaluate(()=>window.calls.length),readsBeforeExport,'exports use the loaded snapshot');
   assert.equal(await page.evaluate(()=>window.posts.length),postsBeforeExport,'export is not a monitor command');
+  // The explicit FR24 check is independent of display refreshes and flight state.
+  const fr24=page.locator('details[data-cm-key="fr24"]'),input=fr24.locator('input[data-cm-fr24-input="id"]');
+  await act(archive.locator('button[data-cm-fr24="fill"]'));
+  await page.waitForFunction(()=>window.testCard.shadowRoot.querySelector('[data-cm-key="fr24"]').open);
+  assert.equal(await input.inputValue(),'42a83e5a');
+  assert.equal(await page.evaluate(()=>window.posts.filter(x=>x.action==='fr24_historic_events').length),0,'filling or opening never queries FR24');
+  await input.fill('42a83e5a');
+  await input.evaluate(e=>{e.focus();e.setSelectionRange(2,5);window.testCard.requestUpdate('_config');});
+  await page.waitForTimeout(80);
+  assert.deepEqual(await input.evaluate(e=>({value:e.value,focused:e.getRootNode().activeElement===e,start:e.selectionStart,end:e.selectionEnd})),{value:'42a83e5a',focused:true,start:2,end:5},'typed ID, focus and selection survive monitor redraw');
+  if(mobile)await act(fr24.locator('button[data-cm-fr24="query"]'));else await input.press('Enter');
+  await page.waitForFunction(()=>window.testCard._comatFr24Result?.http_status===200);
+  assert.equal(await page.evaluate(()=>window.posts.filter(x=>x.action==='fr24_historic_events').length),1);
+  const raw=JSON.parse(await fr24.locator('pre').innerText());
+  assert.deepEqual(raw.data[0].events[0].details,{gate_ident:null,gate_lat:55.61253,gate_lon:12.63116});
+  await act(fr24.locator('button[data-cm-fr24="copy"]'));
+  await page.waitForFunction(()=>window.copiedText.includes('comatalarm.fr24-events.v1'));
+  const copied=JSON.parse(await page.evaluate(()=>window.copiedText));
+  assert.equal(copied.http_status,200);assert.equal(copied.params.flight_ids,'42a83e5a');assert.deepEqual(copied.response,raw);
+  const fr24DownloadPromise=page.waitForEvent('download');
+  await act(fr24.locator('button[data-cm-fr24="json"]'));
+  const fr24Download=await fr24DownloadPromise;
+  assert.match(fr24Download.suggestedFilename(),/^comatalarm-fr24-events-42a83e5a-/);
+  assert.deepEqual(JSON.parse(readFileSync(await fr24Download.path(),'utf8')),copied);
+  await input.fill('another-leg');await page.evaluate(()=>window.testCard.requestUpdate('_config'));
+  await page.waitForTimeout(80);
+  assert.equal(await input.inputValue(),'another-leg');assert.match(await fr24.innerText(),/FR24-ID 42a83e5a/);
+  assert.equal(await page.evaluate(()=>window.posts.filter(x=>x.action==='fr24_historic_events').length),1,'copy, download, typing and refresh do not query');
+  await fr24.locator('select').selectOption('all');
+  await page.evaluate(()=>{window.fr24Status=429;});
+  await act(fr24.locator('button[data-cm-fr24="query"]'));
+  await page.waitForFunction(()=>window.testCard._comatFr24Result?.http_status===429);
+  assert.match(await fr24.innerText(),/HTTP 429/);
+  assert.equal(await page.evaluate(()=>window.posts.filter(x=>x.action==='fr24_historic_events').at(-1).event_types),'all');
+  assert.equal(await fr24.locator('img').count(),0,'provider text must not become HTML');
+  assert.match(await fr24.locator('pre').innerText(),/Rate limit <img/);
+  await fr24.screenshot({path:'/tmp/comat-fr24-'+(mobile?'touch':'desktop')+'.png'});
+  await act(fr24.locator(':scope > summary'));
   const arrivals=page.locator('details[data-cm-key="arrivals"]');
   await act(arrivals.locator(':scope > summary'));
   const airline=page.locator('details[data-cm-key="airline:Eurowings"]');
@@ -120,7 +162,7 @@ const config=JSON.parse(spawnSync('python3',['-c',"import yaml,json,sys; print(j
   assert.deepEqual(errors,[]);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'no horizontal overflow');
   await page.screenshot({path:'/tmp/comat-interaction-'+(mobile?'touch':'desktop')+'.png',fullPage:true});
-  console.log('PASS real button-card: '+(mobile?'touch':'mouse + keyboard')+', nested details, history, clean archive, copy, filtered TXT/JSON downloads, add monitoring and confirmed deletion');
+  console.log('PASS real button-card: '+(mobile?'touch':'mouse + keyboard')+', nested details, history, clean archive, log exports, explicit FR24 query, typed input/focus/selection, HTTP results, raw JSON copy/download, add monitoring and confirmed deletion');
   await page.close();
  }
  }finally{await browser.close();}

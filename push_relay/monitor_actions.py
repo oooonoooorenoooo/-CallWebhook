@@ -75,6 +75,8 @@ class Operator:
         ''')
         from .arrivals_sync import ArrivalSync
         self.arrival_sync = ArrivalSync(self)
+        from .fr24_diagnostics import HistoricEventsDiagnostic
+        self.fr24_diagnostics = HistoricEventsDiagnostic(monitor)
 
     def removed(self, f):
         from .comatalarm import same_occurrence
@@ -172,6 +174,8 @@ class Operator:
 
     async def command(self, body):
         action, key = body.get('action'), body.get('key')
+        if action == 'fr24_historic_events':
+            return await self.fr24_diagnostics.run(body)
         if action in ('arrivals','refresh_arrivals'):
             self.request_arrivals(force=action=='refresh_arrivals')
             return dict(ok=True)

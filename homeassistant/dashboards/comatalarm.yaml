@@ -36,6 +36,24 @@ cards:
       const today=berlinDay(now), month=today.slice(0,7);
       if(!card._comatDay || !card._comatDay.startsWith(month)) card._comatDay=today;
       card._comatOpen=card._comatOpen||{};
+      card._comatFr24Input=card._comatFr24Input||'';
+      if(card._comatFr24Events===undefined)card._comatFr24Events='gate_arrival';
+      // The template replaces its HTML on refresh. Keep the operator's unfinished
+      // entry, focus and text selection when a 15-second monitor read redraws it.
+      const focused=card.shadowRoot?.activeElement;
+      const focusVersion=card._comatFr24FocusVersion=(card._comatFr24FocusVersion||0)+1;
+      if(focused?.matches?.('[data-cm-fr24-input]')){
+        const kind=focused.dataset.cmFr24Input;
+        if(kind==='id')card._comatFr24Input=focused.value;
+        if(kind==='events')card._comatFr24Events=focused.value;
+        const start=focused.selectionStart,end=focused.selectionEnd,direction=focused.selectionDirection;
+        Promise.resolve(card.updateComplete).then(()=>{
+          if(!card.isConnected||card._comatFr24FocusVersion!==focusVersion)return;
+          const next=card.shadowRoot?.querySelector?.(`[data-cm-fr24-input="${kind}"]`);
+          next?.focus?.({preventScroll:true});
+          if(Number.isInteger(start))next?.setSelectionRange?.(start,end,direction||'none');
+        });
+      }
       // button-card's shouldUpdate ignores a bare requestUpdate(). A named config
       // invalidation redraws the template immediately after an asynchronous response.
       const redraw=()=>{if(card.isConnected)card.requestUpdate('_config');};
@@ -47,10 +65,21 @@ cards:
        },true);
        // Keep the parent button-card action handler from cancelling native touch
        // clicks or keyboard activation. Do not prevent scrolling/default actions.
-       const control=event=>event.target.closest?.('.cm summary, .cm button, .cm textarea');
+       const control=event=>event.target.closest?.('.cm summary, .cm button, .cm textarea, .cm input, .cm select, .cm pre');
        for(const type of ['touchstart','touchend','touchcancel','mousedown','keydown']){
          card.shadowRoot.addEventListener(type,event=>{if(control(event))event.stopPropagation();},true);
        }
+       card.shadowRoot.addEventListener('input',event=>{
+         if(event.target.dataset?.cmFr24Input==='id')card._comatFr24Input=event.target.value;
+       },true);
+       card.shadowRoot.addEventListener('change',event=>{
+         if(event.target.dataset?.cmFr24Input==='events')card._comatFr24Events=event.target.value;
+       },true);
+       card.shadowRoot.addEventListener('keydown',event=>{
+         if(event.target.dataset?.cmFr24Input==='id'&&event.key==='Enter'){
+           event.preventDefault();card._comatFr24Input=event.target.value;card._comatFr24Query?.();
+         }
+       },true);
        card.shadowRoot.addEventListener('click',event=>{
          const target=control(event);
          if(!target)return;
@@ -65,6 +94,21 @@ cards:
            return;
          }
          if(target.disabled)return;
+         if(target.dataset.cmFr24){
+           event.preventDefault();
+           const action=target.dataset.cmFr24;
+           if(action==='query')card._comatFr24Query?.();
+           else if(action==='copy'||action==='json')card._comatFr24Export?.(action);
+           else if(action==='fill'){
+             card._comatFr24Input=target.dataset.cmFr24Id||'';
+             card._comatFr24Events='gate_arrival';card._comatOpen.fr24=true;redraw();
+             Promise.resolve(card.updateComplete).then(()=>{
+               const input=card.shadowRoot?.querySelector?.('[data-cm-fr24-input="id"]');
+               input?.focus?.({preventScroll:true});input?.scrollIntoView?.({block:'center',behavior:'smooth'});
+             });
+           }
+           return;
+         }
          if(target.dataset.cmExport){
            event.preventDefault();
            card._comatExport?.(target.dataset.cmExport,target.dataset.cmExportMode);
@@ -92,6 +136,31 @@ cards:
           const code=error?.status_code||error?.status;
           card._comatCommandError=code===409?'Aktion nicht möglich. Ankunftstabelle aktualisieren und freigegebene Pi-Geräteregistrierung prüfen.':'Aktion fehlgeschlagen. Push-Dienst, vorhandene Home-Assistant-Integration und Verbindung prüfen.';
         }).finally(()=>{clearTimeout(commandTimeout);card._comatCommandBusy=false;card._comatFetchAt=0;redraw();});
+        redraw();
+      };
+      card._comatFr24Query=()=>{
+        if(card._comatFr24Busy)return;
+        const id=String(card._comatFr24Input||'').trim(),events=card._comatFr24Events==='all'?'all':'gate_arrival';
+        if(!/^[A-Za-z0-9_-]{1,64}$/.test(id)){
+          card._comatFr24Error='Eine einzelne FR24-ID eingeben, zum Beispiel 42a83e5a.';redraw();return;
+        }
+        card._comatFr24Input=id;card._comatFr24Busy=true;card._comatFr24Error='';
+        card._comatFr24Requested={id,events};card._comatFr24Result=null;card._comatFr24Share=null;card._comatFr24Manual='';
+        let timeout;
+        Promise.race([
+          hass.callApi('POST','callwebhook/comatalarm/monitor',{action:'fr24_historic_events',fr24_id:id,event_types:events}),
+          new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('timeout')),25000);})
+        ]).then(result=>{
+          const diagnostic=result?.diagnostic;
+          if(diagnostic?.schema!=='comatalarm.fr24-events.v1'||diagnostic.params?.flight_ids!==id)throw new Error('unsupported');
+          card._comatFr24Result=diagnostic;
+        }).catch(error=>{
+          const code=error?.status_code||error?.status;
+          card._comatFr24Error=code===401||code===403?'Nur mit einem Home-Assistant-Administratorkonto abrufbar.':
+            code===400||code===404||error?.message==='unsupported'?'Die Endpunktprüfung benötigt Push-Dienst 1.2.35 oder neuer und die aktuelle Home-Assistant-Integration. Beide aktualisieren und erneut abfragen.':
+            error?.message==='timeout'?'Der Pi hat nicht rechtzeitig geantwortet. Kein automatischer Wiederholungsabruf. Bei Bedarf erneut abfragen.':
+            'Endpunktprüfung nicht erreichbar. Push-Dienst und Home-Assistant-Verbindung prüfen; bei Bedarf erneut abfragen.';
+        }).finally(()=>{clearTimeout(timeout);card._comatFr24Busy=false;redraw();});
         redraw();
       };
       if (!card._comatBusy && (!card._comatFetchAt || now-card._comatFetchAt>14500)) {
@@ -128,6 +197,7 @@ cards:
       .cm .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.cm .action{font:inherit;font-size:13px;font-weight:600;min-height:44px;padding:9px 14px;border:1px solid rgba(98,155,255,.5);border-radius:10px;background:rgba(74,142,255,.12);color:#86b2ff;cursor:pointer}.cm .action.danger{color:#f39aa1;border-color:rgba(240,115,125,.35);background:rgba(240,115,125,.08)}.cm button:disabled{opacity:.5;cursor:default}.cm .arrival-table{overflow:auto}.cm .arrival-table table{min-width:480px}.cm .arrival-table td small{display:block}.cm .arrival-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
       @media(max-width:600px){.cm .arrival-table table{min-width:0}.cm .arrival-table thead{display:none}.cm .arrival-table tr{display:grid;grid-template-columns:1fr 1fr;padding:8px 0;border-bottom:1px solid rgba(130,156,190,.18)}.cm .arrival-table td{border:0}.cm .arrival-table td:first-child,.cm .arrival-table td:last-child{grid-column:1/-1}.cm .arrival-table td[data-label]:before{content:attr(data-label);display:block;color:#9ca9ba;font-size:11px}.cm .flight>summary{padding:10px 4px}.cm .flight-body{padding:0 4px 8px}.cm .times{grid-template-columns:repeat(2,1fr)}.cm .telemetry{grid-template-columns:repeat(2,1fr)}.cm td,.cm th{padding:7px}.cm .panel{padding:10px}.cm .flight{padding:14px}}
       .cm .export-tools{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.cm .export-status{font-size:13px;margin:6px 0 12px;overflow-wrap:anywhere}.cm .export-manual{width:100%;min-height:180px;resize:vertical;color:inherit;background:var(--card-background-color,#121a28);border:1px solid #629bff;border-radius:10px;padding:12px;font:13px monospace}.cm .log-heading{font-size:17px;margin-top:18px}.cm .export-overview{margin:18px 0}
+      .cm .fr24-form{display:flex;align-items:end;gap:12px;flex-wrap:wrap;margin:16px 0}.cm .fr24-form label{display:flex;flex-direction:column;gap:6px;min-width:180px;flex:1;font-size:13px}.cm .fr24-form input,.cm .fr24-form select{width:100%;min-height:44px;border:1px solid rgba(130,156,190,.5);border-radius:10px;padding:10px 12px;color:inherit;background:var(--card-background-color,#121a28);font:16px var(--primary-font-family,system-ui)}.cm .fr24-form input:focus-visible,.cm .fr24-form select:focus-visible{outline:2px solid #629bff;outline-offset:2px}.cm .fr24-result{min-width:0}.cm .fr24-result pre{max-height:600px;max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;margin:14px 0;border:1px solid rgba(130,156,190,.23);border-radius:12px;background:rgba(10,18,30,.4);color:inherit;font:13px/1.55 monospace;user-select:text}.cm .fr24-endpoint{font-size:12px;overflow-wrap:anywhere;margin-top:10px}
       </style>`;
       if(!d)return css+`<div class="cm"><div class="eyebrow">PI · BETRIEBSÜBERSICHT</div><h1>ComatAlarm</h1><div class="warn">${esc(card._comatError||'Verbindung zum Pi wird hergestellt …')}</div><p class="muted">Die Übersicht zeigt die tatsächlichen Pi-Daten. Es werden keine zusätzlichen Fluganbieter-Abfragen ausgelöst.</p></div>`;
       const time=Date.now()/1000;
@@ -227,6 +297,48 @@ cards:
         const button=(mode,label)=>`<button type="button" class="action" data-cm-export="${scope}" data-cm-export-mode="${mode}" aria-label="${esc(exportTitles[scope]+' '+label)}">${label}</button>`;
         return `<div class="export-tools" role="group" aria-label="${esc(exportTitles[scope]+' teilen')}">${button('copy','Kopieren')}${button('txt','.txt herunterladen')}${json?button('json','JSON herunterladen'):''}</div>${state?`<p class="export-status ${state.error?'orange':'muted'}" role="${state.error?'alert':'status'}">${esc(state.text)}</p>`:''}${manual?.scope===scope?`<textarea class="export-manual" readonly aria-label="${esc(exportTitles[scope]+' zum manuellen Kopieren')}">${esc(manual.text)}</textarea>`:''}`;
       };
+      // This explicit diagnostic preserves the provider body. It never passes
+      // through the flight parser or the reduced monitor-log export projection.
+      card._comatFr24Export=async mode=>{
+        const result=card._comatFr24Result;
+        if(!result||!['copy','json'].includes(mode))return;
+        const text=JSON.stringify(result,null,2)+'\n';
+        const status=(text,error=false)=>{card._comatFr24Share={text,error};redraw();};
+        if(mode==='copy'){
+          let copied=false;
+          if(globalThis.isSecureContext&&globalThis.navigator?.clipboard?.writeText){try{await navigator.clipboard.writeText(text);copied=true;}catch{}}
+          if(!copied){
+            let field;
+            const previous=card.shadowRoot?.activeElement||document.activeElement;
+            try{
+              field=document.createElement('textarea');field.value=text;field.readOnly=true;field.style.cssText='position:fixed;top:0;left:0;width:1px;height:1px;opacity:0';
+              (card.shadowRoot||document.body).appendChild(field);field.focus();field.select();field.setSelectionRange(0,text.length);
+              copied=!!document.execCommand('copy');
+            }catch{}finally{field?.remove();previous?.focus?.();}
+          }
+          card._comatFr24Manual=copied?'':text;
+          status(copied?'FR24-Abfrage mit HTTP-Status und Antwort kopiert.':'Automatisches Kopieren ist hier gesperrt. JSON unten markieren und kopieren oder herunterladen.',!copied);return;
+        }
+        let url,link;
+        try{
+          url=URL.createObjectURL(new Blob([text],{type:'application/json;charset=utf-8'}));
+          const id=/^[A-Za-z0-9_-]{1,64}$/.test(result.params?.flight_ids||'')?result.params.flight_ids:'abfrage';
+          link=document.createElement('a');link.href=url;link.download=`comatalarm-fr24-events-${id}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;link.style.display='none';document.body.appendChild(link);link.click();
+          status('JSON-Download gestartet. Falls kein Download erscheint, „Kopieren“ verwenden.');
+        }catch{status('Download konnte nicht gestartet werden. Bitte „Kopieren“ verwenden.',true);}finally{link?.remove();if(url)setTimeout(()=>URL.revokeObjectURL(url),30000);}
+      };
+      const fr24Result=card._comatFr24Result;
+      const fr24Response=fr24Result?(fr24Result.response_is_json===true||(fr24Result.response!==null&&fr24Result.response!==undefined)?JSON.stringify(fr24Result.response,null,2):fr24Result.response_text||'Kein Antwortinhalt.'):'';
+      const fr24Share=card._comatFr24Share;
+      const fr24Time=fr24Result?exportTime(fr24Result.completed_at):null;
+      const fr24TimeLabel=Number.isInteger(fr24Result?.http_status)?'Abgerufen':'Prüfzeit';
+      const fr24Retry=Number.isFinite(fr24Result?.retry_after_seconds)&&fr24Result.retry_after_seconds>0?exportTime((Number.isFinite(fr24Result.completed_at)?fr24Result.completed_at:time)+fr24Result.retry_after_seconds):null;
+      const fr24Html=`<p class="muted">Historic Flight Events Light direkt mit dem auf dem Pi gespeicherten FR24-Token prüfen.</p>
+      <div class="fr24-form"><label>FR24-ID<input type="text" data-cm-fr24-input="id" aria-label="FR24-ID" value="${esc(card._comatFr24Input)}" placeholder="z. B. 42a83e5a" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label>Ereignisse<select data-cm-fr24-input="events" aria-label="FR24-Ereignisse"><option value="gate_arrival"${card._comatFr24Events==='gate_arrival'?' selected':''}>Ankunft am Stand · gate_arrival</option><option value="all"${card._comatFr24Events==='all'?' selected':''}>Alle Ereignisse</option></select></label><button type="button" class="action" data-cm-fr24="query"${card._comatFr24Busy?' disabled':''}>${card._comatFr24Busy?'Abfrage läuft …':'Abfragen'}</button></div>
+      <p class="muted">Jeder Abruf wird einzeln gestartet und nutzt dein FR24-API-Guthaben. Die automatische Dashboard-Aktualisierung fragt diesen Endpunkt nicht ab.</p>
+      ${card._comatFr24Busy?`<p class="export-status" role="status">FR24-ID ${esc(card._comatFr24Requested?.id)} wird auf dem Pi abgefragt …</p>`:''}
+      ${card._comatFr24Error?`<div class="warn" role="alert">${esc(card._comatFr24Error)}</div>`:''}
+      ${fr24Result?`<div class="fr24-result"><div class="actions">${pill(Number.isInteger(fr24Result.http_status)?'HTTP '+fr24Result.http_status:'Keine HTTP-Antwort',fr24Result.http_status>=200&&fr24Result.http_status<300?'green':'orange')}${pill('FR24-ID '+fr24Result.params.flight_ids)}</div>${row('Ereignisfilter',fr24Result.params.event_types||'Alle Ereignisse')}${row(fr24TimeLabel+' (Berlin)',fr24Time?.berlin||'—')}${row(fr24TimeLabel+' (UTC)',fr24Time?.utc||'—')}<p class="fr24-endpoint">GET ${esc(fr24Result.endpoint)}</p>${fr24Result.message?`<p class="export-status" role="status">${esc(fr24Result.message)}</p>`:''}${fr24Retry?row('Frühestens erneut abfragen (Berlin)',fr24Retry.berlin):''}${fr24Result.response_truncated?'<div class="warn">Die Antwort ist wegen ihrer Größe gekürzt. Der Export enthält denselben gekürzten Inhalt.</div>':''}${fr24Result.redacted?'<p class="muted">Zugangsdaten wurden aus der Antwort entfernt.</p>':''}<pre tabindex="0" aria-label="FR24-Antwort">${esc(fr24Response)}</pre><div class="export-tools"><button type="button" class="action" data-cm-fr24="copy">Kopieren</button><button type="button" class="action" data-cm-fr24="json">JSON herunterladen</button></div>${fr24Share?`<p class="export-status ${fr24Share.error?'orange':'muted'}" role="${fr24Share.error?'alert':'status'}">${esc(fr24Share.text)}</p>`:''}${card._comatFr24Manual?`<textarea class="export-manual" data-cm-fr24-input="manual" readonly aria-label="FR24-Abfrage zum manuellen Kopieren">${esc(card._comatFr24Manual)}</textarea>`:''}<p class="foot">Angezeigt und exportiert wird die Antwort dieser Abfrage. Sie wird nicht als Flugstatus, AIBT oder Parkposition übernommen.</p></div>`:!card._comatFr24Busy&&!card._comatFr24Error?'<p class="export-status muted">Noch keine Abfrage gestartet.</p>':''}`;
       const button=(action,key,label,disabled=false)=>`<button type="button" class="action ${action==='delete'||action==='confirm-delete'?'danger':''}" data-cm-action="${action}" data-cm-flight="${esc(key)}"${disabled||card._comatCommandBusy?' disabled':''}>${esc(label)}</button>`;
       const deleteControl=f=>!f.key?'':card._comatConfirm===f.key?`<div class="warn"><p>${esc(f.number)} · ${esc(f.day)} vom Pi löschen? Überwachung und Verlaufseintrag werden entfernt. Eine erneute App-Übergabe dieses Flugs wird unterdrückt.</p><div class="actions">${button('confirm-delete',f.key,'Ja, auf dem Pi löschen')}${button('cancel',f.key,'Abbrechen')}</div></div>`:`<div class="actions">${button('delete',f.key,'Flug vom Pi löschen')}</div>`;
       const renderFlights=(items,prefix)=>items.map(f=>{
@@ -253,7 +365,7 @@ cards:
        ${archived?'':`<div class="raw">${row('Breite / Länge',`${live.lat??'—'} / ${live.lon??'—'}`)}${row('Kurs / Steigrate',`${num(live.track,1,'°')} / ${num(live.vspeed,.3048,' m/min')}`)}${row('Bodenmeldung',live.on_ground===true?'Am Boden':live.on_ground===false?'In der Luft':'—')}${row('FR24-ID / ICAO',`${f.fr24ID||'—'} / ${live.hex||'—'}`)}</div>
        <div class="device">${subs.map(x=>pill(x.device+': '+x.status,x.status==='Überwacht'?'green':'orange')).join('')}</div>
        ${subs.map(x=>row(x.device+' · letzter Zyklus',clock(x.last_poll))+row(x.device+' · App-Datenabruf',clock(x.last_app_read))).join('')}`}
-       ${deleteControl(f)}
+       ${/^[A-Za-z0-9_-]{1,64}$/.test(f.fr24ID||'')?`<div class="actions"><button type="button" class="action" data-cm-fr24="fill" data-cm-fr24-id="${esc(f.fr24ID)}">FR24-ID ${esc(f.fr24ID)} prüfen</button></div>`:''}${deleteControl(f)}
        </div></details>`;
       }).join('');
       const logs=(list)=>list.length?`<div class="scroll"><table><thead><tr><th>Zeit (Berlin)</th><th>Flug / Gerät</th><th>Ergebnis</th></tr></thead><tbody>${list.map(e=>`<tr><td>${clock(e.timestamp)}</td><td>${esc(e.flight||'Dienst')}<br><small>${esc(e.device)}</small></td><td>${pill(e.kind==='push_accepted'?'Apple angenommen':e.kind==='push_failed'?'Versand fehlgeschlagen':e.kind==='error'?'Fehler':e.kind==='push_skipped'?'Nicht gesendet':e.kind==='service'?'Dienst':'Ereignis',e.kind==='push_accepted'?'green':['error','push_failed'].includes(e.kind)?'red':'blue')}<br>${esc(message(e.message))}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Seit Einrichtung des Monitors keine Einträge vorhanden.</div>';
@@ -278,6 +390,7 @@ cards:
       <div class="export-overview"><b>Diagnose teilen</b><p class="muted">Angezeigte Flüge, Protokolle und ausgewählter Verlaufstag mit Datenstand und Zeitstempeln.</p>${exportControls('diagnosis',true)}</div>
       ${section('api','API-Status',`<p class="muted">Derselbe gespeicherte Status wie in der App · geprüft ${clock(d.api_status.checked_at)} ${apiAge===null||apiAge>(d.api_status.valid_for||1800)?'· Status veraltet / fehlt':''}</p>
       <div class="apis">${['FR24','FlightStats','FlightAware','BER','ADSB.lol','OpenSky'].map(name=>{const value=apis[name]||'Noch nicht geprüft';return `<div class="api"><b>${name}</b>${pill(value,value==='OK'?'green':/HTTP|Fehler|abgelehnt|ungültig/i.test(value)?'red':'orange')}</div>`;}).join('')}</div>`)}
+      ${section('fr24','FR24-Endpunkt prüfen',fr24Html,fr24Result&&Number.isInteger(fr24Result.http_status)?'HTTP '+fr24Result.http_status:'')}
       ${['waiting','active','completed'].map((category,i)=>{const list=flights.filter(f=>categoryOf(f)===category);return section(category,['Wartende Flüge','Aktive Flüge','Abgeschlossene Flüge'][i],`<div class="flights">${renderFlights(list,'live')||'<div class="empty">Keine Flüge in diesem Bereich.</div>'}</div>`,list.length);}).join('')}
       ${section('arrivals','Ankunftstabelle · BER',arrivalsHtml,upcoming.length)}
       ${section('history','Verlauf · '+monthTitle,historyHtml)}
@@ -287,5 +400,5 @@ cards:
       `,events.filter(e=>['error','push_failed'].includes(e.kind)).length)}
       ${section('devices','Geräte & Übergabe',`<div class="panel scroll"><table><thead><tr><th>Gerät</th><th>Überwachung</th><th>Letzter App-Abruf</th><th>Gültig bis</th></tr></thead><tbody>${d.devices.map(x=>`<tr><td>${esc(x.name)}</td><td>${pill(x.expired?'Abgelaufen':x.error?'Fehler':!x.token_present?'API-Zugang fehlt':x.server_polling?'Pi zentral':'App / Pi',x.expired||x.error||!x.token_present?'orange':'green')}</td><td>${clock(x.last_app_read)}</td><td>${clock(x.expires)}</td></tr>`).join('')}</tbody></table></div>
       `,d.devices.length)}
-      <p class="foot">Statusanzeige alle 15 Sekunden aus dem Pi-Speicher. Ankunftstabelle auf Anforderung. Pi-Start: ${clock(d.started_at)} · Zyklusbeginn: ${clock(d.cycle_started)} · Datenstand: ${clock(d.generated_at)}. Letzte 150 Diagnoseeinträge; bis zu 1000 bleiben über Neustarts erhalten. Geräte sind pseudonymisiert.</p></div>`;
+      <p class="foot">Statusanzeige alle 15 Sekunden aus dem Pi-Speicher. Ankunftstabelle und FR24-Endpunktprüfung auf Anforderung. Pi-Start: ${clock(d.started_at)} · Zyklusbeginn: ${clock(d.cycle_started)} · Datenstand: ${clock(d.generated_at)}. Letzte 150 Diagnoseeinträge; bis zu 1000 bleiben über Neustarts erhalten. Geräte sind pseudonymisiert.</p></div>`;
       ]]]

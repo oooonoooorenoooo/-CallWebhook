@@ -30,7 +30,11 @@ if ! grep -Fq 'async def forward(self, request, command=False)'  "$TARGET/__init
   echo "ComatAlarm dashboard endpoint missing after download." >&2
   exit 1
 fi
-echo "CallWebhook backend 21 with ComatAlarm arrival board and flight controls installed successfully."
+if ! grep -Fq '"fr24_historic_events"' "$TARGET/__init__.py"; then
+  echo "ComatAlarm historical FR24 diagnostic action missing after download." >&2
+  exit 1
+fi
+echo "CallWebhook backend 22 with ComatAlarm historical FR24 diagnostic installed successfully."
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
   echo "Requesting Home Assistant restart..."
   if curl -fsS -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H "Content-Type: application/json" http://supervisor/core/restart >/dev/null; then

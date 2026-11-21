@@ -1,5 +1,45 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: FR24-Ereignisantwort direkt prüfen (ab 1.2.35)
+
+Im ComatAlarm-Dashboard öffnet **FR24-Endpunkt prüfen** eine gezielte Prüfung von
+`GET /api/historic/flight-events/light`. Eine einzelne FR24-ID eingeben, als
+Ereignisse **Ankunft am Stand · gate_arrival** oder **Alle Ereignisse** wählen
+und **Abfragen** drücken. Der Pi verwendet einen bereits gespeicherten,
+aktuell freigegebenen FR24-Token. Der Token wird weder eingegeben noch angezeigt.
+
+Die Ausgabe enthält HTTP-Status, tatsächliche Abfrageparameter, Prüfzeit in
+Berlin und UTC sowie die FR24-Antwort. Sie durchläuft nicht die AIBT- oder
+Standplatz-Auswertung. `gate_ident: null` und vorhandene Koordinaten bleiben
+sichtbar. Auch Fehlerantworten können mit **Kopieren** oder **JSON herunterladen**
+geteilt werden. Eine Größenbegrenzung oder entfernte Zugangsdaten werden
+ausdrücklich angezeigt. Liegt keine HTTP-Antwort vor, nennt die Ausgabe den
+Grund, etwa einen fehlenden gespeicherten Token oder eine laufende Sperrfrist.
+
+Das Abrufen ist manuell, verbraucht reguläres FR24-API-Guthaben und beachtet
+das gemeinsame Minutenbudget sowie Anbietersperren. Dashboard-Aktualisierungen
+und das Übernehmen einer ID aus einer Flugkarte rufen den Anbieter nicht ab.
+Die Prüfung übernimmt keine Daten in den Flugverlauf und versendet keine Pushes.
+
+### Vorhandene Pi-Installation aktualisieren
+
+1. **CallWebhook Push-Dienst auf 1.2.35** aktualisieren und starten.
+2. **CallWebhook Bootstrap auf 1.2.10** aktualisieren und einmal starten. Er
+   installiert die vorhandene Home-Assistant-Integration in Version 1.2.18
+   (Backend 22) und fordert einen Home-Assistant-Neustart an. Falls dieser nicht
+   automatisch erfolgt, Home Assistant anschließend neu starten. Diese Änderung
+   ist nötig, weil ältere Integrationen den neuen Dashboard-Befehl ablehnen.
+3. Die aktualisierte Dashboard-Konfiguration übernehmen. Eine für das gesamte
+   Dashboard bereitgestellte Datei ersetzt den vollständigen Roheditorinhalt;
+   die Repository-Datei `homeassistant/dashboards/comatalarm.yaml` ist dagegen
+   nur die einzelne ComatAlarm-View. Ein Add-on-Update ersetzt gespeicherte
+   Dashboard-Konfigurationen nicht automatisch.
+4. Den Reiter als Home-Assistant-Administrator neu laden und
+   **FR24-Endpunkt prüfen** öffnen. Für LH194 vom 20.11.2026 lautet die zu
+   prüfende ID `42a83e5a`; zunächst `gate_arrival` auswählen.
+
+Für diese Funktion ist kein iPhone-App-Update erforderlich.
+
 ## ComatAlarm: Protokolle kopieren und herunterladen (ab 1.2.33)
 
 Die aktualisierte Dashboard-View bietet Kopieren und Textdownload für

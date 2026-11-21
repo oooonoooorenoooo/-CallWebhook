@@ -2,9 +2,9 @@ FROM python:3.12-slim
 WORKDIR /app
 # Supervisor builds each add-on from its own directory. Fetch only the reviewed
 # relay source files from this immutable revision, not a changing main branch.
-ARG RELAY_REVISION=15372c3d1eacb9dc7b354600f6fa27a07dbae96d
+ARG RELAY_REVISION=2332ac880d69a1ee071e548c47a435df66bfc273
 RUN mkdir push_relay
-RUN python -c 'import os, pathlib, urllib.request; base="https://raw.githubusercontent.com/oooonoooorenoooo/-CallWebhook/"+os.environ["RELAY_REVISION"]+"/push_relay/"; files=("__init__.py","server.py","comatalarm.py","shared_monitoring.py","history_sync.py","aibt_recovery.py","landing_alert.py","prelanding_diagnostics.py","live_identity.py","fr24_batch.py","monitor.py","monitor_actions.py","arrivals_sync.py","flight_schedule.py","stand_model.py","ber_package.py","ber_document.py","testflight.py","attestation.py","apple_access.py","apple-app-attest-root.pem","requirements.txt"); [(pathlib.Path("push_relay")/name).write_bytes(urllib.request.urlopen(base+name,timeout=60).read()) for name in files]'
+RUN python -c 'import os, pathlib, urllib.request; base="https://raw.githubusercontent.com/oooonoooorenoooo/-CallWebhook/"+os.environ["RELAY_REVISION"]+"/push_relay/"; files=("__init__.py","server.py","comatalarm.py","shared_monitoring.py","history_sync.py","aibt_recovery.py","landing_alert.py","prelanding_diagnostics.py","live_identity.py","fr24_batch.py","monitor.py","monitor_actions.py","fr24_diagnostics.py","arrivals_sync.py","flight_schedule.py","stand_model.py","ber_package.py","ber_document.py","testflight.py","attestation.py","apple_access.py","apple-app-attest-root.pem","requirements.txt"); [(pathlib.Path("push_relay")/name).write_bytes(urllib.request.urlopen(base+name,timeout=60).read()) for name in files]'
 RUN pip install --no-cache-dir -r push_relay/requirements.txt
 RUN python -c 'import pyrage; import pypdf'
 COPY run.py /app/run.py

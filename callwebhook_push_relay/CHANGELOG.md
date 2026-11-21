@@ -1,3 +1,11 @@
+## 1.2.35
+
+- Die Pi-Dashboard-Ansicht kann `historic/flight-events/light` anhand einer einzelnen FR24-ID direkt prüfen. Der vorhandene, freigegebene FR24-Token wird ausschließlich auf dem Pi verwendet. Als Filter stehen `gate_arrival` und alle Ereignisse (`all`) zur Verfügung.
+- Jede Prüfung zeigt die tatsächlich abgefragte ID, den HTTP-Status, die Prüfzeit und die FR24-Antwort vor der Flug- und AIBT-Auswertung. Verschachtelte Ereignisse, `gate_ident: null`, Zeitstempel und Koordinaten bleiben sichtbar. Auch HTTP-Fehler und nicht als JSON lesbare Antworten werden angezeigt; Zugangsdaten werden entfernt und Größenbegrenzungen ausdrücklich gekennzeichnet.
+- Ergebnis und Abfragekontext lassen sich kopieren oder als JSON herunterladen. Flug- und Verlaufskarten können ihre FR24-ID in das Prüffeld übernehmen. Das Öffnen oder automatische Aktualisieren des Dashboards löst keine solche Abfrage aus.
+- Die manuelle Prüfung verwendet das gemeinsame FR24-Minutenbudget und beachtet Anbietersperren. Doppelklicks lösen keine parallelen Abrufe aus. Sie verändert keine Flugzeiten, Standplätze, Verlaufseinträge oder Pushes.
+- Benötigt die aktualisierte Dashboard-Konfiguration und Home-Assistant-Integration 1.2.18 (Backend 22). CallWebhook Bootstrap 1.2.10 installiert diese Integration; danach Home Assistant neu starten. Die iPhone-App benötigt kein Update.
+
 ## 1.2.34
 
 - Der schnelle Live-Abgleich beginnt anhand gemessener Anflugdaten, bevor sämtliche engeren Versandbedingungen erfüllt sind. Eine vorübergehend fehlende Live-ETA oder eine noch knapp zu große Anflughöhe verhindert nicht mehr den nächsten 30-Sekunden-Abruf. Fehlende ETA, veraltete Daten und eine einzelne Beobachtung reichen weiterhin nicht zum Alarmieren.

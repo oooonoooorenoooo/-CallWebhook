@@ -107,6 +107,25 @@ oder veraltete Position löst keinen Voralarm aus. Bei unzuverlässigen Daten
 wird die Vorwarnung ausgelassen; die gewöhnliche bestätigte Landemeldung bleibt
 unabhängig. Die Warnung gilt nur kurz und wird vor jedem Zustellversuch geprüft.
 
+Ab 1.2.34 beginnt der 30-Sekunden-Liveabgleich bereits bei einer gemessenen,
+plausiblen Annäherung, bevor alle engeren Alarmgrenzen erreicht sind. Auch ohne
+Live-ETA darf eine neue Beobachtung angefordert werden. Für die Warnung selbst
+bleiben eine verwendbare Live-ETA, höchstens 45 Sekunden alte Daten und zwei
+unabhängige, konvergierende Beobachtungen erforderlich. Eine ETA-Korrektur um
+höchstens 60 Sekunden verwirft diese Bestätigung nicht allein; größere Sprünge
+erfordern eine neue Bestätigung. Gewarnt wird weiterhin ausschließlich bei einem
+aktuellen ETA-Vorlauf von mehr als 150 und höchstens 180 Sekunden.
+
+Das Ereignisjournal protokolliert jetzt auch den Entscheidungsgrund für eine
+ausbleibende Vorwarnung, einschließlich Live-ETA, Vorlauf, Datenalter und
+Bestätigungsstand, soweit diese Werte tatsächlich vorliegen. Veraltete Daten,
+Zuordnungsprobleme, größere ETA-Korrekturen, verpasste Zeitfenster und Alarmregeln
+werden unterschieden. Wichtige Übergänge erscheinen sofort; normale
+Zwischenzustände werden begrenzt, damit sie den Push-Verlauf nicht verdrängen.
+Die vorhandenen Dashboard-Aktionen „Ereignisse“ und „Diagnose teilen“ nehmen
+diese Einträge automatisch auf. Für diese Ergänzung sind keine neue
+Dashboard-YAML und kein weiterer iPhone-Build nach 1250 erforderlich.
+
 Das Add-on muss aktualisiert werden. Die passende neue iOS-Version ergänzt den
 Schalter, direkte Flugübergaben, explizite Löschungen und Token-Erneuerung für
 Tester. Vorhandene Einrichtungsschlüssel, APNs-Zugänge und Gerätefreigaben

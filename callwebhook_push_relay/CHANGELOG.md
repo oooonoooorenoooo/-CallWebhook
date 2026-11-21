@@ -1,3 +1,12 @@
+## 1.2.34
+
+- Der schnelle Live-Abgleich beginnt anhand gemessener Anflugdaten, bevor sämtliche engeren Versandbedingungen erfüllt sind. Eine vorübergehend fehlende Live-ETA oder eine noch knapp zu große Anflughöhe verhindert nicht mehr den nächsten 30-Sekunden-Abruf. Fehlende ETA, veraltete Daten und eine einzelne Beobachtung reichen weiterhin nicht zum Alarmieren.
+- Eine begrenzte Live-ETA-Korrektur bis zu einer Minute löscht eine durch zwei unabhängige, räumlich und vertikal konvergierende Beobachtungen bestätigte Annäherung nicht mehr allein. Größere ETA-Korrekturen verlangen eine neue Bestätigung. Das kurze Versandfenster und alle bisherigen Prüfungen für Höhe, Sinkflug, Kurs, Entfernung, Bodenstatus und Datenalter bleiben bestehen.
+- Bei exakt bekannter FR24-Flug-ID werden Liveantworten mit fehlenden optionalen Streckenfeldern zugeordnet. Eine eindeutige aktuelle Liveantwort mit passender vollständiger Route und Flugtag kann die echte Flug-ID übernehmen, wenn die Summary sie noch nicht liefert. Widersprüchliche Routen, andere Tage und mehrdeutige Flugbewegungen bleiben ausgeschlossen.
+- Ein noch gültiger, ausstehender Voralarm geht beim Wechsel der lokalen App-Flug-ID nicht mehr verloren. Wiederholungsversuche prüfen die tatsächliche Flugbewegung und den ursprünglichen Warnmarker; Ablaufzeit, Löschungen, aktuelle Alarmregeln und Schutz vor doppeltem Versand bleiben wirksam.
+- Das bestehende Ereignisjournal erklärt nun auch unterdrückte Voralarme: Zuordnung, Live-ETA, Datenalter, Bestätigung, Zeitfenster und Alarm-/Kalenderregel. Der Push-Versand nennt konkrete Verwerfungsgründe. Normale Zwischenzustände werden gedrosselt und erst nach Übernahme des zugehörigen Flugzustands protokolliert; Zugangsdaten und Rohantworten werden nicht ausgegeben.
+- Die Gründe sind über die bereits vorhandenen Kopier- und Downloadfunktionen des vollständigen Dashboards teilbar. Für diese Korrekturen genügt das Pi-Add-on-Update; ComatAlarm Build 1250 und das bereits aktualisierte Dashboard können weiterverwendet werden.
+
 ## 1.2.33
 
 - Die aktualisierte Home-Assistant-Ansicht kann Ereignisse, Push-Versand und Fehlerprotokoll kopieren und als Textdatei herunterladen. Die Dashboard-View muss zusätzlich zum Add-on aktualisiert werden; gespeicherte Home-Assistant-Dashboards werden nicht automatisch ersetzt.

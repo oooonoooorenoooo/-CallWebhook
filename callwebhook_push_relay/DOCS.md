@@ -1,5 +1,35 @@
 # Einmalige Einrichtung auf dem HA-Pi des App-Betreibers
 
+## ComatAlarm: AIBT und Koordinaten aus weiteren Quellen (ab 1.2.36)
+
+Für eine Ankunft werden die tatsächliche AIBT und eine zu dieser Zeit gehörende
+Latitude/Longitude benötigt. Der Pi ordnet diese Koordinate dem vorhandenen
+BER-Standplatzbestand zu. Ein externer Stand- oder Gatecode ist dafür nicht nötig.
+
+Nach einer leeren, unvollständigen oder fehlgeschlagenen FR24-Ankunftsantwort
+endet der automatische FR24-Versuch für genau diese Flugbewegung. Die Entscheidung
+wird gespeichert und über gemeinsame Überwachung und Verlauf weitergegeben.
+Der Pi startet vorhandene FlightAware-/FlightStats-Zugänge und passende
+ADSB.lol-/OpenSky-Positionsquellen in begrenzten Hintergrundaufgaben. Bei einer
+bestätigten AIBT kann auch eine exakt zugeordnete FlightAware-Flugspur die
+Koordinate liefern. EIBT, ATA und bloßer Stillstand ersetzen keine tatsächliche AIBT.
+
+Alternative Positionsbelege müssen am Boden liegen, höchstens 5 km/h melden
+und zeitlich innerhalb von 60 Sekunden zur AIBT liegen. Die Originalzeit und
+Quelle bleiben gespeichert. Bei historischen Ankünften werden gespeicherte
+oder tatsächlich historische Punkte verwendet; aktuelle Flugzeugpositionen
+werden nicht rückdatiert. Vorhandene Zugangsdaten, Anbieterlimits und
+Sperrfristen bleiben maßgeblich. Es wird kein neuer kostenpflichtiger Dienst
+eingerichtet. Sind auch dort keine passenden Daten vorhanden, bleibt der
+fehlende Wert ausdrücklich offen.
+
+CallWebhook Push-Dienst auf **1.2.36** aktualisieren und die dazugehörige
+ComatAlarm-App installieren. Die vorhandene manuelle FR24-Endpunktprüfung
+bleibt nutzbar; sie löst nur bei ausdrücklichem Betätigen eine Abfrage aus.
+Die bestehenden Diagnoseexporte enthalten nun zusätzlich Ankunftsquelle,
+Koordinate samt Messzeit sowie den Status der weiteren Quellen und der
+gespeicherten FR24-Entscheidung.
+
 ## ComatAlarm: FR24-Ereignisantwort direkt prüfen (ab 1.2.35)
 
 Im ComatAlarm-Dashboard öffnet **FR24-Endpunkt prüfen** eine gezielte Prüfung von

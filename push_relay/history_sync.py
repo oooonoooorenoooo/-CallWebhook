@@ -15,15 +15,18 @@ from aiohttp import web
 BERLIN = ZoneInfo('Europe/Berlin')
 PREFIX = 'PI_HISTORY_'
 SCALARS = ('number', 'reference', 'created_at', 'fr24ID', 'origin', 'destination',
-           'registration', 'atd', 'ata', 'aibt', 'gate', 'gate_source', 'stand',
+           'registration', 'atd', 'ata', 'aibt', 'aibt_source', 'gate', 'gate_source', 'stand',
+           'flightawareID', 'flightstatsID', 'icao24', 'callsign',
            'cancelled', 'diverted', 'packets', 'track_outbound', 'outbound_number',
            '_aibt_recovery_attempts', '_aibt_recovery_at', '_aibt_recovery_retry_at',
            '_aibt_evidence_revision', '_arrival_event_checked_at', '_arrival_event_received_at',
-           '_arrival_event_status', '_arrival_event_logged_at', '_parking_lookup_status')
+           '_arrival_event_status', '_arrival_event_logged_at', '_parking_lookup_status',
+           '_arrival_sources_checked_at', '_arrival_sources_status')
 SCHEDULE = ('std', 'etd', 'atd', 'sta', 'eta', 'ata', 'aibt', 'eibt', 'gate',
-            'gate_source', 'registration', 'aircraftType', 'origin', 'destination',
+            'gate_source', 'aibt_source', 'registration', 'aircraftType', 'origin', 'destination',
             'cancelled', 'diverted')
-LEG = ('id', 'number', 'registration', 'origin', 'destination', 'atd', 'ata', 'aibt')
+LEG = ('id', 'number', 'registration', 'origin', 'destination', 'atd', 'ata', 'aibt', 'aibt_source',
+       'event_checked_at', 'recovery_attempts', 'reference')
 
 
 def day_of(reference):
@@ -119,19 +122,43 @@ class HistorySync:
                 return None
             if valid_coordinate(value.get('latitude'), value.get('longitude')) and stamp(value.get('timestamp')):
                 point = {k: value[k] for k in ('latitude', 'longitude', 'timestamp')}
-                if value.get('source') in ('fr24_event', 'fr24_gate_reference', 'fr24_historic', 'fr24_track'):
+                if isinstance(value.get('source'), str) and 0 < len(value['source']) <= 64:
                     point['source'] = value['source']
+                if isinstance(value.get('on_ground'), bool):
+                    point['on_ground'] = value['on_ground']
+                speed = value.get('ground_speed', value.get('groundspeed'))
+                if isinstance(speed, (float, int)) and not isinstance(speed, bool) and math.isfinite(speed) and speed >= 0:
+                    point['ground_speed'] = speed
+                    if 'groundspeed' in value:
+                        point['groundspeed'] = speed
                 return point
             return None
 
         point = position(flight.get('aibt_position'))
         if point:
             result['aibt_position'] = point
+        from .aibt_recovery import valid_exhaustion
+        if valid_exhaustion(result, flight.get('fr24_arrival_exhausted')):
+            result['fr24_arrival_exhausted'] = scalar_fields(flight['fr24_arrival_exhausted'],
+                ('fr24_id', 'flight_number', 'reference_day', 'registration', 'at', 'reason'))
+        samples = flight.get('_arrival_position_samples')
+        if isinstance(samples, list):
+            result['_arrival_position_samples'] = []
+            for sample in samples[-64:]:
+                point = position(sample)
+                if point:
+                    identity = scalar_fields(sample, ('fr24_id', 'flight_number', 'reference_day', 'registration',
+                        'number', 'reference', 'origin', 'destination', 'icao24', 'callsign'))
+                    result['_arrival_position_samples'].append(dict(identity, **point))
         for key in ('_inbound', '_outbound'):
             leg = scalar_fields(flight.get(key), LEG)
             point = position((flight.get(key) or {}).get('aibt_position')) if isinstance(flight.get(key), dict) else None
             if point:
                 leg['aibt_position'] = point
+            value = flight.get(key) or {}
+            if isinstance(value, dict) and isinstance(value.get('fr24_arrival_exhausted'), dict):
+                leg['fr24_arrival_exhausted'] = scalar_fields(value['fr24_arrival_exhausted'],
+                    ('fr24_id', 'flight_number', 'reference_day', 'registration', 'at', 'reason'))
             if leg or isinstance(flight.get(key), dict):
                 result[key] = leg
         return result
@@ -182,6 +209,9 @@ class HistorySync:
             if not position(result):
                 result.pop('aibt_position', None)
                 result.pop('stand', None)
+        from .aibt_recovery import valid_exhaustion
+        if result.get('fr24_arrival_exhausted') and not valid_exhaustion(result):
+            result.pop('fr24_arrival_exhausted', None)
         return result
 
     def capture(self, flights, now=None, created_known=None, baseline=False, observed_at=None):
@@ -240,6 +270,9 @@ class HistorySync:
         record.update(id=source.get('id') or 'PI_' + key_of(archived)[:32])
         record['created_at'] = source.get('created_at', min(archived['reference'], captured_at))
         record['_schedule'] = archived.get('schedule', source.get('_schedule', {}))
+        for field in ('aibt_position', 'fr24_arrival_exhausted'):
+            if isinstance(archived.get(field), dict) and archived[field]:
+                record[field] = archived[field]
         for old, new in (('inbound', '_inbound'), ('outbound', '_outbound')):
             if isinstance(archived.get(old), dict):
                 record[new] = archived[old]

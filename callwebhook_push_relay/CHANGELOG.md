@@ -1,3 +1,12 @@
+## 1.2.36
+
+- Benötigt für die Ankunft ausschließlich tatsächliche AIBT sowie passende Latitude/Longitude. Die Parkposition wird lokal aus dem BER-Standplatzbestand ermittelt; ein Gate- oder Standcode des Datenanbieters ist keine Voraussetzung.
+- Beendet automatische FR24-Ankunftsabfragen für eine Flugbewegung nach der ersten leeren, unvollständigen oder fehlgeschlagenen Antwort. Diese Entscheidung bleibt bei Neustart, Gerätewechsel, App-Handoff, Archivierung und Vorflugzuordnung erhalten. Auch alte gespeicherte leere Antworten werden berücksichtigt. Sammelabfragen können ausgeschöpfte Flug-IDs nicht erneut mitnehmen. Die ausdrücklich manuelle Endpunktprüfung bleibt verfügbar.
+- Übernimmt tatsächliche Gate-Ankunftszeiten aus vorhandenen FlightAware- und FlightStats-Zugängen. EIBT und Landung werden nicht zu AIBT umgedeutet. Alternative Koordinaten stammen aus passenden beobachteten ADSB.lol-/OpenSky-Bodenpositionen oder der exakt zugeordneten FlightAware-Flugspur. Verwendet nur Positionszeiten innerhalb von 60 Sekunden zur tatsächlichen AIBT und bewahrt Messzeit und Herkunft.
+- Startet weitere Quellen unmittelbar nach dem FR24-Ergebnis in begrenzten Hintergrundaufgaben. Ihre Wartezeit blockiert Live-Abgleich, Drei-Minuten-Voralarm und Push-Versand nicht. Fertige Zeit-/Koordinatendaten werden mit dem lokalen Standabgleich übernommen und an freigegebene Geräte sowie den gemeinsamen Verlauf weitergegeben.
+- Schützt die Übernahme vor falschem Flugtag, anderer Flugbewegung, abweichender Strecke oder Registrierung, veralteten Livepunkten, Löschungen und geänderten Gerätezugängen. Echte alphanumerische Rufzeichen wie DLH6HF für LH194 bleiben korrekt zugeordnet.
+- Ergänzt die vorhandenen Diagnoseexporte um Ankunftsquelle, AIBT-Koordinate mit Messzeit, Quellenstatus und die gespeicherte FR24-Entscheidung. Zugangsdaten werden nicht exportiert. Für die vollständige Übernahme auf dem iPhone die dazugehörige neue ComatAlarm-Version installieren.
+
 ## 1.2.35
 
 - Die Pi-Dashboard-Ansicht kann `historic/flight-events/light` anhand einer einzelnen FR24-ID direkt prüfen. Der vorhandene, freigegebene FR24-Token wird ausschließlich auf dem Pi verwendet. Als Filter stehen `gate_arrival` und alle Ereignisse (`all`) zur Verfügung.

@@ -83,7 +83,8 @@ class SharedMonitoring:
 
     def fanout(self, devices, now):
         """Seed new recipients with a baseline; later milestones notify each one."""
-        from .comatalarm import same_occurrence, departure_from_ber
+        from .comatalarm import same_occurrence, departure_from_ber, ARRIVAL_FIELDS
+        from .aibt_recovery import valid_exhaustion
         decoded = []
         for device in devices:
             try:
@@ -114,7 +115,7 @@ class SharedMonitoring:
                     # Milestones discovered by any current server subscriber are
                     # baseline evidence for a newly joining device, not old alerts.
                     for key in ('atd', 'ata', 'aibt', 'fr24ID', 'origin', 'destination',
-                                'registration', 'stand', 'aibt_position', '_prelanding'):
+                                'registration', 'stand', 'aibt_position', '_prelanding') + ARRIVAL_FIELDS:
                         if flight.get(key) and not prior.get(key):
                             prior[key] = flight[key]
                     if flight.get('_checked_at', 0) > prior.get('_checked_at', 0):
@@ -124,9 +125,15 @@ class SharedMonitoring:
                                 prior[key] = flight[key]
         with self.db:
             for device, watch in decoded:
-                clean = [f for f in watch if not self.removed(f)]
+                clean = [dict(f) for f in watch if not self.removed(f)]
                 for flight in union:
-                    if any(same_occurrence(flight, old) for old in clean):
+                    existing = next((old for old in clean if same_occurrence(flight, old)), None)
+                    if existing is not None:
+                        # Share the provider decision without copying a new
+                        # milestone over the recipient's notification baseline.
+                        marker = flight.get('fr24_arrival_exhausted')
+                        if valid_exhaustion(existing, marker) and not valid_exhaustion(existing):
+                            existing['fr24_arrival_exhausted'] = dict(marker)
                         continue
                     shared = dict(flight, _shared_subscription=True)
                     if any(old['id'] == shared['id'] for old in clean):

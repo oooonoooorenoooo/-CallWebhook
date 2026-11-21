@@ -14,12 +14,14 @@ from zoneinfo import ZoneInfo
 def planned_queries(flight, now):
     """Mirror central poll eligibility before offering summary/live requests."""
     from .comatalarm import arrival_tracking_expired, departure_from_ber, stamp, utc_query_time, live_refresh_due
-    from .aibt_recovery import due, position, in_window, fast_candidate, fast_due
+    from .aibt_recovery import due, position, in_window, fast_candidate, fast_due, fr24_exhausted
     if flight.get('_arrival_fast'):
-        return [('historic/flight-events/light', {'flight_ids': flight['fr24ID'], 'event_types': 'gate_arrival'})] if fast_due(flight, now) else []
+        return [('historic/flight-events/light', {'flight_ids': flight['fr24ID'], 'event_types': 'gate_arrival'})] if fast_due(flight, now) and not fr24_exhausted(flight) else []
     if flight.get('_live_only'):
         return [('live/flight-positions/full', {'flights': flight['number']})] if live_refresh_due(flight, now) else []
     departing = departure_from_ber(flight)
+    if not departing and fr24_exhausted(flight):
+        return []
     late_arrival = arrival_tracking_expired(flight, now)
     if ((late_arrival and not in_window(flight, now)) or flight.get('cancelled') or flight.get('diverted')
             or (departing and stamp(flight.get('atd')) and flight['atd'] <= now)):
@@ -56,7 +58,11 @@ class FR24BatchRequests:
     def __init__(self):
         self.plans = {}
         self.cache = {}
+        self.exhausted_arrivals = {}
         self.lock = asyncio.Lock()
+
+    def exclude_arrival(self, identifier, at):
+        self.exhausted_arrivals[str(identifier).upper()] = at
 
     @staticmethod
     def key(token, path, params):
@@ -77,6 +83,7 @@ class FR24BatchRequests:
             family = key[:2] + (selector, json.dumps(other, sort_keys=True, separators=(',', ':')))
             groups.setdefault(family, {})[key] = dict(params)
         self.plans = {}
+        self.exhausted_arrivals = {identifier: at for identifier, at in self.exhausted_arrivals.items() if now-at < 2*86400}
         for family, entries in groups.items():
             selector = family[2]
             limit = 10 if selector == 'flight_ids' and family[1] == 'flight-summary/full' else 15
@@ -117,7 +124,11 @@ class FR24BatchRequests:
             selector, group = plan
             # A newly added watch may change group membership mid-minute. Reuse
             # each original query's cache instead of charging for old members again.
-            missing = [(k, p) for k, p in group if self.cached(k, now) is None]
+            missing = [(k, p) for k, p in group if self.cached(k, now) is None
+                       and (path != 'historic/flight-events/light' or
+                            str(p.get('flight_ids', '')).upper() not in self.exhausted_arrivals)]
+            if not missing:
+                return []
             combined = dict(params)
             combined[selector] = ','.join(p[selector] for _, p in missing)
             try:

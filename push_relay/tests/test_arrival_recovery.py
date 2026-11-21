@@ -42,6 +42,8 @@ class ArrivalProviderTests(unittest.IsolatedAsyncioTestCase):
             atd=self.now-5400, ata=self.ata, _central=True)
         self.http = ArrivalHTTP(self.now, self.aibt)
         self.provider = FlightProvider()
+        self.arrival_lookup = AsyncMock(return_value={})
+        self.provider.arrivals.lookup = self.arrival_lookup
         self.schedule, self.aware = AsyncMock(return_value={}), AsyncMock(return_value={})
         for target, replacement in (('push_relay.comatalarm.ClientSession', self.http),
                 ('push_relay.flight_schedule.schedule_lookup', self.schedule),
@@ -102,6 +104,8 @@ class ArrivalProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('aibt', result); self.assertNotIn('aibt_position', result)
         self.assertEqual([c[1] for c in self.http.calls], ['historic/flight-events/light'])
         self.assertNotIn('_error', result)
+        self.assertIn('fr24_arrival_exhausted', result)
+        self.arrival_lookup.assert_awaited_once()
 
     async def test_other_leg_and_events_before_ata_or_after_now_are_rejected(self):
         self.http.event_rows = [{'fr24_id': 'another-leg', 'events': [self.event()]},
@@ -179,7 +183,7 @@ class ArrivalWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.comat.sender.assert_not_awaited()
         self.schedule.assert_not_awaited(); self.aware.assert_not_awaited()
 
-    async def test_empty_archive_retries_are_persisted_and_do_not_claim_aibt(self):
+    async def test_empty_archive_switches_to_alternative_without_another_fr24_attempt(self):
         await self.prepare(archived=True)
         await self.tick()
         item = self.comat.history_sync.rows(self.now)[0]
@@ -187,12 +191,19 @@ class ArrivalWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item['_aibt_recovery_attempts'], 1)
         self.assertIn('AIBT noch nicht übernommen', item['_parking_lookup_status'])
         self.assertNotIn('AIBT bestätigt', item['_parking_lookup_status'])
+        self.assertIn('fr24_arrival_exhausted', item)
         await self.tick(61)
         self.assertEqual(len(self.http.calls), 1)
         self.available_event()
+        self.arrival_lookup.return_value = dict(aibt=self.actual_aibt, aibt_source='FlightStats',
+            aibt_position=dict(latitude=52.36507, longitude=13.5053,
+                               timestamp=self.actual_aibt-5, source='adsb_lol'))
         await self.tick(301)
-        self.assertEqual(len(self.http.calls), 2)
-        self.assertEqual(self.comat.history_sync.rows(self.now+301)[0]['aibt'], self.actual_aibt)
+        self.assertEqual(len(self.http.calls), 1, 'Even a later usable FR24 response must not be requested')
+        saved = self.comat.history_sync.rows(self.now+301)[0]
+        self.assertEqual(saved['aibt'], self.actual_aibt)
+        self.assertEqual(saved['aibt_source'], 'FlightStats')
+        self.assertEqual(saved['stand'], 'B06')
         self.comat.sender.assert_not_awaited()
 
     async def test_watch_survives_history_handoff_only_within_recovery_window(self):
@@ -286,23 +297,30 @@ class ArrivalWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_archive_budget_and_approval_or_delete_races_still_apply_without_aibt(self):
         f = await self.prepare(archived=True)
         owner = hashlib.sha256(b'private-api-token').hexdigest()
-        self.provider.requests[owner] = [self.now]*6
+        self.provider.requests[owner] = [self.now]*8
         self.available_event()
         await self.tick()
         self.assertEqual(self.http.calls, [])
         self.provider.requests.clear()
-        async def revoke():
+        recovered = dict(aibt=self.actual_aibt, aibt_source='FlightStats',
+                         aibt_position=dict(latitude=52.36507, longitude=13.5053,
+                                            timestamp=self.actual_aibt, source='adsb_lol'))
+        async def revoke(*args, **kwargs):
             self.allowed.remove('reno')
-        self.http.before_event = revoke
+            return recovered
+        self.arrival_lookup.side_effect = revoke
         await self.tick(61)
         self.assertNotIn('aibt', self.comat.history_sync.rows(self.now+61)[0])
         self.allowed.add('reno')
         self.provider.cache.clear(); self.comat.shared_results.clear()
-        async def delete():
+        self.provider.arrival_results.clear(); self.provider.arrival_started.clear()
+        async def delete(*args, **kwargs):
             self.comat.shared_monitoring.remove([dict(f, deleted_at=self.now+123)], self.now+123)
-        self.http.before_event = delete
+            return recovered
+        self.arrival_lookup.side_effect = delete
         await self.tick(123)
         self.assertEqual(self.comat.history_sync.rows(self.now+124), [])
+        self.assertEqual(self.http.calls, [], 'A blocked FR24 leg stays blocked during alternative-source races')
         self.comat.sender.assert_not_awaited()
 
 

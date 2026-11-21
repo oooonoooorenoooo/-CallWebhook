@@ -10,9 +10,9 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from aiohttp import web
 
-FLIGHT_KEYS = ('number','reference','fr24ID','origin','destination','registration','atd','ata','aibt','gate','gate_source','stand','cancelled','diverted','packets')
+FLIGHT_KEYS = ('number','reference','fr24ID','origin','destination','registration','atd','ata','aibt','aibt_source','gate','gate_source','stand','cancelled','diverted','packets')
 LIVE_KEYS = ('lat','lon','alt','gspeed','track','vspeed','on_ground','timestamp','type','hex','reg','eta','sta')
-SCHEDULE_KEYS = ('std','etd','atd','sta','eta','ata','aibt','eibt','gate','gate_source','registration','aircraftType','cancelled','diverted')
+SCHEDULE_KEYS = ('std','etd','atd','sta','eta','ata','aibt','aibt_source','eibt','gate','gate_source','registration','aircraftType','cancelled','diverted')
 
 
 def select(data, keys):
@@ -133,6 +133,12 @@ class Monitor:
                     existing['subscribers'].append(reader)
                     continue
                 result = select(f, FLIGHT_KEYS)
+                result.update(aibt_position=select(f.get('aibt_position'),
+                    ('latitude', 'longitude', 'timestamp', 'source', 'on_ground', 'ground_speed')),
+                    fr24_arrival_exhausted=select(f.get('fr24_arrival_exhausted'),
+                    ('fr24_id', 'flight_number', 'reference_day', 'registration', 'at', 'reason')),
+                    arrival_sources=select(f, ('_arrival_sources_checked_at', '_arrival_sources_status')),
+                    parking_lookup_status=f.get('_parking_lookup_status'))
                 result.update(day=flight_day, live=select(f.get('_live'),LIVE_KEYS), schedule=select(f.get('_schedule'),SCHEDULE_KEYS),
                     prediction=select(f.get('_stand_prediction'),('text','issued_at')), checked_at=f.get('_checked_at'),
                     inbound=select(f.get('_inbound'),FLIGHT_KEYS), outbound=select(f.get('_outbound'),('number','destination','atd')),
@@ -211,6 +217,8 @@ class SafeLogHandler(logging.Handler):
             message = 'Monatsverlauf konnte nicht gespeichert werden'
         elif template.startswith('ComatAlarm flight_poll_failed'):
             message = 'Flugabfrage fehlgeschlagen'
+        elif template.startswith('ComatAlarm arrival_sources_failed'):
+            message = 'Ergänzende AIBT-Abfrage fehlgeschlagen; FR24-Sperre für den Flug bleibt erhalten'
         elif template.startswith('ComatAlarm monitor_skip reason=device_approval'):
             message = 'Überwachung pausiert: Gerätefreigabe nicht bestätigt'
         elif template == 'ComatAlarm: %s':

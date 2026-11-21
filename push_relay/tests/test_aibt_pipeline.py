@@ -1,4 +1,5 @@
 """Actual HTTP envelopes and bounded late AIBT repair, without live API calls."""
+import asyncio
 import hashlib
 import json
 import time
@@ -8,6 +9,17 @@ from unittest.mock import AsyncMock, patch
 from push_relay.comatalarm import FlightProvider
 from push_relay.tests import test_comatalarm as fixtures
 from push_relay.tests import test_shared_monitoring as shared_fixtures
+
+
+async def settle_arrivals(comat, now):
+    """Drive the production wakeup path without waiting or retrying FR24."""
+    tasks = list(comat.provider.arrival_tasks.values())
+    if not tasks:
+        return
+    await asyncio.gather(*tasks)
+    for device in comat.db.execute('SELECT * FROM comat_devices WHERE server_polling=1').fetchall():
+        await comat.apply_ready_schedules(device, now)
+    await comat.repair_archived_arrival(now)
 
 
 class Response:
@@ -72,6 +84,8 @@ class ProviderAIBTHTTPTests(unittest.IsolatedAsyncioTestCase):
             atd=self.now-7200, ata=self.aibt-300, aibt=self.aibt, _central=True)
         self.http = RecoveryHTTP(self.now, self.aibt)
         self.provider = FlightProvider()
+        self.arrival_lookup = AsyncMock(return_value={})
+        self.provider.arrivals.lookup = self.arrival_lookup
         for target, replacement in (
             ('push_relay.comatalarm.ClientSession', self.http),
             ('push_relay.flight_schedule.schedule_lookup', AsyncMock(return_value={})),
@@ -85,14 +99,18 @@ class ProviderAIBTHTTPTests(unittest.IsolatedAsyncioTestCase):
         result.update(changes)
         return result
 
-    async def test_official_top_level_track_array_recovers_exact_aibt_sample(self):
+    async def test_empty_event_uses_alternative_exact_aibt_sample_without_track_retry(self):
         self.http.tracks = [{'fr24_id': 'abc123', 'tracks': [self.point()]}]
+        self.arrival_lookup.return_value = {'aibt_position': dict(latitude=52.36507,
+            longitude=13.5053, timestamp=self.aibt-5, source='adsb_lol')}
         result = await self.provider.lookup(self.flight, 'test-token', self.now)
         self.assertNotIn('_error', result)
         self.assertEqual(result['aibt_position']['timestamp'], self.aibt-5)
         self.assertEqual(result['aibt_position']['latitude'], 52.36507)
-        self.assertEqual([c[1] for c in self.http.calls],
-                         ['historic/flight-events/light', 'historic/flight-positions/light', 'flight-tracks'])
+        self.assertEqual(result['aibt_position']['source'], 'adsb_lol')
+        self.assertIn('fr24_arrival_exhausted', result)
+        self.assertEqual([c[1] for c in self.http.calls], ['historic/flight-events/light'])
+        self.arrival_lookup.assert_awaited_once()
 
     async def test_latest_event_cannot_reuse_an_older_events_coordinate(self):
         self.http.events = [dict(type='gate_arrival', timestamp=self.aibt-120,
@@ -101,8 +119,10 @@ class ProviderAIBTHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.http.tracks = [{'fr24_id': 'abc123', 'tracks': [self.point()]}]
         result = await self.provider.lookup(self.flight, 'test-token', self.now)
         self.assertEqual(result['aibt'], self.aibt)
-        self.assertEqual(result['aibt_position']['timestamp'], self.aibt-5)
-        self.assertEqual(result['aibt_position']['latitude'], 52.36507)
+        self.assertNotIn('aibt_position', result)
+        self.assertEqual(result['aibt_source'], 'FR24')
+        self.assertIn('fr24_arrival_exhausted', result)
+        self.assertEqual(len(self.http.calls), 1)
 
     async def test_actual_event_point_precedes_gate_reference_metadata(self):
         self.http.events = [dict(type='gate_arrival', timestamp=self.aibt,
@@ -117,13 +137,16 @@ class ProviderAIBTHTTPTests(unittest.IsolatedAsyncioTestCase):
                                 details={'gate_lat': 52.36507, 'gate_lon': 13.5053})]
         self.http.tracks = [{'fr24_id': 'abc123', 'tracks': [self.point()]}]
         result = await self.provider.lookup(self.flight, 'test-token', self.now)
-        self.assertEqual(result['aibt_position']['source'], 'fr24_track')
-        self.assertEqual(result['aibt_position']['timestamp'], self.aibt-5)
+        self.assertNotIn('aibt_position', result)
+        self.assertEqual(result['aibt'], self.aibt)
+        self.assertIn('fr24_arrival_exhausted', result)
+        self.assertEqual(len(self.http.calls), 1)
 
     async def test_gate_details_only_and_nested_event_position_remain_compatible(self):
         for details, source in (({'gate_lat': 52.36507, 'gate_lon': 13.5053}, 'fr24_gate_reference'),
                                 ({'position': {'lat': 52.36507, 'lon': 13.5053, 'timestamp': self.aibt}}, 'fr24_event')):
             self.provider = FlightProvider()
+            self.provider.arrivals.lookup = AsyncMock(return_value={})
             self.http.calls.clear()
             self.http.events = [dict(type='gate_arrival', timestamp=self.aibt, details=details)]
             result = await self.provider.lookup(self.flight, 'test-token', self.now)
@@ -168,6 +191,8 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
                            atd=self.now-3600, ata=self.now-900, aibt=self.now-600)
         self.http = RecoveryHTTP(self.now, self.flight['aibt'])
         self.provider = FlightProvider()
+        self.arrival_lookup = AsyncMock(return_value={})
+        self.provider.arrivals.lookup = self.arrival_lookup
         self.comat.provider = self.provider
         self.schedule, self.aware = AsyncMock(return_value={}), AsyncMock(return_value={})
         for target, replacement in (('push_relay.comatalarm.ClientSession', self.http),
@@ -198,13 +223,16 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def tick(self, elapsed=0):
         self.http.now = self.now+elapsed
         await self.comat.tick(self.http.now)
+        await settle_arrivals(self.comat, self.http.now)
 
-    def repaired_track(self):
-        self.http.tracks = [{'fr24_id': 'abc123', 'tracks': [self.point()]}]
+    def alternative_position(self):
+        self.arrival_lookup.return_value = {'aibt': self.flight['aibt'], 'aibt_source': 'FR24',
+            'aibt_position': dict(latitude=52.36507,
+            longitude=13.5053, timestamp=self.flight['aibt']-5, source='adsb_lol')}
 
     async def test_old_six_attempt_watch_recovers_and_keeps_real_gps_timestamp(self):
         await self.prepare()
-        self.repaired_track()
+        self.alternative_position()
         await self.tick()
         result = self.watched('reno')[0]
         self.assertEqual(result['aibt_position']['timestamp'], self.flight['aibt']-5)
@@ -213,35 +241,33 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['_parking_recovery']['state'], 'complete')
         self.comat.sender.assert_not_awaited()
 
-    async def test_six_empty_checks_back_off_then_accept_later_data(self):
+    async def test_later_alternative_data_is_accepted_without_any_fr24_retry(self):
         await self.prepare(attempts=0)
         for elapsed in (0, 301, 602, 903, 1204, 1505):
             await self.tick(elapsed)
         self.assertEqual(self.watched('reno')[0]['_aibt_recovery_attempts'], 6)
-        count = len(self.http.calls)
+        self.alternative_position()
         await self.tick(1806)
-        self.assertEqual(len(self.http.calls), count)
-        await self.tick(2406)
-        self.assertEqual(self.watched('reno')[0]['_aibt_recovery_attempts'], 7)
-        self.repaired_track()
-        await self.tick(4207)
         self.assertEqual(self.watched('reno')[0]['stand'], 'B06')
-        self.assertEqual(self.watched('reno')[0]['_aibt_recovery_attempts'], 8)
+        self.assertEqual(self.watched('reno')[0]['_aibt_recovery_attempts'], 7)
+        self.assertEqual(len(self.http.calls), 1, 'An empty FR24 response exhausts only this arrival leg')
 
-    async def test_legacy_unmatched_coordinate_gets_one_revision_refresh_with_historic_preference(self):
+    async def test_valid_unmatched_coordinate_stays_local_and_does_not_request_an_external_stand(self):
         old = {'latitude': 52.36, 'longitude': 13.49, 'timestamp': self.flight['aibt']}
         await self.prepare(coordinate=old)
         self.http.events = [dict(type='gate_arrival', timestamp=self.flight['aibt'],
                                 details={'gate_lat': old['latitude'], 'gate_lon': old['longitude']})]
-        self.repaired_track()
+        self.alternative_position()
         await self.tick()
         saved = self.watched('reno')[0]
-        self.assertEqual(saved['aibt_position']['source'], 'fr24_track')
-        self.assertEqual(saved['stand'], 'B06')
-        self.assertEqual(len(self.http.calls), 3)
+        self.assertEqual(saved['aibt_position'], old)
+        self.assertEqual(saved['_parking_recovery']['state'], 'ambiguous')
+        self.assertNotIn('stand', saved)
+        self.arrival_lookup.assert_not_awaited()
+        self.assertEqual(len(self.http.calls), 0)
         await self.tick(61)
         await self.tick(361)
-        self.assertEqual(len(self.http.calls), 3)
+        self.assertEqual(len(self.http.calls), 0)
 
     async def test_unresolved_revision_refresh_is_bounded_and_does_not_loosen_stand_match(self):
         old = {'latitude': 52.36, 'longitude': 13.49, 'timestamp': self.flight['aibt']}
@@ -253,17 +279,17 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('stand', self.watched('reno')[0])
         for elapsed in (61, 901, 3601):
             await self.tick(elapsed)
-        self.assertEqual(len(self.http.calls), 3)
+        self.assertEqual(len(self.http.calls), 0)
 
-    async def test_newer_aibt_clears_saved_old_coordinate_and_stand_in_watch_and_history(self):
+    async def test_newer_aibt_clears_saved_old_coordinate_and_stand_in_history_merge(self):
         old = {'latitude': 52.36, 'longitude': 13.49, 'timestamp': self.flight['aibt']}
-        await self.prepare(coordinate=old, stand='OLD')
-        self.http.events = [dict(type='gate_arrival', timestamp=self.flight['aibt']+120)]
-        await self.tick()
-        for saved in (self.watched('reno')[0], self.comat.history_sync.rows(self.now)[0]):
-            self.assertEqual(saved['aibt'], self.flight['aibt']+120)
-            self.assertFalse(saved.get('aibt_position'))
-            self.assertFalse(saved.get('stand'))
+        prior = await self.prepare(archived=True, coordinate=old, stand='OLD')
+        self.comat.history_sync.capture([dict(prior, aibt=self.flight['aibt']+120, aibt_source='FlightStats')], self.now)
+        saved = self.comat.history_sync.rows(self.now)[0]
+        self.assertEqual(saved['aibt'], self.flight['aibt']+120)
+        self.assertFalse(saved.get('aibt_position'))
+        self.assertFalse(saved.get('stand'))
+        self.assertEqual(self.http.calls, [])
 
     async def test_missing_index_does_not_cause_paid_coordinate_search(self):
         await self.prepare(coordinate={'latitude': 52.36, 'longitude': 13.49, 'timestamp': self.flight['aibt']}, positions=False)
@@ -271,7 +297,7 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.http.calls, [])
         self.assertEqual(self.watched('reno')[0]['_parking_recovery']['state'], 'index_missing')
 
-    async def test_budget_and_429_failures_do_not_spend_attempt_or_revision(self):
+    async def test_budget_failure_keeps_attempt_count_and_alternatives_can_complete(self):
         await self.prepare()
         owner = hashlib.sha256(b'private-api-token').hexdigest()
         self.provider.requests[owner] = [self.now]*8
@@ -280,12 +306,22 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first['_aibt_recovery_attempts'], 6)
         self.assertEqual(first.get('_aibt_evidence_revision', 0), 0)
         self.assertEqual(self.http.calls, [])
+        self.alternative_position()
+        await self.tick(61)
+        self.assertEqual(self.watched('reno')[0]['stand'], 'B06')
+        self.assertEqual(self.http.calls, [])
+
+    async def test_429_failure_never_retries_this_leg_and_preserves_attempt_count(self):
+        await self.prepare()
         self.http.status = 429
-        await self.tick(301)
-        second = self.watched('reno')[0]
-        self.assertEqual(second['_aibt_recovery_attempts'], 6)
-        self.assertEqual(second['_parking_recovery']['state'], 'paused')
-        self.assertGreaterEqual(second['_parking_recovery']['next_attempt'], self.now+901)
+        await self.tick()
+        saved = self.watched('reno')[0]
+        self.assertEqual(saved['_aibt_recovery_attempts'], 6)
+        self.assertEqual(saved['_parking_recovery']['state'], 'pending',
+                         'FR24 cooldown cannot pause independent arrival sources')
+        self.assertGreater(self.provider.cooldown[hashlib.sha256(b'private-api-token').hexdigest()], self.now)
+        self.assertIn('fr24_arrival_exhausted', saved)
+        await self.tick(61)
         await self.tick(602)
         self.assertEqual(len(self.http.calls), 1)
 
@@ -298,13 +334,13 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.http.calls, [])
         self.assertEqual(self.watched('reno')[0]['_parking_recovery']['state'], 'expired')
 
-    async def test_trusted_history_only_repairs_without_watches_pushes_or_other_providers(self):
+    async def test_trusted_history_only_repairs_from_alternative_without_watches_or_pushes(self):
         await self.prepare(archived=True, track_outbound=True, _outbound={'id': 'done-leg', 'atd': self.now-60})
-        self.repaired_track()
+        self.alternative_position()
         await self.tick()
         item = self.comat.history_sync.rows(self.now)[0]
         self.assertEqual(item['aibt_position']['timestamp'], self.flight['aibt']-5)
-        self.assertEqual(item['aibt_position']['source'], 'fr24_track')
+        self.assertEqual(item['aibt_position']['source'], 'adsb_lol')
         self.assertEqual(item['stand'], 'B06')
         self.assertEqual(item['_outbound']['id'], 'done-leg')
         self.assertEqual(item['_aibt_recovery_attempts'], 7)
@@ -314,16 +350,20 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.comat.sender.assert_not_awaited()
         self.schedule.assert_not_awaited()
         self.aware.assert_not_awaited()
-        self.assertEqual([c[1] for c in self.http.calls],
-                         ['historic/flight-events/light', 'historic/flight-positions/light', 'flight-tracks'])
+        self.assertEqual([c[1] for c in self.http.calls], ['historic/flight-events/light'])
+        self.arrival_lookup.assert_awaited_once()
         await self.tick(15)
-        self.assertEqual(len(self.http.calls), 3)
+        self.assertEqual(len(self.http.calls), 1)
 
-    async def test_archive_unmatched_legacy_point_gets_same_bounded_revision_repair(self):
+    async def test_archive_valid_unmatched_point_is_preserved_without_external_stand_search(self):
         await self.prepare(archived=True, coordinate={'latitude': 52.36, 'longitude': 13.49, 'timestamp': self.flight['aibt']})
-        self.repaired_track()
+        self.alternative_position()
         await self.tick()
-        self.assertEqual(self.comat.history_sync.rows(self.now)[0]['stand'], 'B06')
+        saved = self.comat.history_sync.rows(self.now)[0]
+        self.assertEqual(saved['aibt_position']['latitude'], 52.36)
+        self.assertNotIn('stand', saved)
+        self.arrival_lookup.assert_not_awaited()
+        self.assertEqual(self.http.calls, [])
         self.assertEqual(self.watched('reno'), [])
         self.comat.sender.assert_not_awaited()
 
@@ -336,12 +376,12 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(item['_parking_recovery']['next_attempt'], self.now+15)
         for elapsed in (15, 30, 61, 301):
             await self.tick(elapsed)
-        self.assertEqual(len(self.http.calls), 3)
+        self.assertEqual(len(self.http.calls), 1)
 
     async def test_archive_repair_requires_remaining_shared_http_budget(self):
         await self.prepare(archived=True)
         owner = hashlib.sha256(b'private-api-token').hexdigest()
-        self.provider.requests[owner] = [self.now]*6
+        self.provider.requests[owner] = [self.now]*8
         await self.tick()
         self.assertEqual(self.http.calls, [])
         self.assertEqual(self.comat.history_sync.rows(self.now)[0]['_aibt_recovery_attempts'], 6)
@@ -352,6 +392,8 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.allowed.add('reno')
                 self.provider.requests.clear()
                 self.provider.cache.clear()
+                self.provider.arrival_results.clear()
+                self.provider.arrival_started.clear()
                 self.comat.shared_results.clear()
                 self.comat.db.execute('DELETE FROM comat_app_history')
                 self.comat.db.execute('DELETE FROM comat_shared_removed')
@@ -361,7 +403,8 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.register()
                 self.headers = {'Authorization': 'Bearer '+(await response.json())['credential']}
                 f = await self.prepare(archived=True)
-                self.repaired_track()
+                self.alternative_position()
+                recovered = dict(self.arrival_lookup.return_value)
                 async def race():
                     if mutation in ('delete', 'readd'):
                         self.comat.shared_monitoring.remove([dict(f, deleted_at=self.now+1)], self.now+1)
@@ -373,12 +416,15 @@ class AIBTWorkerPipelineTests(unittest.IsolatedAsyncioTestCase):
                         self.comat.db.execute("UPDATE comat_devices SET api_token='rotated' WHERE id=?", (self.id,)); self.comat.db.commit()
                     else:
                         self.allowed.remove('reno')
-                self.http.before_track = race
+                async def alternative_after_race(*args, **kwargs):
+                    await race()
+                    return recovered
+                self.arrival_lookup.side_effect = alternative_after_race
                 await self.tick()
                 for item in self.comat.history_sync.rows(self.now+3):
                     self.assertFalse(item.get('aibt_position'))
                 self.comat.sender.assert_not_awaited()
-                self.http.before_track = None
+                self.arrival_lookup.side_effect = None
 
 
 if __name__ == '__main__':

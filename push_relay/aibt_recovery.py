@@ -1,25 +1,66 @@
-"""Exact AIBT evidence selection and a shared, bounded recovery policy."""
+"""Exact arrival evidence and a persistent, per-leg provider handoff."""
 import math
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 EVIDENCE_REVISION = 2
 MAX_AGE = 24*3600
 FAST_INTERVAL = 15
 
 
+def exhaustion_marker(flight, now, reason='no_data'):
+    """Persist only occurrence identity, never a token or provider response."""
+    from .comatalarm import stamp, registration_key
+    identifier = flight.get('fr24ID')
+    identifier = identifier if isinstance(identifier, str) and not identifier.upper().startswith(('TEMP_', 'NS_')) else ''
+    reference = stamp(flight.get('reference'))
+    return dict(fr24_id=identifier or '', flight_number=flight.get('number', ''),
+                reference_day=datetime.fromtimestamp(reference, ZoneInfo('Europe/Berlin')).date().isoformat() if reference else '',
+                registration=registration_key(flight.get('registration')), at=now,
+                reason=reason if reason in ('no_data', 'incomplete', 'error', 'unavailable', 'legacy_no_data') else 'no_data')
+
+
+def valid_exhaustion(flight, marker=None):
+    from .comatalarm import stamp, registration_key
+    marker = flight.get('fr24_arrival_exhausted') if marker is None else marker
+    if not isinstance(marker, dict) or not stamp(marker.get('at')):
+        return False
+    identity = exhaustion_marker(flight, marker['at'])
+    if not marker.get('flight_number') or not marker.get('reference_day'):
+        return False
+    for key in ('fr24_id', 'flight_number', 'reference_day'):
+        left, right = identity.get(key), marker.get(key, '')
+        if not isinstance(right, str) or len(right) > 64 or (left and right and left.upper() != right.upper()):
+            return False
+    left, right = identity.get('registration'), registration_key(marker.get('registration'))
+    return not (left and right and left != right)
+
+
+def fr24_exhausted(flight):
+    if valid_exhaustion(flight):
+        return True
+    # Upgrade stored empty replies without paying for that same leg again.
+    from .comatalarm import stamp
+    return bool(stamp(flight.get('_arrival_event_received_at')) and (
+        flight.get('_arrival_event_status') == 'no_match' or
+        (flight.get('_arrival_event_status') == 'accepted' and not position(flight))))
+
+
 def fast_candidate(flight, now):
-    """An identified aircraft on taxi-in needs fresh gate events, not live polls."""
+    """Taxi-in needs timely arrival evidence from the current source chain."""
     from .comatalarm import departure_from_ber, stamp
     identifier, ata = flight.get('fr24ID'), stamp(flight.get('ata'))
-    return bool(isinstance(identifier, str) and identifier and ',' not in identifier
-                and not identifier.upper().startswith(('TEMP_', 'NS_'))
-                and ata and -60 <= now-ata < 25*60 and not flight.get('aibt')
+    identified = isinstance(identifier, str) and identifier and ',' not in identifier and not identifier.upper().startswith(('TEMP_', 'NS_'))
+    return bool((identified or fr24_exhausted(flight))
+                and ata and -60 <= now-ata < 25*60 and not position(flight)
                 and not departure_from_ber(flight) and not flight.get('cancelled') and not flight.get('diverted'))
 
 
 def fast_due(flight, now):
     from .comatalarm import stamp
-    return fast_candidate(flight, now) and now-(stamp(flight.get('_arrival_event_checked_at')) or 0) >= FAST_INTERVAL
+    checked = max(stamp(flight.get('_arrival_event_checked_at')) or 0, stamp(flight.get('_arrival_sources_checked_at')) or 0)
+    return fast_candidate(flight, now) and now-checked >= FAST_INTERVAL
 
 
 def receipt(flight, previous, now):
@@ -30,9 +71,10 @@ def receipt(flight, previous, now):
         return None
     message = {
         'accepted': 'FR24 gate_arrival: Antwort enthält passende AIBT',
-        'no_match': 'FR24 gate_arrival: Antwort geprüft; keine passende AIBT übernommen',
-        'paused': 'FR24 gate_arrival: Abruf vorübergehend pausiert',
-        'error': 'FR24 gate_arrival: Abruf fehlgeschlagen',
+        'no_match': 'FR24 ohne passende Ankunftsdaten · weitere Quellen übernehmen; kein weiterer FR24-Ankunftsabruf',
+        'incomplete': 'FR24-AIBT übernommen · Koordinate fehlt; weitere Quellen übernehmen',
+        'paused': 'FR24-Ankunftsabruf nicht verfügbar · weitere Quellen übernehmen',
+        'error': 'FR24-Ankunftsabruf fehlgeschlagen · weitere Quellen übernehmen',
     }.get(state)
     if message:
         identifier = flight.get('fr24ID')
@@ -73,10 +115,9 @@ def revision(flight):
 
 
 def refresh_needed(flight, positions, now):
-    from .comatalarm import match_stand
-    point = position(flight)
-    return bool(in_window(flight, now) and point and positions and revision(flight) < EVIDENCE_REVISION
-                and not match_stand(point, positions))
+    # A usable AIBT coordinate is the provider's complete contract. Missing or
+    # ambiguous local stand mapping must not trigger more external requests.
+    return False
 
 
 def pending(flight, now, positions=None):
@@ -84,9 +125,7 @@ def pending(flight, now, positions=None):
 
 
 def retain_pending(flight, now):
-    # The handoff has no model context. Keep a legacy coordinate only until the
-    # worker can classify it once with the available index, within the same 24h.
-    return bool(in_window(flight, now) and (not position(flight) or revision(flight) < EVIDENCE_REVISION))
+    return bool(in_window(flight, now) and not position(flight))
 
 
 def attempts(flight):
@@ -95,6 +134,9 @@ def attempts(flight):
 
 
 def next_attempt(flight):
+    if fr24_exhausted(flight):
+        # The historic FR24 backoff must never delay independent arrival data.
+        return max(flight.get('_arrival_sources_checked_at', 0), flight.get('_aibt_recovery_at', 0)) + 60
     count = attempts(flight)
     delay = 300 if count < 6 else min(21600, 900 * 2**min(5, count-6))
     # An already exhausted pre-fix watch gets the corrected decoder promptly,
@@ -143,14 +185,18 @@ def describe(flight, positions, now, error=None):
         next_at = next_attempt(flight)
     else:
         state = 'pending'
-        text = ('AIBT bestätigt · Koordinate noch nicht übernommen; Pi prüft mit Warteabstand erneut' if confirmed else
-                'Landung bestätigt · AIBT noch nicht übernommen; Pi prüft Gate-Arrival erneut')
+        text = (('AIBT bestätigt · weitere Quellen prüfen die Koordinate' if confirmed else
+                 'Landung bestätigt · AIBT noch nicht übernommen; weitere Quellen werden geprüft') if fr24_exhausted(flight) else
+                ('AIBT bestätigt · Koordinate noch nicht übernommen' if confirmed else
+                 'Landung bestätigt · AIBT noch nicht übernommen; Ankunftsdaten werden geprüft'))
         next_at = next_attempt(flight)
     if next_at is not None and not confirmed and fast_candidate(flight, now):
-        next_at = max(now, (stamp(flight.get('_arrival_event_checked_at')) or 0)+FAST_INTERVAL)
+        next_at = max(now, max(stamp(flight.get('_arrival_event_checked_at')) or 0,
+                               stamp(flight.get('_arrival_sources_checked_at')) or 0)+FAST_INTERVAL)
     if next_at is not None and next_at >= (started_at(flight) or now)+MAX_AGE:
         next_at = None
-    last_attempt = max(flight.get('_aibt_recovery_at', 0), flight.get('_arrival_event_checked_at', 0))
+    last_attempt = max(flight.get('_aibt_recovery_at', 0), flight.get('_arrival_event_checked_at', 0),
+                       flight.get('_arrival_sources_checked_at', 0))
     meta = dict(state=state, last_attempt=last_attempt, next_attempt=next_at,
                 attempts=attempts(flight), evidence_revision=revision(flight))
     if error and state == 'paused':
@@ -203,7 +249,7 @@ def gate_arrival(rows, identifier, ata, cutoff):
     if not choices:
         return {}
     when, _, point = max(choices, key=lambda item: item[:2])
-    result = {'aibt': when}
+    result = {'aibt': when, 'aibt_source': 'FR24'}
     if point:
         result['aibt_position'] = point
     return result

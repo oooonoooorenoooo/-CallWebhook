@@ -1,4 +1,4 @@
-"""Prioritized 15s gate events and 30s final-approach observations, real provider."""
+"""Prioritized arrival handoff and 30s approach observations, real provider."""
 import asyncio
 import hashlib
 import json
@@ -41,6 +41,8 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
 
     def configure(self, flights):
         self.comat.provider = FlightProvider()
+        self.arrival_lookup = AsyncMock(return_value={})
+        self.comat.provider.arrivals.lookup = self.arrival_lookup
         self.http = FastHTTP(flights, self.now)
         self.schedule, self.aware = AsyncMock(return_value={}), AsyncMock(return_value={})
         for target, replacement in (('push_relay.comatalarm.ClientSession', self.http),
@@ -61,8 +63,9 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
     async def tick(self, offset):
         self.http.now = self.now+offset
         await self.comat.tick(self.http.now)
+        await aibt_fixtures.settle_arrivals(self.comat, self.http.now)
 
-    async def test_event_between_ticks_bypasses_warm_60s_cache_and_commits_before_both_pushes(self):
+    async def test_alternative_between_ticks_bypasses_warm_cache_and_commits_before_both_pushes(self):
         f = self.taxi_flights(1)[0]
         self.configure([f])
         # The old normal lookup really contains an empty gate-event response.
@@ -80,6 +83,8 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.http.calls, [])
         actual = self.now+1
         self.http.events[f['fr24ID']] = [self.event(actual)]
+        self.arrival_lookup.return_value = dict(aibt=actual, aibt_source='FlightStats',
+            aibt_position=dict(latitude=52.36507, longitude=13.5053, timestamp=actual, source='adsb_lol'))
         async def assert_atomic(token, environment, payload):
             row = self.comat.db.execute('SELECT watch FROM comat_devices WHERE token=?', (token,)).fetchone()
             saved = json.loads(row['watch'])[0]
@@ -93,12 +98,12 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
             return True
         self.comat.sender.side_effect = assert_atomic
         await self.tick(15)
-        self.assertEqual([c[1] for c in self.http.calls], ['historic/flight-events/light'])
+        self.assertEqual(self.http.calls, [], 'The first empty FR24 reply remains final for this leg')
         self.assertEqual(self.comat.sender.await_count, 2)
         self.assertEqual(self.row('reno')['last_poll'], self.now, 'Fast work cannot postpone regular airborne polling')
         for offset in (30, 45, 60):
             await self.tick(offset)
-        self.assertEqual(len(self.http.calls), 1)
+        self.assertEqual(len(self.http.calls), 0)
         self.assertEqual(self.comat.sender.await_count, 2)
         self.schedule.assert_not_awaited(); self.aware.assert_not_awaited()
 
@@ -136,13 +141,18 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual([identifier for c in calls for identifier in c[2]['flight_ids'].split(',')],
                               [f['fr24ID'] for f in tracked])
         await self.tick(15)
-        self.assertEqual(len(self.http.calls), 4, 'Empty event batches need fresh15s observations, not the normal60s cache')
+        self.assertEqual(len(self.http.calls), 2, 'Every empty member must leave the FR24 batch permanently')
+        fresh = self.taxi_flights(17)[-1]
+        self.http.flights[fresh['fr24ID']] = fresh
+        await self.own(flights=tracked+[fresh])
         self.http.status = 429
         await self.tick(30)
-        self.assertEqual(len(self.http.calls), 5)
+        self.assertEqual(len(self.http.calls), 3)
+        self.assertEqual(self.http.calls[-1][2]['flight_ids'], fresh['fr24ID'])
         await self.tick(45)
-        self.assertEqual(len(self.http.calls), 5)
-        self.assertTrue(all('pausiert' in f['_parking_lookup_status'] for f in self.watched('reno')))
+        self.assertEqual(len(self.http.calls), 3)
+        self.assertTrue(all(f.get('fr24_arrival_exhausted') for f in self.watched('reno')))
+        self.assertGreater(self.comat.provider.cooldown[hashlib.sha256(b'private-api-token').hexdigest()], self.now+45)
         self.comat.sender.assert_not_awaited()
 
     async def test_twelve_approaches_and_fifteen_taxi_legs_keep_the_shared_eight_request_budget(self):
@@ -161,8 +171,8 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all(f.get('_live_checked_at', 0) >= self.now+offset-60
                                     for f in saved if f['fr24ID'] in {x['fr24ID'] for x in tracked[:12]}))
         first_minute = [c for c in self.http.calls if self.now <= c[0] < self.now+60]
-        self.assertEqual(len(first_minute), 8)
-        self.assertEqual(sum(c[1] == 'historic/flight-events/light' for c in first_minute), 4)
+        self.assertEqual(len(first_minute), 5)
+        self.assertEqual(sum(c[1] == 'historic/flight-events/light' for c in self.http.calls), 1)
         self.assertEqual(sum(c[1] == 'live/flight-positions/full' for c in first_minute), 2)
         self.assertEqual(sum(c[1] == 'flight-summary/full' for c in first_minute), 2)
         self.assertFalse(any(f.get('aibt') for f in self.watched('reno')))
@@ -199,16 +209,23 @@ class FastAlertPollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved['_arrival_event_received_at'], self.now)
         records = self.comat.db.execute("SELECT message FROM comat_monitor_events WHERE kind='arrival'").fetchall()
         self.assertEqual(len(records), 1)
-        self.assertIn('Antwort geprüft', records[0]['message'])
+        self.assertIn('kein weiterer FR24-Ankunftsabruf', records[0]['message'])
         self.assertIn(f['fr24ID'], records[0]['message'])
         self.assertNotIn('private-api-token', records[0]['message'])
         await self.tick(15)
-        self.assertEqual(self.watched('reno')[0]['_arrival_event_received_at'], self.now+15)
+        self.assertEqual(self.watched('reno')[0]['_arrival_event_received_at'], self.now)
         self.assertEqual(self.comat.db.execute("SELECT count(*) FROM comat_monitor_events WHERE kind='arrival'").fetchone()[0], 1)
         self.http.events[f['fr24ID']] = [self.event(self.now+20)]
+        self.arrival_lookup.return_value = dict(aibt=self.now+20, aibt_source='FlightStats',
+            aibt_position=dict(latitude=52.36507, longitude=13.5053,
+                               timestamp=self.now+20, source='adsb_lol'))
         await self.tick(30)
-        self.assertEqual(self.watched('reno')[0]['_arrival_event_status'], 'accepted')
-        self.assertEqual(self.comat.db.execute("SELECT count(*) FROM comat_monitor_events WHERE kind='arrival'").fetchone()[0], 2)
+        saved = self.watched('reno')[0]
+        self.assertEqual(saved['_arrival_event_status'], 'no_match')
+        self.assertEqual(saved['aibt_source'], 'FlightStats')
+        self.assertEqual(saved['aibt'], self.now+20)
+        self.assertEqual(self.comat.db.execute("SELECT count(*) FROM comat_monitor_events WHERE kind='arrival'").fetchone()[0], 1)
+        self.assertEqual(len(self.http.calls), 1)
         self.assertEqual(self.comat.sender.await_count, 1)
 
     async def test_delete_credential_uid_token_and_approval_changes_win_during_event_io(self):

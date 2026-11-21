@@ -54,18 +54,18 @@ class RotationTests(unittest.TestCase):
 
 
 class PreviousArrivalTests(unittest.IsolatedAsyncioTestCase):
-    async def test_departed_flight_retries_event_after_predeparture_budget_was_spent(self):
+    async def test_departure_does_not_reopen_an_already_checked_predecessor(self):
         now = time.time()
         old = dict(id="206", number="LH206", registration="D-AIZD", ata=now-8000,
                    recovery_attempts=2, event_checked_at=now-1800)
         flight = dict(number="LH207", origin="BER", destination="FRA", registration="D-AIZD", reference=now-500,
                       atd=now-300, _inbound=old, _inbound_check_at=now-1800, _inbound_registration="DAIZD")
-        fr24 = AsyncMock(side_effect=[
-            [dict(fr24_id="206", flight="LH206", reg="D-AIZD", orig_iata="FRA", dest_iata="BER", datetime_takeoff=now-10000, datetime_landed=now-8000)],
-            [dict(fr24_id="206", events=[dict(type="gate_arrival", timestamp=now-7500, details={"gate_lat":52.36507,"gate_lon":13.5053})])]])
+        fr24 = AsyncMock(return_value=[dict(fr24_id="206", flight="LH206", reg="D-AIZD",
+            orig_iata="FRA", dest_iata="BER", datetime_takeoff=now-10000, datetime_landed=now-8000)])
         result = await FlightProvider().previous_arrival(flight, fr24, now)
-        self.assertEqual(result["_inbound"]["aibt"], now-7500)
-        self.assertEqual(fr24.await_count, 2)
+        self.assertNotIn('aibt', result['_inbound'])
+        self.assertIn('fr24_arrival_exhausted', result['_inbound'])
+        self.assertEqual(fr24.await_count, 1, 'Rotation lookup cannot reopen the predecessor arrival endpoint')
 
     async def test_postdeparture_recovery_does_not_query_own_destination_or_schedules(self):
         now = time.time()
@@ -79,21 +79,25 @@ class PreviousArrivalTests(unittest.IsolatedAsyncioTestCase):
         schedule.assert_not_awaited()
         session.get.assert_not_called()
 
-    async def test_real_event_and_historic_position_are_separate_from_departure(self):
+    async def test_real_event_and_alternative_position_are_separate_from_departure(self):
         now = time.time()
         flight = dict(number="LH207", origin="BER", destination="FRA", registration="D-AIZD", reference=now+1800)
         fr24 = AsyncMock(side_effect=[
             [dict(fr24_id="206", flight="LH206", reg="D-AIZD", orig_iata="FRA", dest_iata="BER", datetime_takeoff=now-4000, datetime_landed=now-800)],
-            [dict(fr24_id="206", events=[dict(type="gate_arrival", timestamp=now-600, details={"gate_ident":"A30"})])],
-            [dict(fr24_id="wrong", lat=52.36507, lon=13.5053, timestamp=now-600, gspeed=0),
-             dict(fr24_id="206", lat=52.36507, lon=13.5053, timestamp=now-600, gspeed=0)]])
-        result = await FlightProvider().previous_arrival(flight, fr24, now)
+            [dict(fr24_id="206", events=[dict(type="gate_arrival", timestamp=now-600, details={"gate_ident":"A30"})])]])
+        provider = FlightProvider()
+        provider.arrivals.lookup = AsyncMock(return_value=dict(aibt=now-600, aibt_source='FR24',
+            aibt_position=dict(latitude=52.36507, longitude=13.5053, timestamp=now-600, source='adsb_lol')))
+        result = await provider.previous_arrival(flight, fr24, now, session=object())
         self.assertNotIn("aibt", result)
         self.assertNotIn("ata", result)
         self.assertEqual(result["_inbound"]["aibt"], now-600)
         self.assertEqual(result["_inbound"]["aibt_position"]["latitude"], 52.36507)
+        self.assertEqual(result['_inbound']['aibt_position']['source'], 'adsb_lol')
+        self.assertIn('fr24_arrival_exhausted', result['_inbound'])
+        self.assertNotIn('stand', result['_inbound'])
         self.assertEqual(fr24.call_args_list[1].args[1]["flight_ids"], "206")
-        self.assertEqual(fr24.call_args_list[2].args[1]["flights"], "LH206")
+        self.assertEqual(fr24.await_count, 2)
         self.assertNotIn("airports", fr24.call_args_list[0].args[1])
 
     async def test_cached_event_throttle_and_aircraft_change(self):
@@ -108,18 +112,20 @@ class PreviousArrivalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await provider.previous_arrival(dict(flight, registration="D-NEW"), fr24, now))["_inbound"], {})
         self.assertEqual(fr24.await_count, 1)
 
-    async def test_unknown_aibt_is_not_synthesized_and_recovery_is_bounded(self):
+    async def test_unknown_aibt_is_not_synthesized_and_predecessor_marker_survives_restart(self):
         now = time.time()
         leg = dict(fr24_id="206", flight="LH206", reg="D-AIZD", orig_iata="FRA", dest_iata="BER", datetime_takeoff=now-10000, datetime_landed=now-8000)
         flight = dict(number="LH207", origin="BER", destination="FRA", registration="D-AIZD", reference=now+1800)
-        fr24 = AsyncMock(side_effect=[[leg], [], [leg], [], [leg]])
-        provider = FlightProvider()
+        fr24 = AsyncMock(side_effect=[[leg], [], [leg], [leg]])
         for offset in (0, 901, 1802):
+            provider = FlightProvider()
             result = await provider.previous_arrival(flight, fr24, now+offset)
             flight.update(result)
         self.assertNotIn("aibt", result["_inbound"])
-        self.assertEqual(result["_inbound"]["recovery_attempts"], 2)
-        self.assertEqual(fr24.await_count, 5)
+        self.assertEqual(result["_inbound"]["recovery_attempts"], 1)
+        self.assertIn('fr24_arrival_exhausted', result['_inbound'])
+        self.assertEqual(fr24.await_count, 4)
+        self.assertEqual(sum(call.args[0] == 'historic/flight-events/light' for call in fr24.call_args_list), 1)
 
     async def test_full_lookup_discovers_departure_route_before_previous_arrival(self):
         now = time.time()
@@ -132,7 +138,7 @@ class PreviousArrivalTests(unittest.IsolatedAsyncioTestCase):
             async def json(self): return {"data": []}
         session = AsyncMock()
         session.get = lambda url, **kwargs: Response()
-        async def previous(flight, fr24, at):
+        async def previous(flight, fr24, at, session=None, credentials=None):
             calls.append(flight)
             return {"_inbound": {}}
         with patch("push_relay.comatalarm.ClientSession") as cls, patch("push_relay.flight_schedule.schedule_lookup", return_value=schedule), patch("push_relay.flight_schedule.aware_lookup", return_value={}):

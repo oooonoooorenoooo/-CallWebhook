@@ -27,15 +27,31 @@ class ScheduleIsolationTests(unittest.IsolatedAsyncioTestCase):
         fast_fixtures.FastAlertPollingTests.configure(self, flights)
         self.provider = self.comat.provider
         self.addAsyncCleanup(self.provider.schedules.close)
+        self.addAsyncCleanup(self.provider.close_arrivals)
 
     async def finish_jobs(self):
         await asyncio.gather(*list(self.provider.schedules.tasks.values()))
         await asyncio.sleep(0)  # Let completed-task cleanup callbacks run.
 
-    async def test_event_appearing_during_an_already_blocked_schedule_reaches_both_closed_apps(self):
+    async def finish_arrivals(self):
+        await asyncio.gather(*list(self.provider.arrival_tasks.values()))
+        await asyncio.sleep(0)
+
+    def alternative_after_first_tick(self):
+        async def lookup(session, flight, now, **kwargs):
+            if now <= self.now:
+                return {'_arrival_sources_status': 'no_aibt'}
+            return {'aibt': self.now+1, 'aibt_source': 'FlightStats',
+                    'aibt_position': dict(latitude=52.36507, longitude=13.5053, timestamp=self.now+1,
+                                          source='adsb_lol', on_ground=True, ground_speed=0),
+                    '_arrival_sources_status': 'complete'}
+        self.provider.arrivals.lookup = AsyncMock(side_effect=lookup)
+
+    async def test_alternative_appearing_during_blocked_schedule_reaches_both_closed_apps(self):
         air, taxi = batch_fixtures.flights(2, self.now)
         taxi['ata'] = self.now-120
         self.configure([air, taxi])
+        self.alternative_after_first_tick()
         await self.own(flights=[air, taxi], stand_positions=self.positions())
         await self.add_peer(air, flights=[], firebase_token='colleague', server_polling=True,
                             relay_alerts=True, stand_positions=self.positions())
@@ -47,14 +63,18 @@ class ScheduleIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.schedule.side_effect = blocked
         try:
             await asyncio.wait_for(self.tick(0), 1)
+            await self.finish_arrivals()
             await asyncio.wait_for(entered.wait(), 1)
             self.assertTrue(self.provider.schedules.tasks)
             self.assertFalse(release.is_set())
             self.comat.sender.assert_not_awaited()
-            # This event did not exist at the first priority pass. The unrelated
-            # provider is already blocked when it becomes available.
+            # FR24 was empty and must never be tried again for this occurrence.
+            # An independent actual/position pair appears while schedule work
+            # remains blocked; the wakeup must commit it to both closed apps.
             actual = self.now+1
-            self.http.events[taxi['fr24ID']] = [self.event(actual)]
+            fr24_count = len(self.http.calls)
+            await asyncio.wait_for(self.tick(15), 1)
+            await self.finish_arrivals()
             await asyncio.wait_for(self.tick(15), 1)
             self.assertFalse(release.is_set())
             self.assertTrue(any(not t.done() for t in self.provider.schedules.tasks.values()))
@@ -65,7 +85,7 @@ class ScheduleIsolationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved['stand'], 'B06')
             self.assertEqual(self.comat.sender.await_count, 2)
             self.assertTrue(all(c.args[2]['flag'] == 'alarmParking' for c in self.comat.sender.call_args_list))
-            self.assertEqual([c[1] for c in self.http.calls if c[0] == self.now+15], ['historic/flight-events/light'])
+            self.assertEqual(len(self.http.calls), fr24_count, 'Alternative completion must not retry FR24')
         finally:
             release.set()
             await self.finish_jobs()
@@ -219,6 +239,7 @@ class ScheduleIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_periodic_healthcheck_never_blocks_the_next_gate_pass(self):
         taxi = dict(batch_fixtures.flights(1, self.now)[0], ata=self.now-120)
         self.configure([taxi])
+        self.alternative_after_first_tick()
         await self.own(flights=[taxi], stand_positions=self.positions())
         entered, release = asyncio.Event(), asyncio.Event()
         async def health(*args, **kwargs):
@@ -229,10 +250,14 @@ class ScheduleIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.comat.api_status.refresh = AsyncMock(side_effect=health)
         try:
             await asyncio.wait_for(self.tick(0), 1)
+            await self.finish_arrivals()
             await asyncio.wait_for(entered.wait(), 1)
-            self.http.events[taxi['fr24ID']] = [self.event(self.now+1)]
+            fr24_count = len(self.http.calls)
+            await asyncio.wait_for(self.tick(15), 1)
+            await self.finish_arrivals()
             await asyncio.wait_for(self.tick(15), 1)
             self.assertEqual(self.comat.sender.await_count, 1)
+            self.assertEqual(len(self.http.calls), fr24_count)
             self.assertFalse(release.is_set())
             self.assertEqual(self.comat.api_status.refresh.await_count, 1)
         finally:
@@ -241,6 +266,21 @@ class ScheduleIsolationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScheduleTaskLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_actual_arrival_provenance_survives_private_schedule_allowlist(self):
+        now = 1_800_000_000
+        evidence = dict(aibt=now-1, aibt_source='FlightAware', flightawareID='DLH194-real-leg',
+                        icao24='3c6424', origin='FRA', destination='BER', registration='D-AIDA')
+        provider = SimpleNamespace(credentials={}, lookup=AsyncMock(return_value=dict(evidence, stand='UNTRUSTED')))
+        cache = ScheduleCache(provider)
+        flight = dict(number='LH194', reference=now, origin='FRA', destination='BER')
+        cache.request(flight, 'test', now)
+        await asyncio.gather(*list(cache.tasks.values()))
+        result = cache.get(flight, 'test', now)
+        for key, value in evidence.items():
+            self.assertEqual(result[key], value)
+        self.assertNotIn('stand', result)
+        await cache.close()
+
     async def test_close_cancels_running_work_and_consumes_task_failures(self):
         stopped, entered = asyncio.Event(), asyncio.Event()
         async def blocked(*args, **kwargs):

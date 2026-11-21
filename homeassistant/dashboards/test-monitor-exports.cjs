@@ -91,6 +91,84 @@ test('sharing projects allowlisted fields and removes injected credentials, raw 
  assert.equal(doc.flights[0].fr24_id,'3cafe123');
 });
 
+test('arrival diagnostics preserve source, original position time and per-flight handoff in JSON and text',async()=>{
+ const data=fixture(),at=seconds-600.25,observed=seconds-1805.125;
+ Object.assign(data.flights[0],{aibt:seconds-1800,aibt_source:'FlightStats',stand:'B06',
+  aibt_position:{latitude:52.36507,longitude:13.5053,timestamp:observed,source:'adsb_lol',on_ground:true,ground_speed:1.852},
+  fr24_arrival_exhausted:{fr24_id:'3cafe123',flight_number:'LH194',reference_day:day,registration:'D-AIDL',at,reason:'no_data'},
+  arrival_sources:{_arrival_sources_checked_at:seconds-20,_arrival_sources_status:'complete'},
+  parking_lookup_status:'AIBT-Koordinate übernommen · Stand B06'});
+ const c=setup({data}),doc=plain(c.card._comatBuildExport('diagnosis'));
+ for(const f of [doc.flights[0],doc.selected_history.flights[0]]){
+  assert.equal(f.aibt_source,'FlightStats');
+  assert.equal(f.times.aibt.unix,seconds-1800);
+  assert.equal(f.aibt_position.latitude,52.36507);assert.equal(f.aibt_position.longitude,13.5053);
+  assert.equal(f.aibt_position.timestamp.unix,observed);
+  assert.equal(f.aibt_position.timestamp.utc,new Date(observed*1000).toISOString());
+  assert.notEqual(f.aibt_position.timestamp.unix,f.times.aibt.unix,'keep the measured time rather than replacing it with AIBT');
+  assert.equal(f.aibt_position.source,'adsb_lol');assert.equal(f.aibt_position.on_ground,true);
+  assert.equal(f.aibt_position.ground_speed,1.852);
+  assert.equal(f.fr24_arrival_exhausted.at.unix,at);assert.equal(f.fr24_arrival_exhausted.reason,'no_data');
+  assert.equal(f.fr24_arrival_exhausted.reference_day,day);assert.equal(f.fr24_arrival_exhausted.fr24_id,'3cafe123');
+  assert.equal(f.arrival_sources._arrival_sources_checked_at.unix,seconds-20);
+  assert.equal(f.arrival_sources._arrival_sources_status,'complete');
+  assert.equal(f.parking_lookup_status,'AIBT-Koordinate übernommen · Stand B06');
+ }
+ await c.card._comatExport('diagnosis','copy');
+ const text=c.clipboardCalls[0];
+ assert.match(text,/AIBT-Quelle: FlightStats/);assert.match(text,/AIBT-Koordinate: 52\.36507, 13\.5053 · Quelle: adsb_lol/);
+ assert.ok(text.includes(doc.flights[0].aibt_position.timestamp.utc));
+ assert.match(text,/FR24-Ankunftsabrufe beendet: .*Grund: no_data/);
+ assert.match(text,/Weitere Ankunftsquellen: complete/);assert.match(text,/Ankunftsabgleich: AIBT-Koordinate übernommen/);
+ assert.equal(c.apiCalls.length,0);
+});
+
+test('new arrival fields export no extra keys, credentials or unknown source/status values',()=>{
+ const data=fixture();
+ Object.assign(data.flights[0],{aibt:seconds-1800,aibt_source:'PRIVATE_ARRIVAL_SOURCE',
+  aibt_position:{latitude:52.36507,longitude:13.5053,timestamp:seconds-1805,source:'PRIVATE_POINT_SOURCE',
+   on_ground:'PRIVATE_GROUND',ground_speed:'PRIVATE_SPEED',token:'PRIVATE_POINT_TOKEN',headers:{authorization:'PRIVATE_HEADER'}},
+  fr24_arrival_exhausted:{fr24_id:'3cafe123',flight_number:'LH194',reference_day:day,registration:'D-AIDL',at:seconds-600,reason:'incomplete',
+   _arrival_token_digest:'PRIVATE_DIGEST',token:'PRIVATE_MARKER_TOKEN',response:{body:'PRIVATE_BODY'}},
+  arrival_sources:{_arrival_sources_checked_at:seconds-20,_arrival_sources_status:'PRIVATE_STATUS',api_key:'PRIVATE_API_KEY'},
+  parking_lookup_status:'AIBT bestätigt · authorization=secretArrival Bearer secretBearer firebase_uid=secretUser'});
+ const c=setup({data}),doc=plain(c.card._comatBuildExport('diagnosis')),text=JSON.stringify(doc),f=doc.flights[0];
+ assert.doesNotMatch(text,/PRIVATE_|secretArrival|secretBearer|secretUser|arrival_token_digest|authorization|api_key/);
+ assert.equal(f.aibt_source,null);assert.equal(f.aibt_position.source,null);
+ assert.equal(f.aibt_position.on_ground,null);assert.equal(f.aibt_position.ground_speed,null);
+ assert.deepEqual(Object.keys(f.aibt_position).sort(),['ground_speed','latitude','longitude','on_ground','source','timestamp']);
+ assert.deepEqual(Object.keys(f.fr24_arrival_exhausted).sort(),['at','flight_number','fr24_id','reason','reference_day','registration']);
+ assert.equal(f.fr24_arrival_exhausted.reason,'incomplete');
+ assert.deepEqual(Object.keys(f.arrival_sources).sort(),['_arrival_sources_checked_at','_arrival_sources_status']);
+ assert.equal(f.arrival_sources._arrival_sources_status,null);
+ assert.match(f.parking_lookup_status,/AIBT bestätigt/);assert.match(f.parking_lookup_status,/Zugangsdaten entfernt/);
+});
+
+test('arrival export requires primitive coordinates/times, known enums and a real reference date',()=>{
+ const point={latitude:52.36507,longitude:13.5053,timestamp:seconds-1805,source:'fr24_gate_reference'};
+ const marker={flight_number:'LH194',reference_day:day,at:seconds-600,reason:'no_data'};
+ for(const invalid of [null,[],{...point,latitude:'52.36507'},{...point,longitude:true},
+  {...point,latitude:NaN},{...point,longitude:Infinity},{...point,latitude:50},
+  {...point,timestamp:String(seconds-1805)},{...point,timestamp:true},{...point,timestamp:seconds*1000}]){
+  const data=fixture();data.flights[0].aibt_position=invalid;
+  assert.equal(setup({data}).card._comatBuildExport('diagnosis').flights[0].aibt_position,null);
+ }
+ for(const invalid of [[],{...marker,reason:'PRIVATE_REASON'},{...marker,reference_day:'2026-02-30'},
+  {...marker,reference_day:20261120},{...marker,at:String(seconds-600)},{...marker,flight_number:{value:'LH194'}},
+  {...marker,fr24_id:{token:'PRIVATE_ID'}},{...marker,registration:true}]){
+  const data=fixture();data.flights[0].fr24_arrival_exhausted=invalid;
+  assert.equal(setup({data}).card._comatBuildExport('diagnosis').flights[0].fr24_arrival_exhausted,null);
+ }
+ const data=fixture();Object.assign(data.flights[0],{aibt_source:{value:'FR24'},aibt_position:point,
+  fr24_arrival_exhausted:marker,arrival_sources:[],parking_lookup_status:{secret:'PRIVATE_STATUS'}});
+ const f=plain(setup({data}).card._comatBuildExport('diagnosis').flights[0]);
+ assert.equal(f.aibt_source,null);assert.equal(f.aibt_position.source,'fr24_gate_reference');
+ assert.equal(f.aibt_position.on_ground,null,'missing ground status remains unknown');
+ assert.equal(f.aibt_position.ground_speed,null,'missing speed is not replaced with zero');
+ assert.equal(f.fr24_arrival_exhausted.fr24_id,'','an occurrence without a provider ID still carries its valid stop marker');
+ assert.equal(f.arrival_sources,null);assert.equal(f.parking_lookup_status,'');
+});
+
 test('user click copies readable UTF-8 text and reports clipboard success without HTTP calls',async()=>{
  const c=setup();c.click('pushes','copy');await flush();
  assert.equal(c.clipboardCalls.length,1);assert.equal(c.legacyCalls,0);

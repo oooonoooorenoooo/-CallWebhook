@@ -24,7 +24,10 @@ eingerichtet. Sind auch dort keine passenden Daten vorhanden, bleibt der
 fehlende Wert ausdrücklich offen.
 
 CallWebhook Push-Dienst auf **1.2.36** aktualisieren und die dazugehörige
-ComatAlarm-App installieren. Die vorhandene manuelle FR24-Endpunktprüfung
+ComatAlarm-App installieren. Für die erweiterten Diagnoseexporte zusätzlich
+die aktualisierte vollständige Dashboard-Konfiguration übernehmen; ein
+Add-on-Update ersetzt den gespeicherten Dashboard-Inhalt nicht.
+Die vorhandene manuelle FR24-Endpunktprüfung
 bleibt nutzbar; sie löst nur bei ausdrücklichem Betätigen eine Abfrage aus.
 Die bestehenden Diagnoseexporte enthalten nun zusätzlich Ankunftsquelle,
 Koordinate samt Messzeit sowie den Status der weiteren Quellen und der

@@ -227,7 +227,41 @@ cards:
       const safeFlight=value=>/^[A-Z0-9]{2,12}$/.test(value||'')?value:'';
       const safeDevice=value=>!value?'':/^Gerät [0-9a-f]{6}$/.test(value)?value:'Gerät anonymisiert';
       const exportEvent=e=>({time:exportTime(e.timestamp),kind:/^[a-z_]{1,40}$/.test(e.kind||'')?e.kind:'event',flight:safeFlight(e.flight),device:safeDevice(e.device),message:safeText(message(e.message))});
-      const exportFlight=f=>({number:safeFlight(f.number),day:safeDay(f.day),origin:/^[A-Z]{3,4}$/.test(f.origin||'')?f.origin:'',destination:/^[A-Z]{3,4}$/.test(f.destination||'')?f.destination:'',registration:/^[A-Z0-9-]{2,12}$/.test(f.registration||'')?f.registration:'',fr24_id:/^[a-f0-9]{6,16}$/i.test(f.fr24ID||'')?f.fr24ID:'',times:Object.fromEntries(['std','etd','atd','sta','eta','ata','eibt','aibt'].map(key=>[key,exportTime(f[key]??f.schedule?.[key])])),stand:safeText(f.stand,40),gate:safeText(f.gate||f.schedule?.gate,40),prediction:safeText(f.prediction?.text,160),packets:{in:Number.isFinite(f.packets?.in)?f.packets.in:null,out:Number.isFinite(f.packets?.out)?f.packets.out:null}});
+      const exportObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+      const exportEnum=(value,allowed)=>typeof value==='string'&&allowed.includes(value)?value:null;
+      const arrivalTime=value=>typeof value==='number'&&value>1000000000?exportTime(value):null;
+      const exportArrivalPosition=value=>{
+        if(!exportObject(value)||typeof value.latitude!=='number'||typeof value.longitude!=='number'||
+           !Number.isFinite(value.latitude)||!Number.isFinite(value.longitude)||
+           value.latitude<=52.3||value.latitude>=52.45||value.longitude<=13.4||value.longitude>=13.65)return null;
+        const observed=arrivalTime(value.timestamp);
+        if(!observed)return null;
+        return {latitude:value.latitude,longitude:value.longitude,timestamp:observed,
+          source:exportEnum(value.source,['fr24_event','fr24_gate_reference','fr24_historic','fr24_track','adsb_lol','opensky','flightaware_track','FR24','FlightAware','FlightStats','ADSBLOL','OpenSky']),
+          on_ground:typeof value.on_ground==='boolean'?value.on_ground:null,
+          ground_speed:typeof value.ground_speed==='number'&&Number.isFinite(value.ground_speed)&&value.ground_speed>=0?value.ground_speed:null};
+      };
+      const exportArrivalStop=value=>{
+        if(!exportObject(value))return null;
+        const id=value.fr24_id??'',registration=value.registration??'',at=arrivalTime(value.at);
+        const reason=exportEnum(value.reason,['no_data','incomplete','error','unavailable','legacy_no_data']);
+        if(typeof id!=='string'||!/^[A-Za-z0-9_-]{0,64}$/.test(id)||
+           typeof registration!=='string'||!/^[A-Z0-9-]{0,12}$/.test(registration)||
+           typeof value.flight_number!=='string'||!/^[A-Z0-9]{2,3}[0-9]{1,5}$/.test(value.flight_number)||
+           typeof value.reference_day!=='string'||!safeDay(value.reference_day)||!at||!reason)return null;
+        const day=new Date(value.reference_day+'T00:00:00Z');
+        if(!Number.isFinite(day.getTime())||day.toISOString().slice(0,10)!==value.reference_day)return null;
+        return {fr24_id:safeText(id,64),flight_number:value.flight_number,reference_day:value.reference_day,
+          registration,at,reason};
+      };
+      const exportArrivalSources=value=>exportObject(value)?{
+        _arrival_sources_checked_at:arrivalTime(value._arrival_sources_checked_at),
+        _arrival_sources_status:exportEnum(value._arrival_sources_status,['complete','aibt_only','no_aibt','paused','ineligible'])}:null;
+      const exportFlight=f=>({number:safeFlight(f.number),day:safeDay(f.day),origin:/^[A-Z]{3,4}$/.test(f.origin||'')?f.origin:'',destination:/^[A-Z]{3,4}$/.test(f.destination||'')?f.destination:'',registration:/^[A-Z0-9-]{2,12}$/.test(f.registration||'')?f.registration:'',fr24_id:/^[a-f0-9]{6,16}$/i.test(f.fr24ID||'')?f.fr24ID:'',times:Object.fromEntries(['std','etd','atd','sta','eta','ata','eibt','aibt'].map(key=>[key,exportTime(f[key]??f.schedule?.[key])])),
+        aibt_source:exportEnum(f.aibt_source,['FR24','FlightAware','FlightStats']),aibt_position:exportArrivalPosition(f.aibt_position),
+        fr24_arrival_exhausted:exportArrivalStop(f.fr24_arrival_exhausted),arrival_sources:exportArrivalSources(f.arrival_sources),
+        parking_lookup_status:typeof f.parking_lookup_status==='string'?safeText(f.parking_lookup_status):'',
+        stand:safeText(f.stand,40),gate:safeText(f.gate||f.schedule?.gate,40),prediction:safeText(f.prediction?.text,160),packets:{in:Number.isFinite(f.packets?.in)?f.packets.in:null,out:Number.isFinite(f.packets?.out)?f.packets.out:null}});
       const exportTitles={events:'Ereignisse',pushes:'Push-Versand',errors:'Fehlerprotokoll',history:'Ereignisse am ausgewählten Tag',diagnosis:'Gesamtdiagnose'};
       const events=d.events||[];
       const isPush=e=>String(e.kind||'').startsWith('push_');
@@ -252,7 +286,13 @@ cards:
         const stamp=value=>value?`${value.berlin} / ${value.utc}`:'—';
         const lines=[`ComatAlarm · ${doc.section}`,`Exportiert: ${stamp(doc.exported_at)}`,`Pi-Datenstand: ${stamp(doc.source.snapshot_at)}`,`Im Dashboard empfangen: ${stamp(doc.source.received_at)}`,`Verbindung: ${doc.source.stale?'Letzter gespeicherter Stand; Abruf verzögert oder unterbrochen':'Aktuell'}`,`Zeitzone: ${doc.timezone}`,`Zeitraum: ${doc.filter.period}${doc.filter.day?' · '+doc.filter.day:''}`,`Filter: ${doc.filter.kinds}`,`Einträge: ${doc.event_count} (aus maximal ${doc.filter.snapshot_limit} angezeigten Diagnoseeinträgen)`,`Enthaltene Ereigniszeiten: ${stamp(doc.filter.from)} bis ${stamp(doc.filter.to)}`,'','„Apple angenommen“ bestätigt APNs-Annahme, keine iPhone-Zustellung oder Lesebestätigung.',''];
         const appendEvents=rows=>{if(!rows.length)lines.push('Keine Einträge in dieser Auswahl.');for(const e of rows)lines.push(`[${stamp(e.time)}] ${e.kind} · ${e.flight||'Dienst'}${e.device?' · '+e.device:''}`,e.message||'—','');};
-        const appendFlights=rows=>{if(!rows.length)lines.push('Keine Flüge in dieser Auswahl.');for(const f of rows){lines.push(`${f.number||'Flug'} · ${f.day||'—'} · ${f.origin||'?'} → ${f.destination||'?'} · ${f.registration||'—'}${f.fr24_id?' · FR24 '+f.fr24_id:''}`);for(const [key,value] of Object.entries(f.times))lines.push(`${key.toUpperCase()}: ${stamp(value)}`);lines.push(`Parkposition: ${f.stand||'Nicht bestätigt'} · Gate: ${f.gate||'—'}`,`Prognose: ${f.prediction||'—'} · Pakete IN/OUT: ${f.packets.in??'—'} / ${f.packets.out??'—'}`,'');}};
+        const appendFlights=rows=>{if(!rows.length)lines.push('Keine Flüge in dieser Auswahl.');for(const f of rows){lines.push(`${f.number||'Flug'} · ${f.day||'—'} · ${f.origin||'?'} → ${f.destination||'?'} · ${f.registration||'—'}${f.fr24_id?' · FR24 '+f.fr24_id:''}`);for(const [key,value] of Object.entries(f.times))lines.push(`${key.toUpperCase()}: ${stamp(value)}`);
+          lines.push(`AIBT-Quelle: ${f.aibt_source||'—'}`);
+          if(f.aibt_position){const p=f.aibt_position;lines.push(`AIBT-Koordinate: ${p.latitude}, ${p.longitude} · Quelle: ${p.source||'—'}`,`Messzeit: ${stamp(p.timestamp)} · Am Boden: ${p.on_ground===null?'—':p.on_ground?'ja':'nein'} · Geschwindigkeit: ${p.ground_speed??'—'} km/h`);}
+          if(f.fr24_arrival_exhausted){const stop=f.fr24_arrival_exhausted;lines.push(`FR24-Ankunftsabrufe beendet: ${stamp(stop.at)} · Grund: ${stop.reason} · ${stop.flight_number} · ${stop.reference_day}${stop.fr24_id?' · FR24 '+stop.fr24_id:''}`);}
+          if(f.arrival_sources)lines.push(`Weitere Ankunftsquellen: ${f.arrival_sources._arrival_sources_status||'—'} · Geprüft: ${stamp(f.arrival_sources._arrival_sources_checked_at)}`);
+          if(f.parking_lookup_status)lines.push(`Ankunftsabgleich: ${f.parking_lookup_status}`);
+          lines.push(`Parkposition: ${f.stand||'Nicht bestätigt'} · Gate: ${f.gate||'—'}`,`Prognose: ${f.prediction||'—'} · Pakete IN/OUT: ${f.packets.in??'—'} / ${f.packets.out??'—'}`,'');}};
         appendEvents(doc.events);
         if(doc.system){
           lines.push('DIENSTSTATUS',`Pi-Start: ${stamp(doc.system.started_at)}`,`Zyklusbeginn: ${stamp(doc.system.cycle_started)}`,`Zyklusende: ${stamp(doc.system.cycle_finished)}`,`API-Status geprüft: ${stamp(doc.system.api_checked_at)}`);

@@ -5,7 +5,7 @@
 - Übernimmt tatsächliche Gate-Ankunftszeiten aus vorhandenen FlightAware- und FlightStats-Zugängen. EIBT und Landung werden nicht zu AIBT umgedeutet. Alternative Koordinaten stammen aus passenden beobachteten ADSB.lol-/OpenSky-Bodenpositionen oder der exakt zugeordneten FlightAware-Flugspur. Verwendet nur Positionszeiten innerhalb von 60 Sekunden zur tatsächlichen AIBT und bewahrt Messzeit und Herkunft.
 - Startet weitere Quellen unmittelbar nach dem FR24-Ergebnis in begrenzten Hintergrundaufgaben. Ihre Wartezeit blockiert Live-Abgleich, Drei-Minuten-Voralarm und Push-Versand nicht. Fertige Zeit-/Koordinatendaten werden mit dem lokalen Standabgleich übernommen und an freigegebene Geräte sowie den gemeinsamen Verlauf weitergegeben.
 - Schützt die Übernahme vor falschem Flugtag, anderer Flugbewegung, abweichender Strecke oder Registrierung, veralteten Livepunkten, Löschungen und geänderten Gerätezugängen. Echte alphanumerische Rufzeichen wie DLH6HF für LH194 bleiben korrekt zugeordnet.
-- Ergänzt die vorhandenen Diagnoseexporte um Ankunftsquelle, AIBT-Koordinate mit Messzeit, Quellenstatus und die gespeicherte FR24-Entscheidung. Zugangsdaten werden nicht exportiert. Für die vollständige Übernahme auf dem iPhone die dazugehörige neue ComatAlarm-Version installieren.
+- Ergänzt die vorhandenen Diagnoseexporte um Ankunftsquelle, AIBT-Koordinate mit Messzeit, Quellenstatus und die gespeicherte FR24-Entscheidung. Zugangsdaten werden nicht exportiert. Dafür die aktualisierte vollständige Dashboard-Konfiguration übernehmen. Für die vollständige Übernahme auf dem iPhone die dazugehörige neue ComatAlarm-Version installieren.
 
 ## 1.2.35
 

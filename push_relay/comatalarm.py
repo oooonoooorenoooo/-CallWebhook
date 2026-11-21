@@ -9,6 +9,7 @@ from .testflight import TestFlight, AppleError, failure
 from .apple_access import AppleAccess, AccessDenied
 from .stand_model import StandModel
 from .ber_package import BERPackageImporter
+from .live_identity import select_live_position
 import hashlib
 import hmac
 import json
@@ -495,19 +496,18 @@ class FlightProvider:
                         result['_live_checked_at'] = now
                         rows = await fr24("live/flight-positions/full", {"flights": flight["number"]})
                         result['_live_checked_at'] = self.batches.checked_at(token, 'live/flight-positions/full', {'flights': flight['number']}, now)
-                        matches = [r for r in rows if isinstance(r, dict)
-                            and (r.get("fr24_id") == identifier if identifier else r.get("flight") == flight["number"])
-                            and (not flight.get("destination") or r.get("dest_iata") == flight["destination"])
-                            and (not flight.get("origin") or r.get("orig_iata") == flight["origin"])
-                            and stamp(r.get("timestamp")) and now-120 <= stamp(r["timestamp"]) <= now+10]
-                        if matches:
-                            live = max(matches, key=lambda r: stamp(r["timestamp"]))
-                            lat, lon = live.get("lat"), live.get("lon")
-                            if all(isinstance(v,(float,int)) and not isinstance(v,bool) and math.isfinite(v) for v in (lat,lon)) and -90<=lat<=90 and -180<=lon<=180:
-                                # Only retain fields consumed by FR24Client.sample; no credentials.
-                                result["_live"] = {k:v for k,v in live.items() if k in ("fr24_id","hex","lat","lon","alt","gspeed","track","vspeed","on_ground","timestamp","eta","sta","reg","orig_iata","dest_iata","type","source")}
-                                for key, field in (("origin","orig_iata"),("destination","dest_iata"),("registration","reg")):
-                                    if live.get(field): result[key] = live[field]
+                        live, live_status = select_live_position(rows, dict(flight, **result), now)
+                        result['_live_lookup_status'] = live_status
+                        if live_status == 'route_conflict':
+                            result['_live'] = {}  # A new contradiction invalidates the old approach sample.
+                        if live is not None:
+                            # Carry the actual provider ID into the watched occurrence,
+                            # including a unique live leg not yet returned by Summary.
+                            result["fr24ID"] = live["fr24_id"]
+                            # Only retain fields consumed by FR24Client.sample; no credentials.
+                            result["_live"] = {k:v for k,v in live.items() if k in ("fr24_id","hex","lat","lon","alt","gspeed","track","vspeed","on_ground","timestamp","eta","sta","reg","orig_iata","dest_iata","type","source")}
+                            for key, field in (("origin","orig_iata"),("destination","dest_iata"),("registration","reg")):
+                                if live.get(field): result[key] = live[field]
             except (RuntimeError, ValueError, TypeError, ClientError, OSError, asyncio.TimeoutError) as exception:
                 # Our HTTP/shape errors are locally authored; provider bodies
                 # never enter diagnostics. A decoder failure is not a tariff claim.
@@ -1100,7 +1100,7 @@ class ComatAlarm:
                 old = {}
             if old and self.shared_monitoring.removed(old):
                 old = {}
-            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_schedule_checked_at", "_live_checked_at", "_repair_attempted_at", "_repair_attempts", "_aibt_recovery_at", "_aibt_recovery_attempts", "_aibt_recovery_retry_at", "_aibt_evidence_revision", "_arrival_event_checked_at", "_arrival_event_received_at", "_arrival_event_status", "_arrival_event_logged_at", "_parking_lookup_status", "_parking_recovery", "_outbound", "_shared_subscription", "_landing_alert", "_prelanding"):
+            for key in ("atd", "ata", "aibt", "fr24ID", "origin", "destination", "registration", "stand", "aibt_position", "cancelled", "diverted", "_live", "_schedule", "_checked_at", "_schedule_checked_at", "_live_checked_at", "_live_lookup_status", "_repair_attempted_at", "_repair_attempts", "_aibt_recovery_at", "_aibt_recovery_attempts", "_aibt_recovery_retry_at", "_aibt_evidence_revision", "_arrival_event_checked_at", "_arrival_event_received_at", "_arrival_event_status", "_arrival_event_logged_at", "_parking_lookup_status", "_parking_recovery", "_outbound", "_shared_subscription", "_landing_alert", "_prelanding", "_prelanding_report"):
                 if old.get(key):
                     row[key] = old[key]
             for key in ("_inbound", "_inbound_check_at", "_inbound_registration", "_departure_finalized", "_departure_repair_at", "_departure_repair_attempts"):
@@ -1326,6 +1326,7 @@ class ComatAlarm:
     async def apply_ready_schedules(self, device, now):
         """The existing worker alone commits completed private cache results."""
         from .landing_alert import update_landing_alert
+        from .prelanding_diagnostics import receipt as landing_receipt
         if device['id'] not in self.shared_authorized:
             return
         access = await self.stand_access(device['firebase_uid'])
@@ -1349,7 +1350,7 @@ class ComatAlarm:
                     and not (flight.get('track_outbound') and not (flight.get('_outbound') or {}).get('atd'))):
                 continue
             eligible.append(flight)
-        pending = []
+        pending, landing_receipts = [], []
         for flight in sorted(eligible, key=lambda f: self.provider.schedules.last_started(dict(f, _central=True), token)):
             # New unknown routes first get their normal FR24 resolution. Later
             # cache refreshes are offered oldest-first, so a2-task limit cannot
@@ -1361,6 +1362,9 @@ class ComatAlarm:
             if not changes:
                 continue
             updated = update_landing_alert(flight, dict(flight, **changes), now)
+            message = landing_receipt(flight, updated, prefs, now)
+            if message:
+                landing_receipts.append((message, flight['number']))
             pending.extend(self.events(device['id'], flight, updated, prefs, now))
             flight.clear(); flight.update(updated)
         encoded = json.dumps(flights)
@@ -1376,6 +1380,8 @@ class ComatAlarm:
                 self.db.executemany('INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)', pending)
                 self.history_sync.capture(flights, now)
         if changed:
+            for message, number in landing_receipts:
+                self.monitor.record('prelanding', message, number, device['id'], now)
             await self.deliver(device['id'], now)
 
     async def tick(self, now=None):
@@ -1474,6 +1480,7 @@ class ComatAlarm:
 
     async def poll_device(self, device, now, report=False, quick=None):
         from .landing_alert import update_landing_alert
+        from .prelanding_diagnostics import receipt as landing_receipt
         from . import aibt_recovery
         access = await self.stand_access(device['firebase_uid'])
         if device['firebase_uid'] and not access:
@@ -1495,7 +1502,7 @@ class ComatAlarm:
         api_token = self.shared_tokens.get(device["id"], device["api_token"])
         calendar_error = "Kalenderdaten veraltet – App zur Aktualisierung öffnen" if prefs.get("calendar_valid_until", now+1) <= now else ""
         if quick or now-device["last_poll"] >= 60:
-            error, pending, receipts = calendar_error, [], []
+            error, pending, receipts, landing_receipts = calendar_error, [], [], []
             ordered = sorted(flights, key=lambda f: (bool(f.get('aibt')) or arrival_tracking_expired(f, now),
                 self.last_successful_lookup.get(self.polling_key(f, api_token), 0)))
             for flight in ordered:
@@ -1580,6 +1587,9 @@ class ComatAlarm:
                         updated['_arrival_event_logged_at'] = now
                         receipts.append((message, flight['number']))
                     updated = update_landing_alert(flight, updated, now)
+                    message = landing_receipt(flight, updated, prefs, now)
+                    if message:
+                        landing_receipts.append((message, flight['number']))
                     pending.extend(self.events(device["id"], flight, updated, prefs, now))
                     flight.clear(); flight.update(updated)
                 except Exception as exception:
@@ -1608,15 +1618,20 @@ class ComatAlarm:
             if changed:
                 for message, number in receipts:
                     self.monitor.record('arrival', message, number, device['id'], now)
+                for message, number in landing_receipts:
+                    self.monitor.record('prelanding', message, number, device['id'], now)
             if report:
                 MONITOR_LOG.info("ComatAlarm monitor_result epoch=%d flights=%d committed=%s provider_error=%s events=%d",
                                 int(now), len(flights), bool(changed), bool(error), len(pending) if changed else 0)
         else:
             # Evaluate the short final-approach window on every worker pass using
             # the last fresh observation; this performs no extra provider call.
-            pending = []
+            pending, landing_receipts = [], []
             for flight in flights:
                 updated = update_landing_alert(flight, flight, now)
+                message = landing_receipt(flight, updated, prefs, now)
+                if message:
+                    landing_receipts.append((message, flight['number']))
                 pending.extend(self.events(device["id"], flight, updated, prefs, now))
                 flight.clear(); flight.update(updated)
             encoded = json.dumps(flights)
@@ -1626,6 +1641,9 @@ class ComatAlarm:
                         (encoded, calendar_error or device["error"], device["id"], device["watch"], device["preferences"], now)).rowcount
                     if changed:
                         self.db.executemany("INSERT OR IGNORE INTO comat_outbox VALUES(?,?,?,?,0)", pending)
+                if changed:
+                    for message, number in landing_receipts:
+                        self.monitor.record('prelanding', message, number, device['id'], now)
 
     async def repair_archived_arrival(self, now):
         """Repair one trusted recent archive after live work, without subscriptions or alerts."""
@@ -1727,6 +1745,9 @@ class ComatAlarm:
                 if flag == 'alarmPrelanding':
                     data['prelanding'] = dict(updated['_prelanding'])
                     data['expires_at'] = updated['_prelanding']['expires_at']
+                    data['flight_occurrence'] = dict(number=updated['number'], day=day,
+                        fr24_id=updated.get('fr24ID'), origin=updated.get('origin', ''),
+                        destination=updated.get('destination', ''))
                 payload = json.dumps(data)
                 pending.append((device_id, event_id, payload, now))
         return pending
@@ -1752,20 +1773,94 @@ class ComatAlarm:
                     continue
                 payload = json.loads(item["payload"])
                 prefs = json.loads(current["preferences"])
-                flight = next((f for f in json.loads(current["watch"]) if f["id"] == payload["flight_id"]), None)
+                flights = json.loads(current['watch'])
+                flight = next((f for f in flights if f['id'] == payload['flight_id']), None)
                 from .landing_alert import prelanding_is_current
-                outdated = payload['flag'] == 'alarmPrelanding' and not prelanding_is_current(flight or {}, payload.get('prelanding'), now)
-                if not flight or outdated or not self.enabled(prefs, now) or not prefs.get(payload["flag"], True) or (current["foreground_until"] > now and not prefs.get("relay_alerts", False)):
-                    self.monitor.record("push_skipped", payload["flag"] + ": durch Flug-/Alarmregel verworfen", device=device_id, now=now)
+                prelanding = payload['flag'] == 'alarmPrelanding'
+                reason = ''
+                if prelanding:
+                    marker = payload.get('prelanding')
+
+                    def same_warning(candidate):
+                        # Local IDs can change when iOS merges a shared alias.
+                        # Resolve the queued warning, never merely the flight
+                        # number or a reused local ID. The existing event hash
+                        # also proves number/day for pre-upgrade outbox rows.
+                        if (not isinstance(marker, dict) or not marker.get('fr24_id')
+                                or candidate.get('fr24ID') != marker['fr24_id']
+                                or candidate.get('_prelanding') != marker
+                                or stamp(marker.get('triggered_at')) is None
+                                or payload.get('expires_at') != marker.get('expires_at')):
+                            return False
+                        reference = stamp(candidate.get('reference'))
+                        number = candidate.get('number')
+                        if reference is None or not isinstance(number, str):
+                            return False
+                        day = datetime.fromtimestamp(reference, ZoneInfo('Europe/Berlin')).date().isoformat()
+                        event_id = hashlib.sha256((number + ':' + day + ':prelanding').encode()).hexdigest()
+                        if item['event'] != event_id or payload.get('event_id') != event_id:
+                            return False
+                        if 'flight_occurrence' not in payload:
+                            return True
+                        occurrence = payload['flight_occurrence']
+                        return (isinstance(occurrence, dict) and occurrence.get('number') == number
+                            and occurrence.get('day') == day and occurrence.get('fr24_id') == candidate.get('fr24ID')
+                            and all(not occurrence.get(key) or occurrence[key] == candidate.get(key)
+                                    for key in ('origin', 'destination')))
+
+                    if flight is None or not same_warning(flight):
+                        matches = [f for f in flights if same_warning(f)]
+                        flight = matches[0] if len(matches) == 1 else None
+                        if len(matches) > 1:
+                            reason = 'prelanding_ambiguous'
+                    expiry = stamp(payload.get('expires_at'))
+                    if expiry is not None and expiry <= now:
+                        reason = 'prelanding_expired'
+                    elif not flight and not reason:
+                        reason = 'prelanding_identity_changed'
+                if not reason:
+                    if not flight:
+                        reason = 'flight_missing'
+                    elif prelanding and (self.monitor.operator.removed(flight)
+                            or current['server_polling'] and current['firebase_uid'] and self.shared_monitoring.removed(flight)):
+                        reason = 'flight_removed'
+                    elif prelanding and not prelanding_is_current(flight, payload.get('prelanding'), now):
+                        reason = 'prelanding_stale'
+                    elif not self.enabled(prefs, now):
+                        reason = ('alarms_disabled' if not prefs.get('enabled', True)
+                                  else 'calendar_expired' if prefs.get('calendar_valid_until', now+1) <= now
+                                  else 'outside_calendar_window')
+                    elif not prefs.get(payload['flag'], True):
+                        reason = 'alarm_disabled'
+                    elif current['foreground_until'] > now and not prefs.get('relay_alerts', False):
+                        reason = 'foreground_local_owner'
+                if reason:
+                    explanation = {'prelanding_ambiguous': 'mehrere Flugkopien passen zur vorgemerkten Warnung',
+                        'prelanding_expired': 'Gültigkeit des Voralarms abgelaufen',
+                        'prelanding_identity_changed': 'Flug oder vorgemerkte Warnung nicht mehr eindeutig vorhanden',
+                        'flight_missing': 'Flug nicht mehr überwacht', 'flight_removed': 'Flug wurde gelöscht',
+                        'prelanding_stale': 'Anflugdaten nicht mehr für den Voralarm gültig',
+                        'alarms_disabled': 'Alarmmeldungen deaktiviert', 'calendar_expired': 'Kalenderdaten abgelaufen',
+                        'outside_calendar_window': 'außerhalb einer aktiven Kalenderschicht',
+                        'alarm_disabled': 'dieser Alarm deaktiviert',
+                        'foreground_local_owner': 'Vordergrund-App übernimmt die Alarmmeldung'}[reason]
+                    MONITOR_LOG.info('ComatAlarm push_skipped epoch=%d event=%s reason=%s', int(now), payload['flag'], reason)
+                    self.monitor.record('push_skipped', payload['flag'] + ': ' + explanation,
+                                        flight['number'] if flight else '', device_id, now)
                     with self.db:
                         self.db.execute("DELETE FROM comat_outbox WHERE device=? AND event=?", (device_id,item["event"]))
                     continue
+                if prelanding and flight['id'] != payload['flight_id']:
+                    # Preserve the event/collapse key and deadline; only route
+                    # the widget snapshot to this device's current local alias.
+                    payload = dict(payload, flight_id=flight['id'],
+                                   flight_state=dict(payload.get('flight_state') or {}, id=flight['id']))
                 delivered = self.db.execute("SELECT 1 FROM comat_delivered WHERE token=? AND environment=? AND event=?", (current["token"], current["environment"], item["event"])).fetchone()
                 try:
                     accepted = bool(delivered) or bool(self.sender and await self.sender(current["token"],current["environment"],payload))
                 except Exception:
                     accepted = False
-                number = next((f["number"] for f in json.loads(current["watch"]) if f["id"] == payload["flight_id"]), "")
+                number = flight['number']
                 self.monitor.record("push_accepted" if accepted else "push_failed", payload["flag"] + (": bereits an Apple übergeben" if delivered else ": von Apple angenommen" if accepted else ": von Apple nicht angenommen; erneuter Versuch"), number, device_id, now)
                 with self.db:
                     if accepted:

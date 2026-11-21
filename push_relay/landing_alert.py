@@ -54,7 +54,9 @@ ELEVATIONS_FT = {
 MAX_SAMPLE_AGE = 45
 WARNING_LEAD = 180
 MIN_WARNING_LEAD = 150
-MAX_ETA_CHANGE = 45
+# A bounded one-minute revision must not erase independently measured approach
+# convergence. Larger corrections still require a new observation pair.
+MAX_ETA_CHANGE = 60
 
 
 def _number(value):
@@ -76,42 +78,61 @@ def _stamp(value):
     return None
 
 
-def _candidate(flight, now, max_age=MAX_SAMPLE_AGE):
+def _assessment(flight, now, max_age=MAX_SAMPLE_AGE, refresh=False):
+    """Return evidence, an authored reason and safe numeric diagnostics.
+
+    Selecting a flight for a new observation is deliberately broader than
+    authorizing an alert from that observation. ETA is only required to alert.
+    """
+    values = {}
     if any(flight.get(k) for k in ("ata", "aibt", "cancelled", "diverted")):
-        return None
+        return None, 'terminal', values
     live = flight.get("_live")
     if not isinstance(live, dict):
-        return None
+        return None, 'no_live', values
     destination = str(flight.get("destination") or "").upper()
     airport = AIRPORTS.get(destination)
     identifier = live.get("fr24_id")
     if (not airport or not isinstance(identifier, str) or not identifier
             or identifier.upper().startswith(("TEMP_", "NS_", "LANDED_"))
-            or flight.get("fr24ID") != identifier
-            or str(live.get("dest_iata") or "").upper() != destination):
-        return None
+            or flight.get("fr24ID") != identifier):
+        return None, 'identity', values
+    # The exact leg ID binds the observation. Route fields are optional in the
+    # official full-position model; an explicit conflicting route still vetoes it.
+    if live.get('dest_iata') and str(live['dest_iata']).upper() != destination:
+        return None, 'destination', values
     # Older FR24 responses may omit source. Explicit estimated/replayed tracks
     # are never proof of a live final approach.
     source = str(live.get("source") or "").upper()
     if source and source not in ("ADS-B", "ADSB", "ADS_B", "MLAT"):
-        return None
+        return None, 'source', values
     # The official FR24 FlightPositionsFull schema has no on_ground field.
     # Missing optional extensions cannot veto an otherwise measured approach;
     # explicit ground/invalid values still veto it, as do the altitude, speed,
     # descent, geometry and freshness checks below.
     if "on_ground" in live and live.get("on_ground") not in (False, 0):
-        return None
+        return None, 'ground', values
     observed, eta = _stamp(live.get("timestamp")), _stamp(live.get("eta"))
-    if (observed is None or eta is None or not -5 <= now-observed <= max_age
-            or not 0 < eta-now <= 600):
-        return None
+    if observed is None:
+        return None, 'timestamp', values
+    values['sample_age_seconds'] = now-observed
+    if eta is not None:
+        values.update(eta=eta, lead_seconds=eta-now)
+    if not -5 <= now-observed <= max_age:
+        return None, 'stale', values
     lat, lon, altitude, speed, vertical, track = (
         _number(live.get(k)) for k in ("lat", "lon", "alt", "gspeed", "vspeed", "track"))
     if (any(v is None for v in (lat, lon, altitude, speed, vertical, track))
             or not -90 <= lat <= 90 or not -180 <= lon <= 180
-            or not 250 <= altitude <= 6000 or not 80 <= speed <= 260
-            or not -2500 <= vertical <= -250 or not 0 <= track <= 360):
-        return None
+            or not 0 <= track <= 360):
+        return None, 'telemetry', values
+    height = altitude-ELEVATIONS_FT[destination]
+    values.update(height_ft=height, speed_kt=speed, vertical_fpm=vertical)
+    if refresh:
+        if not (400 <= height <= 9000 and 80 <= speed <= 300 and -3500 <= vertical <= 200):
+            return None, 'telemetry', values
+    elif not (250 <= altitude <= 6000 and 80 <= speed <= 260 and -2500 <= vertical <= -250):
+        return None, 'telemetry', values
     origin_lat, origin_lon = math.radians(lat), math.radians(lon)
     target_lat, target_lon = map(math.radians, airport)
     delta_lon = target_lon-origin_lon
@@ -120,33 +141,48 @@ def _candidate(flight, now, max_age=MAX_SAMPLE_AGE):
     bearing = math.degrees(math.atan2(math.sin(delta_lon)*math.cos(target_lat),
         math.cos(origin_lat)*math.sin(target_lat)-math.sin(origin_lat)*math.cos(target_lat)*math.cos(delta_lon))) % 360
     course_error = abs((track-bearing+180) % 360-180)
+    values.update(distance_km=distance, height_ft=height, course_error=course_error)
+    if refresh:
+        if not 4 <= distance <= 60 or course_error > 60:
+            return None, 'geometry', values
+        return {'fr24_id': identifier, 'destination': destination, 'observed_at': observed,
+                'eta': eta, 'altitude_ft': altitude, 'distance_km': distance}, 'refresh', values
+    if eta is None:
+        return None, 'eta_missing', values
+    if not 0 < eta-now <= 600:
+        return None, 'eta_range', values
     direct_seconds = distance/(speed*1.852)*3600
     if not 4 <= distance <= 30 or course_error > 40 or abs(direct_seconds-(eta-observed)) > 90:
-        return None
-    height = altitude-ELEVATIONS_FT[destination]
+        return None, 'geometry', values
     path_angle = math.degrees(math.atan2(height*0.3048, distance*1000))
     descent_seconds = height/(-vertical)*60
     # A low vertical speed at several thousand feet is not evidence of a
     # three-minute final, even if the provider's ETA claims otherwise. Check
     # relative height, geometric approach slope and time to lose that height.
     if not 400 <= height <= 4500 or not 1.5 <= path_angle <= 5.5 or abs(descent_seconds-(eta-observed)) > 120:
-        return None
+        return None, 'descent', values
     return {"fr24_id": identifier, "destination": destination, "observed_at": observed,
-            "eta": eta, "altitude_ft": altitude, "distance_km": distance}
+            "eta": eta, "altitude_ft": altitude, "distance_km": distance}, 'eligible', values
+
+
+def _candidate(flight, now, max_age=MAX_SAMPLE_AGE):
+    return _assessment(flight, now, max_age=max_age)[0]
 
 def prelanding_refresh_candidate(flight, now):
-    """Allow a sparse 30s live-only refresh for an already plausible final.
+    """Fetch every 30s once measured flight data indicates an inbound approach.
 
     A point up to 90s old may justify fetching a new observation, never sending
     an alert. Delivery still uses MAX_SAMPLE_AGE and the original lead window.
-    Timetable ETA/STA cannot make this predicate true.
+    It must start before the narrower delivery gate: waiting for all alarm
+    conditions before fetching the confirming observation can miss the window.
+    Neither a live nor a timetable ETA is needed to request that observation.
     """
     state = flight.get("_landing_alert")
     if (isinstance(state, dict) and state.get("fr24_id") == flight.get("fr24ID")
             and "triggered_at" in state):
         return False
-    candidate = _candidate(flight, now, max_age=90)
-    return bool(candidate and candidate["eta"]-now > MIN_WARNING_LEAD)
+    candidate, _, _ = _assessment(flight, now, max_age=90, refresh=True)
+    return bool(candidate)
 
 
 def update_landing_alert(previous, current, now):
@@ -185,15 +221,25 @@ def update_landing_alert(previous, current, now):
                 and stored.get("destination") == candidate["destination"])
     old_observed = _number(stored.get("observed_at"))
     count = 1
+    confirmation_reason = 'confirmation'
     if same_leg and old_observed is not None:
         gap = candidate["observed_at"]-old_observed
         if gap == 0 and candidate == {k: stored.get(k) for k in candidate}:
             count = stored.get("samples", 1)
+            confirmation_reason = stored.get('confirmation_reason', 'confirmation')
         elif (10 <= gap <= 90 and abs(candidate["eta"]-stored.get("eta", 0)) <= MAX_ETA_CHANGE
                 and candidate["distance_km"] < stored.get("distance_km", 0)-0.15
                 and candidate["altitude_ft"] < stored.get("altitude_ft", 0)):
             count = min(3, stored.get("samples", 1)+1)
+        elif not 10 <= gap <= 90:
+            confirmation_reason = 'observation_gap'
+        elif abs(candidate['eta']-stored.get('eta', 0)) > MAX_ETA_CHANGE:
+            confirmation_reason = 'eta_changed'
+        else:
+            confirmation_reason = 'not_converging'
     state = dict(candidate, samples=count)
+    if count < 2:
+        state['confirmation_reason'] = confirmation_reason
     if same_leg and "triggered_at" in triggered:
         state["triggered_at"] = triggered["triggered_at"]
     lead = candidate["eta"]-now

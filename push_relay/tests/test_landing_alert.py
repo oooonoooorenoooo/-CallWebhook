@@ -48,7 +48,8 @@ class LandingAlertTests(unittest.TestCase):
         self.assertFalse(prelanding_refresh_candidate(flight, NOW+31))
         flight["_live"].pop("eta")
         flight["_schedule"] = {"eta": NOW+240, "sta": NOW+240}
-        self.assertFalse(prelanding_refresh_candidate(flight, NOW))
+        self.assertTrue(prelanding_refresh_candidate(flight, NOW), 'missing ETA cannot prevent fetching the next live observation')
+        self.assertNotIn('_prelanding', update_landing_alert({}, flight, NOW))
         _, warned = approaching()
         self.assertFalse(prelanding_refresh_candidate(warned, NOW+60))
 
@@ -165,7 +166,7 @@ class LandingAlertTests(unittest.TestCase):
                 self.assertNotIn("_prelanding", update_landing_alert(first, current, NOW+60))
 
     def test_large_eta_revision_requires_new_confirmation(self):
-        first = update_landing_alert({}, sample(eta=NOW+300, distance=23), NOW)
+        first = update_landing_alert({}, sample(eta=NOW+330, distance=23), NOW)
         current = sample(at=NOW+60, distance=15, altitude=2300)
         revised = update_landing_alert(first, current, NOW+60)
         self.assertNotIn("_prelanding", revised)

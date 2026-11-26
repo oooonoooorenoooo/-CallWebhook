@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/release-mailbox-testflight.yml
       - scripts/mailbox_testflight.py
+      - scripts/select_ios_toolchain.sh
 permissions:
   contents: read
   actions: read
@@ -16,7 +17,7 @@ concurrency:
 jobs:
   release:
     if: github.repository == 'oooonoooorenoooo/-CallWebhook' && github.ref == 'refs/heads/codex/festnetz-mailbox-transcription'
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 35
     outputs:
       build_number: ${{ steps.prepare.outputs.build_number }}
@@ -25,6 +26,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Select Xcode 27.2 and verify the iPhone SDK
+        run: bash scripts/select_ios_toolchain.sh
       - name: Verify the approved app source and branch
         env:
           GH_TOKEN: ${{ github.token }}

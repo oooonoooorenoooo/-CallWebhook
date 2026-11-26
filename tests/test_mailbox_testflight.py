@@ -77,7 +77,15 @@ class MailboxTestFlightTests(unittest.TestCase):
             "CFBundleShortVersionString": release.VERSION,
             "CFBundleVersion": self.BUILD,
             "CallWebhookPushEnvironment": "production",
+            "DTSDKName": "iphoneos27.2",
+            "DTXcode": "2720",
+            "DTXcodeBuild": "27B52",
+            "MinimumOSVersion": "26.0",
         }
+
+    def toolchain(self):
+        return {"sdk_name": "iphoneos27.2", "xcode_version": "2720",
+                "xcode_build": "27B52", "minimum_ios": "26.0"}
 
     def entitlements(self):
         return {
@@ -157,7 +165,8 @@ class MailboxTestFlightTests(unittest.TestCase):
     def test_complete_requires_a_current_verified_ipa_receipt(self):
         self.write_ipa()
         proof = {"ipa_verified": True, "profile_verified": True, "ipa_path": str(self.ipa),
-                 "ipa_sha256": hashlib.sha256(self.ipa.read_bytes()).hexdigest()}
+                 "ipa_sha256": hashlib.sha256(self.ipa.read_bytes()).hexdigest(),
+                 "toolchain_verified": True, "toolchain": self.toolchain()}
         for change in ({"source_commit": "b" * 40}, {"build": "18"}, {"version": "3.0"},
                        {"ipa_verified": False}, {"profile_verified": False}):
             with self.subTest(change=change):
@@ -183,6 +192,49 @@ class MailboxTestFlightTests(unittest.TestCase):
                         release.verify_ipa()
                     run.assert_not_called()
                     output.assert_not_called()
+
+    def test_exported_main_app_requires_ios27_toolchain_and_unchanged_minimum_ios(self):
+        cases = [
+            ("DTSDKName", "iphoneos26.5"), ("DTSDKName", None),
+            ("DTSDKName", "iphonesimulator27.2"), ("DTSDKName", "macosx27.2"),
+            ("DTXcode", "2650"), ("DTXcode", None),
+            ("DTXcodeBuild", None), ("DTXcodeBuild", "unknown"),
+            ("MinimumOSVersion", "27.0"), ("MinimumOSVersion", "26.1"),
+            ("MinimumOSVersion", None),
+        ]
+        for name, wrong in cases:
+            with self.subTest(field=name, value=wrong):
+                self.write_receipt()
+                info = self.info()
+                if wrong is None:
+                    info.pop(name)
+                else:
+                    info[name] = wrong
+                self.write_ipa(info)
+                with mock.patch.object(release.subprocess, "run") as run, \
+                        mock.patch.object(release.subprocess, "check_output") as output:
+                    with self.assertRaises(RuntimeError):
+                        release.verify_ipa()
+                    run.assert_not_called()
+                    output.assert_not_called()
+
+    def test_complete_rejects_missing_or_obsolete_toolchain_proof_before_apple_access(self):
+        current = self.toolchain()
+        cases = [{}, {"toolchain_verified": False, "toolchain": current},
+                 {"toolchain_verified": True},
+                 {"toolchain_verified": True, "toolchain": dict(current, sdk_name="iphoneos26.5")},
+                 {"toolchain_verified": True, "toolchain": dict(current, xcode_version="2650")},
+                 {"toolchain_verified": True, "toolchain": dict(current, minimum_ios="27.0")}]
+        for proof in cases:
+            with self.subTest(proof=proof):
+                self.write_receipt(ipa_verified=True, profile_verified=True,
+                                   ipa_sha256="1" * 64, **proof)
+                with mock.patch.object(release, "api") as api, \
+                        mock.patch.object(release, "app_id") as app_id:
+                    with self.assertRaises(RuntimeError):
+                        release.complete()
+                    api.assert_not_called()
+                    app_id.assert_not_called()
 
     def fake_extract_or_verify(self, command, **kwargs):
         if command[0] == "ditto":
@@ -217,6 +269,18 @@ class MailboxTestFlightTests(unittest.TestCase):
         self.assertIs(receipt.get("profile_verified"), True)
         self.assertEqual(receipt.get("ipa_sha256"), hashlib.sha256(self.ipa.read_bytes()).hexdigest())
         self.assertEqual(receipt.get("source_commit"), self.SHA)
+        self.assertIs(receipt.get("toolchain_verified"), True)
+        self.assertEqual(receipt.get("toolchain"), self.toolchain())
+
+    def test_equivalent_minimum_ios_26_0_0_is_preserved_in_verified_metadata(self):
+        self.write_receipt()
+        info = self.info()
+        info["MinimumOSVersion"] = "26.0.0"
+        self.write_ipa(info)
+        self.verify_with_entitlements()
+        receipt = json.loads(self.result.read_text())
+        self.assertEqual(receipt["toolchain"], dict(self.toolchain(), minimum_ios="26.0.0"))
+        self.assertIs(receipt["toolchain_verified"], True)
 
     def test_distribution_entitlements_preserve_push_calling_and_dialer(self):
         wrong_values = {"aps-environment": "development", "get-task-allow": True,
@@ -250,7 +314,8 @@ class MailboxTestFlightTests(unittest.TestCase):
                     self.verify_with_entitlements(profile_changes=changes)
 
     def test_prepare_replaces_stale_receipt_with_current_source_and_selected_build(self):
-        self.write_receipt(source_commit="b" * 40, ipa_verified=True, testflight_available=True)
+        self.write_receipt(source_commit="b" * 40, ipa_verified=True, testflight_available=True,
+                           toolchain_verified=True, toolchain=self.toolchain())
         with mock.patch.object(release, "app_id", return_value=self.APP), \
                 mock.patch.object(release, "list_builds", return_value=[self.build("44")]):
             release.prepare()
@@ -261,6 +326,8 @@ class MailboxTestFlightTests(unittest.TestCase):
         self.assertIs(receipt["prepared"], True)
         self.assertNotIn("ipa_verified", receipt)
         self.assertNotIn("testflight_available", receipt)
+        self.assertNotIn("toolchain_verified", receipt)
+        self.assertNotIn("toolchain", receipt)
         self.assertIn("build_number=45", (self.root / "output").read_text())
 
     def group(self, ident="internal-group", *, internal=True, app=APP, all_builds=False):
@@ -269,7 +336,8 @@ class MailboxTestFlightTests(unittest.TestCase):
                 "relationships": {"app": {"data": {"type": "apps", "id": app}}}}
 
     def complete_with_groups(self, groups, *, reread=None, linked=None):
-        self.write_receipt(ipa_verified=True, profile_verified=True, ipa_sha256="1" * 64)
+        self.write_receipt(ipa_verified=True, profile_verified=True, ipa_sha256="1" * 64,
+                           toolchain_verified=True, toolchain=self.toolchain())
         linked_ids = list(linked or [])
         writes = []
 

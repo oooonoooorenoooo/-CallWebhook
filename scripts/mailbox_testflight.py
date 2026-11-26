@@ -103,6 +103,10 @@ def release_receipt(require_ipa=False):
     if require_ipa and (data.get("ipa_verified") is not True or data.get("profile_verified") is not True
             or not re.fullmatch(r"[0-9a-f]{64}", data.get("ipa_sha256", ""))):
         raise ReleaseError("The current release IPA has not passed signature and entitlement verification")
+    if require_ipa:
+        if data.get("toolchain_verified") is not True:
+            raise ReleaseError("The current release IPA has no verified iOS 27 SDK toolchain proof")
+        validate_toolchain_metadata(data.get("toolchain"))
     return data
 
 
@@ -272,12 +276,39 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def validate_toolchain_metadata(metadata):
+    """Apply the same SDK/deployment gate to exported app metadata and receipts."""
+    if not isinstance(metadata, dict):
+        raise ReleaseError("Verified IPA toolchain metadata is missing")
+    sdk = metadata.get("sdk_name")
+    sdk_match = re.fullmatch(r"iphoneos([1-9][0-9]*)(?:\.[0-9]+){0,2}", sdk) if isinstance(sdk, str) else None
+    if sdk_match is None or int(sdk_match.group(1)) < 27:
+        raise ReleaseError("The exported iPhone app must be built with the iOS 27 SDK or newer")
+    xcode = metadata.get("xcode_version")
+    if not isinstance(xcode, str) or not re.fullmatch(r"[1-9][0-9]{3,4}", xcode) or int(xcode) < 2700:
+        raise ReleaseError("The exported iPhone app must be compiled with Xcode 27 or newer")
+    xcode_build = metadata.get("xcode_build")
+    if not isinstance(xcode_build, str) or not re.fullmatch(r"[0-9]{1,3}[A-Z][0-9]+[a-z]?", xcode_build):
+        raise ReleaseError("The exported iPhone app has no meaningful Xcode build identifier")
+    minimum_ios = metadata.get("minimum_ios")
+    if not isinstance(minimum_ios, str) or not re.fullmatch(r"26\.0(?:\.0)?", minimum_ios):
+        raise ReleaseError("The exported app must retain its existing minimum iOS version 26.0")
+    return {"sdk_name": sdk, "xcode_version": xcode,
+            "xcode_build": xcode_build, "minimum_ios": minimum_ios}
+
+
 def validate_ipa_info(info, build):
     if (info.get("CFBundleIdentifier") != BUNDLE
             or info.get("CFBundleShortVersionString") != VERSION
             or str(info.get("CFBundleVersion")) != build
             or info.get("CallWebhookPushEnvironment") != "production"):
         raise ReleaseError("IPA bundle, marketing version, build or production push setting does not match this release")
+    return validate_toolchain_metadata({
+        "sdk_name": info.get("DTSDKName"),
+        "xcode_version": info.get("DTXcode"),
+        "xcode_build": info.get("DTXcodeBuild"),
+        "minimum_ios": info.get("MinimumOSVersion"),
+    })
 
 
 def validate_entitlements(entitlements, expected_team):
@@ -334,7 +365,7 @@ def verify_ipa():
                   if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", name)]
         if len(plists) != 1:
             raise ReleaseError("Expected exactly one top-level iPhone app in the IPA")
-        validate_ipa_info(plistlib.loads(archive.read(plists[0])), receipt["build"])
+        toolchain = validate_ipa_info(plistlib.loads(archive.read(plists[0])), receipt["build"])
         app_relative = PurePosixPath(plists[0]).parent
     ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="verified-", dir=ROOT) as temporary:
@@ -355,7 +386,8 @@ def verify_ipa():
     if sha256_file(ipa) != digest:
         raise ReleaseError("The exported IPA changed during verification")
     record(ipa_verified=True, ipa_sha256=digest, ipa_path=str(ipa),
-           profile_verified=True, profile_expires_at=expiry)
+           profile_verified=True, profile_expires_at=expiry,
+           toolchain_verified=True, toolchain=toolchain)
 
 
 def find_build(app, build_number):
@@ -394,6 +426,8 @@ def summary(data):
         output.write(f"## CallWebhook {VERSION} ({data['build']})\n\n"
             f"Source: `{data['source_commit']}`\n\n"
             f"Verified IPA SHA-256: `{data.get('ipa_sha256', 'unverified')}`\n\n"
+            f"Verified SDK: `{data['toolchain']['sdk_name']}`; Xcode: `{data['toolchain']['xcode_version']}` "
+            f"(`{data['toolchain']['xcode_build']}`); minimum iOS: `{data['toolchain']['minimum_ios']}`.\n\n"
             f"Apple build: `{data.get('apple_build_id', 'not confirmed')}`\n\n"
             f"Processing: **{data.get('apple_processing_state', 'not confirmed')}**; "
             f"internal testing: **{data.get('internal_build_state', 'not confirmed')}**; "

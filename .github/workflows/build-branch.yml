@@ -54,9 +54,11 @@ jobs:
           name: mac-build-log-${{ github.sha }}
           path: ${{ runner.temp }}/mac-build.log
   ios:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27.2 and verify the iPhone SDK
+        run: bash scripts/select_ios_toolchain.sh
       - name: Test call outcomes and mailbox connection
         run: |
           swiftc CallWebhook/LocalCallHistory.swift CallWebhook/MissedCallState.swift CallWebhook/SIPCallTermination.swift tests/SIPCallTerminationTests.swift -o "$RUNNER_TEMP/call-tests"

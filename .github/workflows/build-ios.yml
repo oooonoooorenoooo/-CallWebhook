@@ -67,9 +67,11 @@ jobs:
         run: docker run --rm --platform linux/arm64 --entrypoint python callwebhook-push-relay:ci -c "import push_relay.server; import run; print('ARM64 relay dependencies ready')"
 
   development:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27.2 and verify the iPhone SDK
+        run: bash scripts/select_ios_toolchain.sh
       - name: Test outgoing Easybell and FRITZ routing
         run: |
           swiftc CallWebhook/OutgoingDialplan.swift tests/OutgoingDialplanTests.swift -o "$RUNNER_TEMP/outgoing-dialplan-tests"
@@ -205,12 +207,14 @@ jobs:
   testflight:
     if: ${{ needs.changes.outputs.publish_app == 'true' && !contains(github.event.head_commit.message, '[skip testflight]') }}
     needs: [changes, development, push-relay-addon, cleanup-addon]
-    runs-on: macos-26
+    runs-on: xcode-27
     concurrency:
       group: callwebhook-testflight-main
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27.2 and verify the iPhone SDK
+        run: bash scripts/select_ios_toolchain.sh
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Install distribution signing

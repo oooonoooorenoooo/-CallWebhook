@@ -10,9 +10,11 @@ concurrency:
   cancel-in-progress: true
 jobs:
   ios:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27.2 and verify the iPhone SDK
+        run: bash scripts/select_ios_toolchain.sh
       - name: Test mailbox transport, queue and transcript persistence
         run: |
           swiftc CallWebhook/MailboxTranscription.swift CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-connection-tests"

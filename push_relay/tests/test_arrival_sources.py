@@ -167,6 +167,127 @@ class ArrivalServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result['aibt'], result['aibt_source']), (AIBT, 'FR24'))
         self.stats.assert_not_awaited()
 
+    async def test_delayed_aibt_still_accepts_its_original_recent_ground_observation(self):
+        f = flight(aibt=AIBT, aibt_source='FlightStats')
+        for age, observed in ((75, AIBT), (170, AIBT+60)):
+            with self.subTest(age=age):
+                self.sources.cache.clear()
+                self.sources.history.clear()
+                at = AIBT+age
+                raw = adsb(now=at, seen_pos=at-observed)
+                # The proof is the original sample clock, not the query time.
+                self.assertEqual(select_position(adsb_samples(raw, f, at), f)['timestamp'], observed)
+                http = HTTP([raw])
+                result = await self.sources.lookup(http, f, at)
+                self.assertEqual(result['_arrival_sources_status'], 'complete')
+                self.assertEqual(result['aibt_position']['timestamp'], observed)
+                self.assertEqual(len(http.calls), 1)
+        self.sources.cache.clear(); self.sources.history.clear()
+        http = HTTP()
+        result = await self.sources.lookup(http, f, AIBT+181)
+        self.assertEqual(http.calls, [], 'The extended live fetch window must still be bounded')
+        self.assertNotIn('aibt_position', result)
+        self.stats.assert_not_awaited()
+
+    async def test_late_query_cannot_relabel_a_new_position_as_the_aibt_coordinate(self):
+        at = AIBT+75
+        http = HTTP([adsb(now=at, seen_pos=0), opensky(observed=at)])
+        result = await self.sources.lookup(http, flight(aibt=AIBT, aibt_source='FlightStats'), at)
+        self.assertNotIn('aibt_position', result)
+        self.assertEqual(result['_arrival_sources_status'], 'aibt_only')
+        self.assertTrue(all(point['timestamp'] == at for point in result['_arrival_position_samples']))
+
+    async def test_ground_observation_starts_while_actual_time_request_is_still_blocked(self):
+        entered, release, observed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def blocked(*args):
+            entered.set()
+            await release.wait()
+            return {'aibt': AIBT, 'aibt_source': 'FlightStats'}
+        self.stats.side_effect = blocked
+        class ObservedResponse(Response):
+            async def json(self):
+                observed.set()
+                return await super().json()
+        task = asyncio.create_task(self.sources.lookup(HTTP([ObservedResponse(adsb())]), flight(), NOW))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(observed.wait(), 1)
+            self.assertFalse(task.done(), 'An observed position alone is not an actual gate arrival')
+            release.set()
+            result = await task
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(result['aibt_position']['timestamp'], AIBT)
+        self.assertEqual(result['aibt_source'], 'FlightStats')
+
+    async def test_status_timeout_preserves_ground_sample_for_a_later_actual_time_and_restart(self):
+        cancelled = asyncio.Event()
+        async def blocked(*args):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.stats.side_effect = blocked
+        pending_before = asyncio.all_tasks()
+        with patch('push_relay.arrival_sources.REQUEST_TIMEOUT', 1), patch('push_relay.arrival_sources.LOOKUP_TIMEOUT', 0.04):
+            first = await self.sources.lookup(HTTP([adsb()]), flight(), NOW)
+        self.assertTrue(cancelled.is_set())
+        self.assertNotIn('aibt', first)
+        self.assertNotIn('aibt_position', first)
+        self.assertEqual(first['_arrival_position_samples'][0]['timestamp'], AIBT)
+        self.assertEqual(self.sources.tasks, {})
+        self.assertFalse([task for task in asyncio.all_tasks()-pending_before if not task.done()])
+        self.stats.side_effect = None
+        self.stats.return_value = {'aibt': AIBT, 'aibt_source': 'FlightStats'}
+        restarted = ArrivalSources(self.provider, aware_lookup=self.aware, schedule_lookup=self.stats)
+        self.addAsyncCleanup(restarted.close)
+        saved = json.loads(json.dumps(dict(flight(), **first)))
+        result = await restarted.lookup(HTTP(), saved, NOW+240)
+        self.assertEqual(result['aibt_position']['timestamp'], AIBT)
+        self.assertEqual(result['_arrival_sources_status'], 'complete')
+
+    async def test_slow_status_and_adsb_cannot_starve_available_opensky_evidence(self):
+        async def blocked(*args):
+            await asyncio.Event().wait()
+        class StalledResponse(Response):
+            async def json(self):
+                await asyncio.Event().wait()
+        self.provider.credentials = {'FLIGHTAWARE_API_KEY': 'fixture-private-key'}
+        self.aware.side_effect = blocked
+        self.stats.side_effect = blocked
+        http = HTTP([StalledResponse({}), opensky()])
+        pending_before = asyncio.all_tasks()
+        with patch('push_relay.arrival_sources.REQUEST_TIMEOUT', 0.03), \
+             patch('push_relay.arrival_sources.LOOKUP_TIMEOUT', 0.09), \
+             patch('push_relay.arrival_sources.POSITION_FALLBACK_DELAY', 0.001):
+            result = await self.sources.lookup(http, flight(), NOW)
+        self.assertEqual(len(http.calls), 2)
+        self.assertIn('opensky-network.org/api/states/all', http.calls[1][1])
+        self.assertEqual(result['_arrival_position_samples'][0]['source'], 'opensky')
+        self.assertEqual(result['_arrival_position_samples'][0]['timestamp'], AIBT)
+        self.assertNotIn('aibt', result)
+        self.assertEqual(self.sources.tasks, {})
+        self.assertFalse([task for task in asyncio.all_tasks()-pending_before if not task.done()])
+
+    async def test_complete_coordinate_does_not_wait_for_unneeded_flightaware_identity(self):
+        cancelled = asyncio.Event()
+        async def blocked(*args):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.provider.credentials = {'FLIGHTAWARE_API_KEY': 'fixture-private-key'}
+        self.aware.side_effect = blocked
+        with patch('push_relay.arrival_sources.REQUEST_TIMEOUT', 1), patch('push_relay.arrival_sources.LOOKUP_TIMEOUT', 0.04):
+            result = await self.sources.lookup(HTTP([adsb()]), flight(aibt=AIBT, aibt_source='FlightStats'), NOW)
+        self.assertEqual(result['aibt_position']['timestamp'], AIBT)
+        self.assertEqual(result['aibt_source'], 'FlightStats')
+        self.assertTrue(cancelled.is_set())
+        self.stats.assert_not_awaited()
+
     async def test_actual_arrival_before_scheduled_reference_is_eligible(self):
         self.stats.return_value = {'aibt': AIBT, 'aibt_source': 'FlightStats'}
         result = await self.sources.lookup(HTTP([adsb()]), flight(reference=NOW+900), NOW)
@@ -197,15 +318,15 @@ class ArrivalServiceTests(unittest.IsolatedAsyncioTestCase):
                        {'reference': timestamp('2026-11-19T16:00:00Z')}, {'icao24': '3c6425'}):
             with self.subTest(change=change):
                 f = flight(aibt=AIBT, aibt_source='FlightStats', _arrival_position_samples=stored, **change)
-                # AIBT now older than a minute: no live query and no configured historical API.
-                result = await self.sources.lookup(HTTP(), f, NOW+120)
+                # The bounded live observation window has elapsed; no historical API is configured.
+                result = await self.sources.lookup(HTTP(), f, NOW+300)
                 self.assertNotIn('aibt_position', result)
 
     async def test_explicit_leg_ids_and_request_generations_do_not_share_tasks_or_samples(self):
         f = flight(fr24ID='opaque-actual-leg-A')
         stored = adsb_samples(adsb(), f, NOW)
         other = flight(fr24ID='opaque-actual-leg-B', aibt=AIBT, _arrival_position_samples=stored)
-        result = await self.sources.lookup(HTTP(), other, NOW+120)
+        result = await self.sources.lookup(HTTP(), other, NOW+300)
         self.assertNotIn('aibt_position', result)
         self.assertNotEqual(self.sources._key(f, {}), self.sources._key(other, {}))
         self.assertNotEqual(self.sources._key(f, {}), self.sources._key(dict(f, _arrival_generation=NOW), {}))

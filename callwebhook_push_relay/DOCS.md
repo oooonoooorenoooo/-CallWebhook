@@ -31,7 +31,16 @@ Solange bei einer aktuellen Ankunft noch die Koordinate fehlt, bleibt der
 15-Sekunden-Ankunftsabgleich aktiv; die langsamere historische Nachprüfung
 verzögert diesen Durchlauf nicht.
 
-CallWebhook Push-Dienst auf **1.2.37** aktualisieren und die dazugehörige
+Ab **1.2.38** beginnt die Bodenpositionsabfrage unabhängig von den ergänzenden
+Zeitabfragen. Bereits beobachtete Bodenpunkte werden auch dann gespeichert,
+wenn eine andere Quelle nicht rechtzeitig antwortet. Ein aktueller Abruf ist
+bis 180 Sekunden nach AIBT zulässig, sofern die Antwort einen weiterhin
+zulässigen ursprünglichen Messpunkt enthält. Diese Abrufgrenze verlängert
+weder den 15-Sekunden-Takt noch das erlaubte 60-Sekunden-Messzeitfenster zur
+AIBT. Die zugehörige App prüft beide Positionsquellen auf Ankunftseignung
+und bewahrt eigene Bodenbelege beim Verlaufsabgleich.
+
+CallWebhook Push-Dienst auf **1.2.38** aktualisieren und die dazugehörige
 ComatAlarm-App installieren. Für die erweiterten Diagnoseexporte zusätzlich
 die aktualisierte vollständige Dashboard-Konfiguration übernehmen; ein
 Add-on-Update ersetzt den gespeicherten Dashboard-Inhalt nicht.

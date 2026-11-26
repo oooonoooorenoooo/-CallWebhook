@@ -1,3 +1,10 @@
+## 1.2.38
+
+- Startet die Beobachtung der vorhandenen Bodenpositionsquellen unabhängig von langsamen FlightAware-/FlightStats-Zeitabfragen. Bereits empfangene Bodenpunkte bleiben auch bei einer Zeitüberschreitung erhalten; eine langsame erste Positionsquelle darf die zweite nicht aus dem gemeinsamen Durchlauf verdrängen.
+- Bewertet eine AIBT-Koordinate anhand ihrer ursprünglichen Messzeit. Der kurze aktuelle Abruf bleibt bis zu 180 Sekunden nach AIBT möglich, weil eine Antwort noch einen bis zu 120 Sekunden alten, zeitlich passenden Messpunkt enthalten kann. Das ist keine Wartezeit: Der schnelle 15-Sekunden-Abgleich bleibt aktiv, der Punkt selbst muss unverändert innerhalb von 60 Sekunden zur AIBT und nach der Landung liegen.
+- Übernimmt bekannte ICAO24-Kennung und Rufzeichen bei der Übergabe zwischen App und Pi mit Formatprüfung. Diese bereits vorhandenen Angaben bleiben für die Zuordnung alternativer Positionsantworten erhalten.
+- Die zugehörige iPhone-Version prüft die Eignung eines Ankunftspunkts vor der Quellenwahl und erhält bereits gespeicherte Bodenbelege beim Verlaufsabgleich. Die bestehenden Regeln für FR24-Abbruch, tatsächliche AIBT, lokalen Standplatzabgleich und einmaligen Push-Versand bleiben bestehen.
+
 ## 1.2.37
 
 - Eine bereits übernommene AIBT ohne Koordinate bleibt im schnellen 15-Sekunden-Ankunftsabgleich. Die langsamere historische Nachprüfung bremst diesen aktiven Durchlauf nicht mehr; auch die Diagnose zeigt den tatsächlich nächsten schnellen Versuch.

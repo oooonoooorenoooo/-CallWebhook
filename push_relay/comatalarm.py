@@ -27,7 +27,7 @@ from aiohttp import ClientSession, ClientTimeout, ClientError, web
 
 BUNDLE_ID = "de.comatalarm.app.ios.U98PKCA4W7"
 FLAGS = ("alarmTakeoff", "alarmPrelanding", "alarmLanded", "alarmGate", "alarmParking", "alarmCancelled", "alarmDiverted")
-FIELDS = ("id", "number", "reference", "created_at", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number", "aibt_source", "aibt_position", "fr24_arrival_exhausted")
+FIELDS = ("id", "number", "reference", "created_at", "fr24ID", "origin", "destination", "atd", "ata", "aibt", "gate", "registration", "cancelled", "diverted", "packets", "stand", "repair_arrival", "track_outbound", "outbound_number", "aibt_source", "aibt_position", "fr24_arrival_exhausted", "icao24", "callsign")
 ARRIVAL_FIELDS = ('aibt_source', 'aibt_position', 'fr24_arrival_exhausted',
                   '_arrival_sources_checked_at', '_arrival_sources_status', '_arrival_position_samples',
                   'flightawareID', 'flightstatsID', 'icao24', 'callsign')
@@ -1268,6 +1268,22 @@ class ComatAlarm:
             for field in ("fr24ID", "origin", "destination", "gate", "registration", "packets", "stand", "outbound_number"):
                 if field in row and (not isinstance(row[field], str) or len(row[field]) > 64):
                     raise ValueError("Invalid flight field")
+            for field in ('icao24', 'callsign'):
+                if field not in row:
+                    continue
+                raw = row[field]
+                if not isinstance(raw, str) or len(raw) > 32:
+                    raise ValueError('Invalid aircraft identity')
+                if field == 'callsign' and not re.fullmatch(r'[A-Za-z0-9 ]*', raw):
+                    raise ValueError('Invalid aircraft identity')
+                value = raw.strip(' ').lower() if field == 'icao24' else raw.replace(' ', '').upper()
+                pattern = r'[a-f0-9]{6}' if field == 'icao24' else r'[A-Z0-9]{1,16}'
+                if value and not re.fullmatch(pattern, value):
+                    raise ValueError('Invalid aircraft identity')
+                if value:
+                    row[field] = value
+                else:
+                    row.pop(field)  # Sparse reposts cannot erase known Pi identity.
             for field in ("cancelled", "diverted", "repair_arrival", "track_outbound"):
                 if field in row and not isinstance(row[field], bool):
                     raise ValueError("Invalid flag")

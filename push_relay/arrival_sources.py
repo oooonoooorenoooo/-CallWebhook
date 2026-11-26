@@ -27,6 +27,8 @@ DAILY_LIMITS = {'flightaware': 240, 'flightstats': 480, 'adsb': 400, 'opensky': 
 REQUEST_TIMEOUT = 4
 LOOKUP_TIMEOUT = 12
 POSITION_WINDOW = 60
+LIVE_SAMPLE_MAX_AGE = 120
+POSITION_FALLBACK_DELAY = 0.1
 LIVE_WINDOW = 25 * 60
 HISTORY_WINDOW = 24 * 3600
 CREDENTIAL_KEYS = ('FLIGHTAWARE_API_KEY', 'FLIGHTSTATS_APP_ID', 'FLIGHTSTATS_APP_KEY',
@@ -173,10 +175,10 @@ def adsb_samples(root, flight, now):
             continue
         age = _number(row.get('seen_pos'))
         speed = _number(row.get('gs'))
-        if age is None or not 0 <= age <= 120 or speed is None:
+        if age is None or not 0 <= age <= LIVE_SAMPLE_MAX_AGE or speed is None:
             continue
         observed = received-age
-        if not now-120 <= observed <= now+5:
+        if not now-LIVE_SAMPLE_MAX_AGE <= observed <= now+5:
             continue
         point = _sample(flight, row.get('lat'), row.get('lon'), observed,
                         row.get('alt_baro') == 'ground' or row.get('ground') is True,
@@ -427,71 +429,150 @@ class ArrivalSources:
                 if samples:
                     result['_arrival_position_samples'] = samples
                 return result
+        jobs = {}
+        has_oauth = bool(credentials.get('OPENSKY_CLIENT_ID') and credentials.get('OPENSKY_CLIENT_SECRET'))
+
+        def resolved():
+            return dict(flight, **result)
+
+        def live_eligible(snapshot):
+            aibt, ata = _stamp(snapshot.get('aibt')), _stamp(snapshot.get('ata'))
+            return bool((aibt or ata) and 0 <= now-(aibt or ata) < LIVE_WINDOW
+                        and (not aibt or now-aibt <= POSITION_WINDOW+LIVE_SAMPLE_MAX_AGE))
+
+        def remember(observations):
+            nonlocal samples
+            # Persist each completed observation immediately. A subsequent
+            # status-source timeout must not discard this original GPS time.
+            samples = self._remember(resolved(), key, samples+observations, observed_now())
+
+        async def actuals():
+            nonlocal paused
+            ttl = 15 if (_stamp(flight.get('ata')) and 0 <= now-_stamp(flight['ata']) < LIVE_WINDOW) else 300
+            if credentials.get('FLIGHTAWARE_API_KEY') and (not existing or not result.get('flightawareID')):
+                aware = await self._cached('flightaware', key, credentials, now, ttl,
+                    lambda: self.aware_lookup(session, flight, credentials, self.provider.cooldown, now))
+                paused |= aware is None
+                self._merge_actual(result, flight, aware, now)
+            if not result.get('aibt'):
+                stats = await self._cached('flightstats', key, credentials, now, ttl,
+                    lambda: self.schedule_lookup(session, flight, credentials, self.provider.cooldown, now))
+                paused |= stats is None
+                self._merge_actual(result, flight, stats, now)
+
+        async def observe_adsb(snapshot, kind, identity):
+            nonlocal paused
+            if samples and not existing and not jobs['actuals'].done():
+                # A saved point may already solve the arriving actual time.
+                # Allow an immediately cached status to finish, without giving
+                # a slow status request control of fresh position collection.
+                await asyncio.wait({jobs['actuals']}, timeout=POSITION_FALLBACK_DELAY)
+            if select_position(samples, resolved()) or not live_eligible(resolved()):
+                return
+            root = await self._cached('adsb', (key, kind, identity), credentials, now, 15,
+                lambda: self._get(session, 'https://api.adsb.lol/v2/'+kind+'/'+quote(identity, safe=''), 'adsb', now))
+            paused |= root is None
+            observed = adsb_samples(root, snapshot, observed_now())
+            if observed and observed[0].get('icao24'):
+                result['icao24'] = observed[0]['icao24']
+            remember(observed)
+
+        async def observe_opensky(snapshot, historical, aibt, adsb_job):
+            nonlocal paused
+            if adsb_job is not None and not adsb_job.done():
+                # A fast ADSB result avoids a redundant request. A slow result
+                # cannot spend OpenSky's own authentication/request window.
+                await asyncio.wait({adsb_job}, timeout=POSITION_FALLBACK_DELAY)
+            current_flight = resolved()
+            if select_position(samples, current_flight):
+                return
+            if not historical and not live_eligible(current_flight):
+                return
+            if not _stamp(current_flight.get('aibt')) and any(
+                    observed_now()-POSITION_WINDOW <= point['timestamp'] <= observed_now()+5 for point in samples):
+                return  # A fresh ground sample is already retained for the pending actual time.
+            access = await self._access_token(session, credentials, now)
+            if has_oauth and not access:
+                paused = True
+                return
+            target = aibt if historical else observed_now()
+            params = {'icao24': _airframe(snapshot), 'lamin': '52.30', 'lomin': '13.40', 'lamax': '52.45', 'lomax': '13.65'}
+            if historical:
+                params['time'] = int(aibt)
+            headers = {'Accept': 'application/json'}
+            if access:
+                headers['Authorization'] = 'Bearer '+access
+            root = await self._cached('opensky', (key, int(aibt) if historical else 'live'), credentials, now,
+                300 if historical else 15,
+                lambda: self._get(session, 'https://opensky-network.org/api/states/all', 'opensky', now, params=params, headers=headers))
+            paused |= root is None
+            current = observed_now()
+            remember(opensky_samples(root, snapshot, current, target if historical else current))
+
+        async def observe_track(snapshot, aibt, identifier):
+            nonlocal paused
+            track = await self._cached('flightaware', (key, identifier, 'track', aibt), credentials, now, 300,
+                lambda: self._get(session, 'https://aeroapi.flightaware.com/aeroapi/flights/'+quote(identifier, safe='')+'/track',
+                    'flightaware', now, params={'include_estimated_positions': 'false'},
+                    headers={'x-apikey': credentials['FLIGHTAWARE_API_KEY']}))
+            paused |= track is None
+            remember(aware_track_samples(track, snapshot, observed_now(), identifier))
+
+        def start_positions():
+            snapshot = resolved()
+            if select_position(samples, snapshot):
+                return
+            aibt, ata = _stamp(snapshot.get('aibt')), _stamp(snapshot.get('ata'))
+            # The observation's timestamp determines whether it belongs to
+            # AIBT. A response fetched >60s later may still carry that exact
+            # position within the provider's bounded seen_pos allowance.
+            live = live_eligible(snapshot)
+            known_hex = _airframe(snapshot)
+            registration = flight_schedule.registration_key(snapshot.get('registration'))
+            if live and (known_hex or registration) and 'adsb' not in jobs:
+                kind, identity = ('hex', known_hex) if known_hex else ('reg', registration)
+                jobs['adsb'] = asyncio.create_task(observe_adsb(snapshot, kind, identity))
+            # Only authenticated OpenSky supports historical requests. An
+            # anonymous response always retains its real current position time.
+            historical = bool(has_oauth and aibt and POSITION_WINDOW < now-aibt <= 3600)
+            mode = ('opensky', int(aibt) if historical else 'live')
+            if known_hex and (live or historical) and mode not in jobs:
+                jobs[mode] = asyncio.create_task(observe_opensky(snapshot, historical, aibt, jobs.get('adsb')))
+
         try:
             async with asyncio.timeout(LOOKUP_TIMEOUT):
-                ttl = 15 if (_stamp(flight.get('ata')) and 0 <= now-_stamp(flight['ata']) < LIVE_WINDOW) else 300
-                if credentials.get('FLIGHTAWARE_API_KEY') and (not existing or not result.get('flightawareID')):
-                    aware = await self._cached('flightaware', key, credentials, now, ttl,
-                        lambda: self.aware_lookup(session, flight, credentials, self.provider.cooldown, now))
-                    paused |= aware is None
-                    self._merge_actual(result, flight, aware, now)
-                if not result.get('aibt'):
-                    stats = await self._cached('flightstats', key, credentials, now, ttl,
-                        lambda: self.schedule_lookup(session, flight, credentials, self.provider.cooldown, now))
-                    paused |= stats is None
-                    self._merge_actual(result, flight, stats, now)
-                resolved = dict(flight, **result)
-                point = select_position(samples, resolved)
-                aibt, ata = _stamp(result.get('aibt')), _stamp(flight.get('ata'))
-                live = (not aibt or now-aibt <= POSITION_WINDOW) and (aibt or ata) and 0 <= now-(aibt or ata) < LIVE_WINDOW
-                if not point and live and (_airframe(resolved) or flight_schedule.registration_key(resolved.get('registration'))):
-                    known_hex = _airframe(resolved)
-                    kind, identity = ('hex', known_hex) if known_hex else ('reg', flight_schedule.registration_key(resolved.get('registration')))
-                    root = await self._cached('adsb', (key, kind, identity), credentials, now, 15,
-                        lambda: self._get(session, 'https://api.adsb.lol/v2/'+kind+'/'+quote(identity, safe=''), 'adsb', now))
-                    paused |= root is None
-                    observed = adsb_samples(root, resolved, observed_now())
-                    if observed and observed[0].get('icao24'):
-                        result['icao24'] = observed[0]['icao24']
-                        resolved['icao24'] = result['icao24']
-                    samples = self._remember(resolved, key, samples+observed, observed_now())
-                    point = select_position(samples, resolved)
-                # Authenticated OpenSky supports the preceding hour; anonymous
-                # requests ignore time. Never use it for an older occurrence.
-                historical = bool(aibt and POSITION_WINDOW < now-aibt <= 3600)
-                has_oauth = bool(credentials.get('OPENSKY_CLIENT_ID') and credentials.get('OPENSKY_CLIENT_SECRET'))
-                if not point and _airframe(resolved) and (live or (historical and has_oauth)):
-                    access = await self._access_token(session, credentials, now)
-                    if not has_oauth or access:
-                        target = aibt if historical else observed_now()
-                        params = {'icao24': _airframe(resolved), 'lamin': '52.30', 'lomin': '13.40', 'lamax': '52.45', 'lomax': '13.65'}
-                        if historical:
-                            params['time'] = int(aibt)
-                        headers = {'Accept': 'application/json'}
-                        if access:
-                            headers['Authorization'] = 'Bearer '+access
-                        root = await self._cached('opensky', (key, int(aibt) if historical else 'live'), credentials, now, 300 if historical else 15,
-                            lambda: self._get(session, 'https://opensky-network.org/api/states/all', 'opensky', now, params=params, headers=headers))
-                        paused |= root is None
-                        current = observed_now()
-                        samples = self._remember(resolved, key, samples+opensky_samples(root, resolved, current,
-                            target if historical else current), current)
-                        point = select_position(samples, resolved)
-                    else:
-                        paused = True
-                identifier = flight_schedule._provider_id(result.get('flightawareID'))
-                if not point and aibt and identifier and credentials.get('FLIGHTAWARE_API_KEY') and now-aibt <= HISTORY_WINDOW:
-                    track = await self._cached('flightaware', (key, identifier, 'track', aibt), credentials, now, 300,
-                        lambda: self._get(session, 'https://aeroapi.flightaware.com/aeroapi/flights/'+quote(identifier, safe='')+'/track', 'flightaware', now,
-                                          params={'include_estimated_positions': 'false'}, headers={'x-apikey': credentials['FLIGHTAWARE_API_KEY']}))
-                    paused |= track is None
-                    current = observed_now()
-                    samples = self._remember(resolved, key, samples+aware_track_samples(track, resolved, current, identifier), current)
-                    point = select_position(samples, resolved)
-                if point:
-                    result['aibt_position'] = point
+                jobs['actuals'] = asyncio.create_task(actuals())
+                start_positions()
+                while True:
+                    snapshot = resolved()
+                    if select_position(samples, snapshot):
+                        break
+                    pending = [task for task in jobs.values() if not task.done()]
+                    if not pending:
+                        aibt = _stamp(snapshot.get('aibt'))
+                        identifier = flight_schedule._provider_id(snapshot.get('flightawareID'))
+                        if ('track' not in jobs and aibt and identifier and credentials.get('FLIGHTAWARE_API_KEY')
+                                and 0 <= now-aibt <= HISTORY_WINDOW):
+                            jobs['track'] = asyncio.create_task(observe_track(snapshot, aibt, identifier))
+                            pending = [jobs['track']]
+                        else:
+                            break
+                    done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        task.result()
+                    start_positions()
         except asyncio.TimeoutError:
             paused = True
+        finally:
+            for task in jobs.values():
+                if not task.done():
+                    task.cancel()
+            if jobs:
+                await asyncio.gather(*jobs.values(), return_exceptions=True)
+        remember([])
+        point = select_position(samples, resolved())
+        if point:
+            result['aibt_position'] = point
         if samples:
             result['_arrival_position_samples'] = samples
         paused |= any(self.provider.cooldown.get(name, 0) > now for name in ('flightaware', 'flightstats', 'adsb', 'opensky'))

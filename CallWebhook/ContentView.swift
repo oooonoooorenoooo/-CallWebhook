@@ -4071,6 +4071,15 @@ private struct DialPadView: View {
 private struct ExtrasView: View {
     let onRestartSetup: () -> Void
     @EnvironmentObject var monitor: CallMonitor
+    private var appVersion: String { appInfoValue("CFBundleShortVersionString") }
+    private var appBuild: String { appInfoValue("CFBundleVersion") }
+
+    private func appInfoValue(_ key: String) -> String {
+        let value = (Bundle.main.object(forInfoDictionaryKey: key) as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.flatMap { $0.isEmpty ? nil : $0 } ?? "Nicht verfügbar"
+    }
+
     private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, sipLine2Prefix, sipLine3Prefix, haToken, externalListName, externalListURL, blacklist, whitelist }
     @FocusState private var focusedInputField: InputField?
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -4111,6 +4120,18 @@ private struct ExtrasView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("App-Informationen") {
+                    LabeledContent("Version", value: appVersion)
+                        .textSelection(.enabled)
+                    LabeledContent("Buildnummer", value: appBuild)
+                        .textSelection(.enabled)
+                    Button {
+                        UIPasteboard.general.string = "CallWebhook \(appVersion) (Build \(appBuild))"
+                    } label: {
+                        Label("Versionsangaben kopieren", systemImage: "doc.on.doc")
+                    }
+                }
+
                 Section {
                     Button {
                         focusedInputField = nil

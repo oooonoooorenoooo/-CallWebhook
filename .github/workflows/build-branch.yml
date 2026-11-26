@@ -61,7 +61,7 @@ jobs:
         run: |
           swiftc CallWebhook/LocalCallHistory.swift CallWebhook/MissedCallState.swift CallWebhook/SIPCallTermination.swift tests/SIPCallTerminationTests.swift -o "$RUNNER_TEMP/call-tests"
           "$RUNNER_TEMP/call-tests"
-          swiftc CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-tests"
+          swiftc CallWebhook/MailboxTranscription.swift CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-tests"
           "$RUNNER_TEMP/mailbox-tests"
       - name: Generate iPhone project
         run: |

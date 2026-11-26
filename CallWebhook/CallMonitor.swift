@@ -5,6 +5,8 @@ import Combine
 @MainActor
 final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     @Published private(set) var active = false
+    /// Includes ringing and outgoing setup, independently of the HA trigger setting.
+    @Published private(set) var callInProgress = false
     @Published private(set) var lastEvent = "App gestartet"
     @Published private(set) var log: [String] = []
     @Published private(set) var haState = "Token fehlt"
@@ -82,6 +84,7 @@ final class CallMonitor: NSObject, ObservableObject, CXCallObserverDelegate {
     }
 
     private func evaluateAndSend(force: Bool = false, call: CXCall? = nil) {
+        callInProgress = observer.calls.contains { !$0.hasEnded }
         let nowActive = haTriggerMode == "ringing" ? observer.calls.contains { !$0.hasEnded } : observer.calls.contains { !$0.hasEnded && $0.hasConnected }
         guard force || nowActive != active else { return }
         active = nowActive

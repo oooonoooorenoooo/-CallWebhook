@@ -127,7 +127,7 @@ jobs:
           "$RUNNER_TEMP/fritz-tam-tests"
       - name: Test mailbox connection and SIP number handling
         run: |
-          swiftc CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-connection-tests"
+          swiftc CallWebhook/MailboxTranscription.swift CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-connection-tests"
           "$RUNNER_TEMP/mailbox-connection-tests"
           swiftc CallWebhook/SIPDialNumber.swift tests/SIPDialNumberTests.swift -o "$RUNNER_TEMP/sip-dial-number-tests"
           "$RUNNER_TEMP/sip-dial-number-tests"

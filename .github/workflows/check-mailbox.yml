@@ -1,0 +1,36 @@
+name: Check Festnetz mailbox transcription
+on:
+  push:
+    branches: [codex/festnetz-mailbox-transcription]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mailbox-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ios:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 27.2 and verify the iPhone SDK
+        run: bash scripts/select_ios_toolchain.sh
+      - name: Test mailbox transport, queue and transcript persistence
+        run: |
+          swiftc CallWebhook/MailboxTranscription.swift CallWebhook/MailboxModel.swift tests/MailboxConnectionTests.swift -o "$RUNNER_TEMP/mailbox-connection-tests"
+          "$RUNNER_TEMP/mailbox-connection-tests"
+          swiftc CallWebhook/MailboxTranscription.swift CallWebhook/MailboxModel.swift tests/MailboxTranscriptionTests.swift -o "$RUNNER_TEMP/mailbox-transcription-tests"
+          "$RUNNER_TEMP/mailbox-transcription-tests"
+      - name: Generate iPhone project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Compile iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild -project CallWebhook.xcodeproj -scheme CallWebhook -configuration Debug -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/mailbox-build.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mailbox-build-log-${{ github.sha }}
+          path: ${{ runner.temp }}/mailbox-build.log

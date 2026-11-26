@@ -1,6 +1,36 @@
 # -CallWebhook
     CallWebhook
 
+## Festnetz voicemail transcription on iPhone
+
+The Mailbox tab transcribes the FRITZ!Box answering-machine recordings fetched
+through the existing authenticated Home Assistant connection. It refreshes while
+visible in the foreground every 30 seconds and resumes immediately after returning
+to the tab or finishing a call. New messages are transcribed serially. The list
+shows a text preview; opening a message shows the selectable full text alongside
+audio playback. Failed recognition can be retried from that view.
+
+This uses the iOS 26 `SpeechTranscriber` / `SpeechAnalyzer` on-device modules with
+German (`de-DE`) support. The first transcription may download Apple's language
+model; recordings are not sent to a transcription server. Unsupported devices or
+unavailable language models show an error while keeping playback available. The
+entire audio file is analyzed and finalized, including recordings over one minute.
+The implementation neither opens the microphone nor changes the call audio session.
+Transcription is cancelled and queued again when a call starts or the tab leaves
+the foreground. There is no claim of background transcription while the app sleeps.
+
+Completed transcripts are cached on the device with iOS file protection and are
+excluded from backup. The key includes the HA address and message metadata;
+archiving and read-state changes preserve the text. Deleting a message removes its
+cached transcript, and cancelled/stale jobs cannot save a late result. Temporary
+recognition and playback files are removed when their operation/view ends.
+
+`check-mailbox.yml` runs the queue/transport/cache regression tests and an unsigned
+iPhone compile. Physical FRITZ!Box recordings and the device's speech assets still
+require a real-device check. This branch does not alter audio routing or publish
+a TestFlight build; the newer audio fix reported in a separate device test has not
+been located in the reachable repository refs.
+
 ## Incoming calls and VoIP push
 
 Incoming FRITZ!Box/easybell calls reach Asterisk, which invokes an authenticated,

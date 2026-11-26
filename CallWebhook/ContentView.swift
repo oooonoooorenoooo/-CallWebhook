@@ -160,7 +160,7 @@ struct ContentView: View {
                 .badge(callHistory.unreadMissedCallCount)
                 .tag(1)
 
-            MailboxView(dialer: dialer)
+            MailboxView(dialer: dialer, isSelected: selectedTab == 2)
                 .tabItem { Label("Mailbox", systemImage: "recordingtape") }
                 .tag(2)
 
@@ -3437,7 +3437,11 @@ private struct NativeContactView: UIViewControllerRepresentable {
 
 private struct MailboxView: View {
     @ObservedObject var dialer: DialerModel
-    @StateObject private var mailbox = MailboxModel()
+    let isSelected: Bool
+    @StateObject private var mailbox = MailboxModel(transcriber: VoicemailTranscriber())
+    @ObservedObject private var sip = SIPService.shared
+    @EnvironmentObject private var monitor: CallMonitor
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("mailboxNumber") private var mailboxNumber = ""
     @State private var playingMessage: MailboxMessage?
     @State private var isSelectingMailbox = false
@@ -3497,6 +3501,12 @@ private struct MailboxView: View {
                                     Text(message.date)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    if let transcription = mailbox.transcription(for: message) {
+                                        Text(transcription.preview)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
                                 }
 
                                 Spacer()
@@ -3620,7 +3630,14 @@ private struct MailboxView: View {
             .alert("Mailbox", isPresented: Binding(get: { mailbox.errorMessage != nil && !mailbox.messages.isEmpty }, set: { if !$0 { mailbox.clearError() } })) {
                 Button("OK") { mailbox.clearError() }
             } message: { Text(mailbox.errorMessage ?? "") }
-            .task { await mailbox.refresh() }
+            .task(id: automaticUpdatesActive) {
+                guard automaticUpdatesActive else { return }
+                await mailbox.refreshAutomatically()
+            }
+            .onChange(of: automaticUpdatesActive, initial: true) { _, active in
+                mailbox.setTranscriptionActive(active)
+            }
+            .onDisappear { mailbox.setTranscriptionActive(false) }
             .onChange(of: mailbox.messages.map(\.id)) { _, messageIDs in
                 // Refresh and partial deletions must not leave invisible IDs
                 // selected or inflate the displayed selection count.
@@ -3632,13 +3649,18 @@ private struct MailboxView: View {
                         .navigationTitle(message.name.isEmpty ? message.number : message.name)
                         .navigationBarTitleDisplayMode(.inline)
                 }
-                .presentationDetents([.medium])
+                .presentationDetents([.medium, .large])
             }
         }
     }
 
     private var allMailboxMessagesSelected: Bool {
         !mailbox.messages.isEmpty && mailbox.messages.allSatisfy { selectedMessageIDs.contains($0.id) }
+    }
+
+    private var automaticUpdatesActive: Bool {
+        isSelected && scenePhase == .active && !monitor.callInProgress
+            && !sip.active && !sip.incoming && !dialer.isDialing
     }
 
     private func exportMessages(_ messages: [MailboxMessage]) async {
@@ -3690,11 +3712,13 @@ private struct VoicemailPlayerView: View {
     @ObservedObject var mailbox: MailboxModel
     let message: MailboxMessage
     @State private var player: AVPlayer?
+    @State private var audioFileURL: URL?
     @State private var isLoading = true
     @State private var errorMessage: String?
 
     var body: some View {
-        VStack(spacing: 24) {
+        ScrollView {
+          VStack(spacing: 24) {
             Image(systemName: "waveform.circle.fill")
                 .font(.system(size: 72))
                 .foregroundStyle(.blue)
@@ -3719,26 +3743,72 @@ private struct VoicemailPlayerView: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
+            transcriptSection
+          }
+          .padding()
         }
-        .padding()
         .task {
             do {
                 let data = try await mailbox.loadAudio(for: message)
+                try Task.checkCancellation()
                 let fileURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("callwebhook_\(message.tam)_\(message.index).wav")
-                try data.write(to: fileURL, options: .atomic)
+                    .appendingPathComponent("callwebhook-playback-\(UUID().uuidString).wav")
+                try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+                audioFileURL = fileURL
                 let newPlayer = AVPlayer(url: fileURL)
                 player = newPlayer
                 isLoading = false
                 newPlayer.play()
             } catch {
+                guard !Task.isCancelled else { return }
                 errorMessage = error.localizedDescription
                 isLoading = false
             }
         }
         .onDisappear {
             player?.pause()
+            player = nil
+            if let audioFileURL { try? FileManager.default.removeItem(at: audioFileURL) }
+            audioFileURL = nil
         }
+    }
+
+    @ViewBuilder
+    private var transcriptSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Transkription")
+                .font(.headline)
+            switch mailbox.transcription(for: message) {
+            case .ready(let text):
+                Text(text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                Text("Automatisch transkribiert")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .noSpeech:
+                Text("In dieser Aufnahme wurde keine Sprache erkannt.")
+                    .foregroundStyle(.secondary)
+                Button("Erneut transkribieren") { mailbox.retryTranscription(for: message) }
+            case .failed(let error):
+                Text(error).foregroundStyle(.secondary)
+                Button("Erneut versuchen") { mailbox.retryTranscription(for: message) }
+            case .transcribing:
+                ProgressView("Nachricht wird transkribiert …")
+                Text("Beim ersten Mal wird das deutsche Sprachmodell vorbereitet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .queued:
+                Text("Die Nachricht wird automatisch transkribiert, sobald sie an der Reihe ist.")
+                    .foregroundStyle(.secondary)
+            case nil:
+                Text("Für diese Nachricht ist noch kein Transkript verfügbar.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -4001,6 +4071,15 @@ private struct DialPadView: View {
 private struct ExtrasView: View {
     let onRestartSetup: () -> Void
     @EnvironmentObject var monitor: CallMonitor
+    private var appVersion: String { appInfoValue("CFBundleShortVersionString") }
+    private var appBuild: String { appInfoValue("CFBundleVersion") }
+
+    private func appInfoValue(_ key: String) -> String {
+        let value = (Bundle.main.object(forInfoDictionaryKey: key) as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.flatMap { $0.isEmpty ? nil : $0 } ?? "Nicht verfügbar"
+    }
+
     private enum InputField: Hashable { case primary, secondary, mailbox, sipHost, sipUsername, sipPassword, sipLine2Prefix, sipLine3Prefix, haToken, externalListName, externalListURL, blacklist, whitelist }
     @FocusState private var focusedInputField: InputField?
     @AppStorage("primaryPhoneNumber") private var primaryPhoneNumber = ""
@@ -4041,6 +4120,18 @@ private struct ExtrasView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("App-Informationen") {
+                    LabeledContent("Version", value: appVersion)
+                        .textSelection(.enabled)
+                    LabeledContent("Buildnummer", value: appBuild)
+                        .textSelection(.enabled)
+                    Button {
+                        UIPasteboard.general.string = "CallWebhook \(appVersion) (Build \(appBuild))"
+                    } label: {
+                        Label("Versionsangaben kopieren", systemImage: "doc.on.doc")
+                    }
+                }
+
                 Section {
                     Button {
                         focusedInputField = nil
